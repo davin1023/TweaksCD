@@ -1,17 +1,20 @@
 -- ============================================================================
--- TweaksUI: Cooldowns - Main Cooldowns Module
+-- TUICD Cooldowns Module
 -- Hooks Blizzard's Cooldown Manager viewers and applies custom layouts
 -- ============================================================================
 
 local ADDON_NAME, TUICD = ...
 
--- Create the module namespace
-TUICD.Cooldowns = TUICD.Cooldowns or {}
-local Cooldowns = TUICD.Cooldowns
+-- Ensure module IDs exist
+if not TUICD.MODULE_IDS then return end
+if not TUICD.MODULE_IDS.COOLDOWNS then
+    TUICD.MODULE_IDS.COOLDOWNS = "cooldowns"
+    TUICD.MODULE_NAMES[TUICD.MODULE_IDS.COOLDOWNS] = "Cooldown Trackers"
+    table.insert(TUICD.MODULE_LOAD_ORDER, 1, TUICD.MODULE_IDS.COOLDOWNS)
+end
 
--- Module state
-Cooldowns.loaded = false
-Cooldowns.enabled = false
+-- Create the module
+local Cooldowns = TUICD.ModuleManager:NewModule(TUICD.MODULE_IDS.COOLDOWNS)
 
 -- ============================================================================
 -- MIDNIGHT API WRAPPERS (v2.0.0)
@@ -19,8 +22,8 @@ Cooldowns.enabled = false
 
 -- Use centralized API wrappers - no more feature detection needed
 local SpellAPI = TUICD.SpellAPI
-local AuraAPI = TUICD.AuraAPI
 local DurationAPI = TUICD.DurationAPI
+local SecretAPI = TUICD.SecretAPI
 
 -- ============================================================================
 -- BLIZZARD VIEWER DEFINITIONS
@@ -51,19 +54,19 @@ local TRACKERS = {
 -- ============================================================================
 -- VERY EARLY HIDING: Start hiding trackers at FILE LOAD TIME
 -- This runs before OnEnable and catches trackers the moment they're created
--- Prevents the brief "flash" of default Blizzard layout before TUI:CD takes over
 -- ============================================================================
 do
     local earlyHideFrame = CreateFrame("Frame")
     earlyHideFrame.elapsed = 0
     earlyHideFrame:SetScript("OnUpdate", function(self, elapsed)
-        -- Check if Cooldowns module is initialized
-        if Cooldowns.loaded then
+        -- Check if TUIFrame init is complete
+        if TUICD.TUIFrame and TUICD.TUIFrame.IsInitializationComplete 
+           and TUICD.TUIFrame.IsInitializationComplete() then
             self:SetScript("OnUpdate", nil)
             return
         end
         
-        -- Hide all Blizzard viewers every single frame until we're ready
+        -- Hide all Blizzard viewers every single frame
         for _, tracker in ipairs(TRACKERS) do
             local viewer = _G[tracker.name]
             if viewer and viewer:GetAlpha() > 0 then
@@ -116,7 +119,7 @@ local ASPECT_PRESETS = {
 
 -- Shared tracker defaults (used by all trackers)
 local TRACKER_DEFAULTS = {
-    enabled = true,  -- Always enabled in standalone addon
+    enabled = true,  -- Enable trackers by default so they show when module is enabled
     -- Icon size
     iconSize = 36,              -- Base size (used with aspect ratio)
     iconWidth = nil,            -- Custom width (nil = use iconSize + aspect)
@@ -125,38 +128,46 @@ local TRACKER_DEFAULTS = {
     -- Layout
     columns = 8,
     rows = 0,                   -- 0 = unlimited
-    customLayout = "",          -- Custom pattern like "4,4,2" or "1,0,3" for blank rows (empty = use columns)
     spacingH = 2,               -- Horizontal spacing between icons
     spacingV = 2,               -- Vertical spacing between rows
     growDirection = "RIGHT",    -- PRIMARY: LEFT, RIGHT, UP, or DOWN
     growSecondary = "DOWN",     -- SECONDARY: LEFT, RIGHT, UP, or DOWN
     alignment = "LEFT",         -- LEFT, CENTER, or RIGHT
     reverseOrder = false,
+    -- Custom Grid (overrides standard layout when enabled)
+    -- useCustomGrid intentionally NOT in defaults - nil allows migration from old customLayout
+    customLayout = "",          -- Row pattern like "4,4,2" or "1,0,3" for blank rows
     -- Appearance
     zoom = 0.08,                -- Texture inset (0 = full, higher = more zoom)
     borderAlpha = 1.0,
     iconOpacity = 1.0,          -- Out of combat opacity
     iconOpacityCombat = 1.0,    -- In combat opacity
+    iconEdgeStyle = "sharp",    -- "sharp" (zoomed square), "rounded" (masked corners), "square" (no zoom)
     useMasque = false,          -- Use Masque skinning (requires Masque addon)
-    -- Text
+    -- Behavior
+    showTooltip = true,         -- Show tooltips on mouseover
+    -- Text - Cooldown numbers
     cooldownTextScale = 1.0,    -- Scale of countdown numbers
     cooldownTextOffsetX = 0,    -- Horizontal offset
     cooldownTextOffsetY = 0,    -- Vertical offset
     cooldownTextColorR = 1.0,   -- Red component
-    cooldownTextColorG = 1.0,   -- Green component
-    cooldownTextColorB = 1.0,   -- Blue component
+    cooldownTextColorG = 0.82,  -- Green component (default gold color)
+    cooldownTextColorB = 0.0,   -- Blue component
     cooldownTextFont = "Default", -- Font name from LibSharedMedia
+    -- Text - Stack counts
     countTextScale = 1.0,       -- Scale of stack counts
-    countTextOffsetX = 0,       -- Horizontal offset (from bottom-right)
-    countTextOffsetY = 0,       -- Vertical offset (from bottom-right)
+    countTextOffsetX = 0,       -- Horizontal offset (from default position)
+    countTextOffsetY = 0,       -- Vertical offset (from default position)
     countTextColorR = 1.0,      -- Red component
     countTextColorG = 1.0,      -- Green component
     countTextColorB = 1.0,      -- Blue component
     countTextFont = "Default",  -- Font name from LibSharedMedia
-    -- Tooltip
-    showTooltip = true,         -- Show tooltips on mouseover
+    -- Cooldown sweep visibility
+    showSweep = true,           -- Show cooldown sweep/spiral animation
+    
+    showCountdownText = true,   -- Show/hide countdown numbers
     -- Visibility
-    visibilityEnabled = false,  -- Master toggle for visibility conditions
+    visibilityEnabled = false,  -- Master toggle for visibility conditions (false = always show)
     showInCombat = true,
     showOutOfCombat = true,
     showSolo = true,
@@ -167,8 +178,8 @@ local TRACKER_DEFAULTS = {
     showInBattleground = true,
     showHasTarget = true,       -- Has a target selected
     showNoTarget = true,        -- No target selected
-    showMounted = true,         -- Player is mounted
-    showNotMounted = true,      -- Player is not mounted
+    showMounted = true,         -- Mounted
+    showNotMounted = true,      -- Not mounted
     clickthrough = false,       -- Allow clicks to pass through tracker
     -- Persistent icon order (saved by texture fileID)
     savedIconOrder = {},        -- Array of texture fileIDs in desired order
@@ -192,7 +203,91 @@ local DEFAULTS = {
     global = {
         debugMode = false,
     },
+    -- Dock settings (4 docks available)
+    docks = {},  -- Will be populated with DOCK_DEFAULTS below
 }
+
+-- Dock default settings (for Dynamic Docks feature)
+local DOCK_DEFAULTS = {
+    enabled = false,
+    name = "",
+    orientation = "horizontal",  -- horizontal or vertical
+    justify = "center",          -- left/center/right for horizontal, top/middle/bottom for vertical
+    spacing = 4,
+    dockAlpha = 1.0,
+    -- Background settings
+    showBackground = true,
+    bgColor = { r = 0.05, g = 0.05, b = 0.05, a = 0.5 },
+    -- Border settings
+    showBorder = true,
+    borderColor = { r = 0.3, g = 0.3, b = 0.3, a = 0.8 },
+    -- Visibility
+    visibilityEnabled = false,
+    showInCombat = true,
+    showOutOfCombat = true,
+    showSolo = true,
+    showInParty = true,
+    showInRaid = true,
+    showInInstance = true,
+    showInArena = true,
+    showInBattleground = true,
+    showHasTarget = true,
+    showNoTarget = true,
+    showMounted = true,
+    showNotMounted = true,
+    fadeAlpha = 0.3,
+    -- Position
+    point = "CENTER",
+    x = 0,
+    y = -100,
+    -- Visual Override Settings (applies to all icons in dock)
+    visualOverrideEnabled = false,
+    vo_iconSize = 36,
+    vo_opacity = 1.0,
+    vo_aspectRatio = "1:1",
+    vo_customAspectW = 1,
+    vo_customAspectH = 1,
+    vo_showSweep = true,
+    vo_showCountdownText = true,
+    vo_showProcGlow = true,
+    -- Cooldown text settings
+    vo_cooldownTextScale = 1.0,
+    vo_cooldownTextColor = { 1, 1, 1, 1 },
+    vo_cooldownTextOffsetX = 0,
+    vo_cooldownTextOffsetY = 0,
+    vo_cooldownTextAnchor = "CENTER",
+    -- Count text settings
+    vo_countTextScale = 1.0,
+    vo_countTextColor = { 1, 1, 1, 1 },
+    vo_countTextOffsetX = 0,
+    vo_countTextOffsetY = -2,
+    vo_countTextAnchor = "BOTTOMRIGHT",
+    -- Custom label settings
+    vo_labelEnabled = false,
+    vo_labelFontSize = 14,
+    vo_labelColor = { 1, 1, 1, 1 },
+    vo_labelOffsetX = 0,
+    vo_labelOffsetY = 0,
+    vo_labelAnchor = "CENTER",
+}
+
+-- Initialize dock defaults (4 docks)
+local NUM_DOCKS = 4
+for i = 1, NUM_DOCKS do
+    DEFAULTS.docks[i] = {}
+    for k, v in pairs(DOCK_DEFAULTS) do
+        if type(v) == "table" then
+            DEFAULTS.docks[i][k] = {}
+            for kk, vv in pairs(v) do
+                DEFAULTS.docks[i][k][kk] = vv
+            end
+        else
+            DEFAULTS.docks[i][k] = v
+        end
+    end
+    -- Set default positions spread out
+    DEFAULTS.docks[i].y = -100 - (i - 1) * 60
+end
 
 -- Add buff-specific settings
 DEFAULTS.buffs.greyscaleInactive = true
@@ -248,12 +343,13 @@ local customTrackerIcons = {}       -- [entryKey] = iconFrame (entryKey = "spell
 local equippedOnUseItems = {}       -- [slotID] = { itemID, spellID, spellName, texture }
 local customTrackerUpdateTicker = nil
 local CUSTOM_TRACKER_UPDATE_INTERVAL = 0.1  -- Update cooldowns 10x per second
+local trackerIconMasks = {}         -- [icon] = maskTexture for Essential/Utility/Buffs trackers
 
 -- ============================================================================
--- MASQUE SUPPORT (variables - functions defined after utilities)
+-- MASQUE SUPPORT
 -- ============================================================================
 
-local Masque = LibStub and LibStub("Masque", true)
+local Masque = nil  -- Deferred lookup - set in InitializeMasque
 local MasqueGroups = {}  -- [trackerKey] = MasqueGroup
 
 -- Forward declarations (functions defined after utility functions)
@@ -281,20 +377,122 @@ local function DeepCopy(orig)
 end
 
 local function dprint(...)
-    -- Debug printing disabled - uncomment to enable during development
-    -- if TUICD.debugMode then
-    --     print("|cff00ff00[TUI:CD]|r", ...)
-    -- end
+    if not settings then
+        -- Don't initialize settings just for debug output - check database directly
+        local dbSettings = TUICD.Database and TUICD.Database:GetModuleSettings(TUICD.MODULE_IDS.COOLDOWNS)
+        if dbSettings and dbSettings.global and dbSettings.global.debugMode then
+            print("|cff00ff00[TUICD CD]|r", ...)
+        end
+        return
+    end
+    if settings.global and settings.global.debugMode then
+        print("|cff00ff00[TUICD CD]|r", ...)
+    end
 end
 
 local function GetSetting(trackerKey, settingName)
-    if not TUICD.Database then return nil end
-    return TUICD.Database:GetTrackerSetting(trackerKey, settingName)
+    -- Auto-initialize settings if needed (like TUI:CD does with Database)
+    if not settings then
+        Cooldowns:GetSettings()  -- This initializes settings from database
+    end
+    if not settings or not settings[trackerKey] then return nil end
+    return settings[trackerKey][settingName]
 end
 
 local function SetSetting(trackerKey, settingName, value)
-    if not TUICD.Database then return end
-    TUICD.Database:SetTrackerSetting(trackerKey, settingName, value)
+    -- Auto-initialize settings if needed
+    if not settings then
+        Cooldowns:GetSettings()  -- This initializes settings from database
+    end
+    if not settings then return end
+    settings[trackerKey] = settings[trackerKey] or {}
+    settings[trackerKey][settingName] = value
+    
+    -- Also immediately persist to database
+    if TUICD and TUICD.Database and TUICD.Database.SetModuleSettings then
+        TUICD.Database:SetModuleSettings(TUICD.MODULE_IDS.COOLDOWNS, settings)
+    end
+end
+
+-- Public function to get all settings (used by Export All)
+function Cooldowns:GetSettings()
+    -- Ensure settings are initialized with proper merge logic
+    if not settings then
+        -- Start with defaults
+        settings = DeepCopy(DEFAULTS)
+        
+        -- Merge any saved settings from database (deep copy nested tables)
+        local dbSettings = TUICD.Database:GetModuleSettings(TUICD.MODULE_IDS.COOLDOWNS)
+        
+        if dbSettings then
+            for key, trackerSettings in pairs(dbSettings) do
+                if settings[key] and type(trackerSettings) == "table" then
+                    for k, v in pairs(trackerSettings) do
+                        if type(v) == "table" then
+                            -- Deep copy nested tables to avoid reference sharing between profiles
+                            settings[key][k] = DeepCopy(v)
+                        else
+                            settings[key][k] = v
+                        end
+                    end
+                elseif key == "global" and type(trackerSettings) == "table" then
+                    for k, v in pairs(trackerSettings) do
+                        if type(v) == "table" then
+                            settings.global[k] = DeepCopy(v)
+                        else
+                            settings.global[k] = v
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    -- NOTE: Removed automatic write-back to database here.
+    -- Writing should only happen explicitly when settings are changed,
+    -- not every time they're read. This was causing profile loads to be
+    -- overwritten by stale cached settings.
+    
+    return settings
+end
+
+-- Get default settings (used by export/import delta encoding)
+function Cooldowns:GetDefaults()
+    return DeepCopy(DEFAULTS)
+end
+
+-- Refresh settings from database (used when presets are applied)
+-- Clears cached settings and reloads from database
+function Cooldowns:RefreshFromDatabase()
+    -- Clear cached settings to force re-read from database
+    settings = nil
+    
+    -- Re-get settings (this will load fresh from database)
+    self:GetSettings()
+    
+    -- Flag all trackers for layout update
+    for _, tracker in ipairs(TRACKERS) do
+        needsLayoutUpdate[tracker.key] = true
+    end
+    needsLayoutUpdate["customTrackers"] = true
+    
+    -- Update custom tracker frame if it exists
+    if customTrackerFrame then
+        -- Will be handled by the OnUpdate loop
+    end
+    
+    if TUICD.PrintDebug then
+        TUICD:PrintDebug("Cooldowns: Refreshed settings from database")
+    end
+    
+    return true
+end
+
+local function GetTrackerInfo(key)
+    for _, t in ipairs(TRACKERS) do
+        if t.key == key then return t end
+    end
+    return nil
 end
 
 -- ============================================================================
@@ -303,6 +501,11 @@ end
 
 -- Initialize Masque groups for each tracker
 InitializeMasque = function()
+    -- Deferred lookup - Masque may not be loaded at file parse time
+    if not Masque then
+        Masque = LibStub and LibStub("Masque", true)
+    end
+    
     if not Masque then 
         dprint("Masque not found")
         return false 
@@ -318,7 +521,7 @@ InitializeMasque = function()
     
     for key, displayName in pairs(trackerNames) do
         if not MasqueGroups[key] then
-            MasqueGroups[key] = Masque:Group("TweaksUI: Cooldowns", displayName)
+            MasqueGroups[key] = Masque:Group("TUICD", displayName)
             dprint(string.format("Masque: Created group for %s", displayName))
         end
     end
@@ -433,18 +636,11 @@ AddToMasque = function(trackerKey, button, buttonData)
         end
         
         -- Also check children frames for backgrounds
-        -- BUT skip SpellActivationAlert frames (proc glows) and overlay frames
         if button.GetChildren then
             for _, child in ipairs({button:GetChildren()}) do
                 -- Skip cooldown frame
                 local cd = data.Cooldown
-                -- Skip glow/overlay frames that Blizzard uses for proc effects
-                local childName = child:GetName() or ""
-                local isGlowFrame = childName:find("SpellActivation") or 
-                                    childName:find("Overlay") or 
-                                    childName:find("Glow") or
-                                    childName:find("Alert")
-                if child ~= cd and not isGlowFrame and child.GetRegions then
+                if child ~= cd and child.GetRegions then
                     for _, region in ipairs({child:GetRegions()}) do
                         if region and region:GetObjectType() == "Texture" then
                             local oldAlpha = region:GetAlpha()
@@ -540,46 +736,6 @@ IsMasqueEnabled = function(trackerKey)
     return Masque ~= nil and GetSetting(trackerKey, "useMasque") == true
 end
 
--- ============================================================================
--- PUBLIC FUNCTIONS
--- ============================================================================
-
--- Public function to get all settings (used by Export All)
-function Cooldowns:GetSettings()
-    local allSettings = {}
-    for _, tracker in ipairs(TRACKERS) do
-        allSettings[tracker.key] = TUICD.Database:GetTrackerSettings(tracker.key)
-    end
-    allSettings.customTrackers = TUICD.Database:GetTrackerSettings("customTrackers")
-    allSettings.global = {
-        debugMode = TUICD.Database:GetGlobal("debugMode") or false,
-    }
-    return allSettings
-end
-
--- Get default settings (used by export/import delta encoding)
-function Cooldowns:GetDefaults()
-    return DeepCopy(DEFAULTS)
-end
-
--- Refresh settings from database (used when presets are applied)
-function Cooldowns:RefreshFromDatabase()
-    -- Flag all trackers for layout update
-    for _, tracker in ipairs(TRACKERS) do
-        needsLayoutUpdate[tracker.key] = true
-    end
-    needsLayoutUpdate["customTrackers"] = true
-    
-    -- Update custom tracker frame if it exists
-    if customTrackerFrame then
-        -- Will be handled by the OnUpdate loop
-    end
-    
-    TUICD:PrintDebug("Cooldowns: Refreshed settings from database")
-    
-    return true
-end
-
 -- Public Masque interface
 function Cooldowns:IsMasqueAvailable()
     return Masque ~= nil
@@ -593,25 +749,6 @@ function Cooldowns:RefreshMasqueGroup(trackerKey)
     if MasqueGroups[trackerKey] then
         MasqueGroups[trackerKey]:ReSkin()
     end
-end
-
--- Public API to get custom tracker icons (used by LayoutMode to disable mouse during unlock)
-function Cooldowns:GetCustomTrackerIcons()
-    return customTrackerIcons
-end
-
-local function GetTrackerInfo(key)
-    for _, t in ipairs(TRACKERS) do
-        if t.key == key then return t end
-    end
-    return nil
-end
-
-local function GetTrackerByName(name)
-    for _, t in ipairs(TRACKERS) do
-        if t.name == name then return t end
-    end
-    return nil
 end
 
 -- ============================================================================
@@ -674,6 +811,32 @@ local function CollectIcons(viewer)
     return icons
 end
 
+-- Get icons in Blizzard's natural child order (no sorting)
+-- This is the consistent order used for per-icon settings
+local function GetIconsInBlizzardOrder(viewer)
+    local icons = {}
+    if not viewer or not viewer.GetNumChildren then return icons end
+    
+    local numChildren = viewer:GetNumChildren() or 0
+    
+    for i = 1, numChildren do
+        local child = select(i, viewer:GetChildren())
+        if child and IsIcon(child) and child:IsShown() then
+            icons[#icons + 1] = child
+        elseif child and child.GetNumChildren then
+            local numNested = child:GetNumChildren() or 0
+            for j = 1, numNested do
+                local nested = select(j, child:GetChildren())
+                if nested and IsIcon(nested) and nested:IsShown() then
+                    icons[#icons + 1] = nested
+                end
+            end
+        end
+    end
+    
+    return icons
+end
+
 
 -- Get texture fileID from an icon (stable identifier across sessions)
 -- Uses pcall to safely handle "secret values" during combat/targeting
@@ -704,6 +867,57 @@ end
 -- Session cache for stable icon ordering per tracker
 -- Once we establish an order, we keep it stable to prevent icons jumping around
 local iconOrderCache = {}  -- [trackerKey] = { icon1, icon2, ... }
+
+-- Original Blizzard child order - captured ONCE per tracker, used for per-icon settings
+-- This never changes regardless of layout mode or sorting
+local originalBlizzardOrder = {}  -- [trackerKey] = { icon1, icon2, ... }
+
+-- Capture original Blizzard order if not already captured
+local function CaptureOriginalOrder(viewer, trackerKey)
+    if originalBlizzardOrder[trackerKey] then
+        return originalBlizzardOrder[trackerKey]
+    end
+    
+    local icons = {}
+    if not viewer or not viewer.GetNumChildren then return icons end
+    
+    local numChildren = viewer:GetNumChildren() or 0
+    for i = 1, numChildren do
+        local child = select(i, viewer:GetChildren())
+        if child and IsIcon(child) then
+            icons[#icons + 1] = child
+        elseif child and child.GetNumChildren then
+            local numNested = child:GetNumChildren() or 0
+            for j = 1, numNested do
+                local nested = select(j, child:GetChildren())
+                if nested and IsIcon(nested) then
+                    icons[#icons + 1] = nested
+                end
+            end
+        end
+    end
+    
+    originalBlizzardOrder[trackerKey] = icons
+    dprint(string.format("CaptureOriginalOrder [%s]: Captured %d icons", trackerKey, #icons))
+    return icons
+end
+
+-- Get original order (captures if needed)
+local function GetOriginalOrder(viewer, trackerKey)
+    if not originalBlizzardOrder[trackerKey] then
+        CaptureOriginalOrder(viewer, trackerKey)
+    end
+    return originalBlizzardOrder[trackerKey] or {}
+end
+
+-- Clear original order cache (call when icons are added/removed)
+local function ClearOriginalOrderCache(trackerKey)
+    if trackerKey then
+        originalBlizzardOrder[trackerKey] = nil
+    else
+        originalBlizzardOrder = {}
+    end
+end
 
 
 -- Sort icons by visual position (reading order: top-to-bottom, left-to-right)
@@ -811,7 +1025,7 @@ local function GetOrderedIcons(viewer, trackerKey)
 end
 
 -- Export GetOrderedIcons for use by CooldownHighlights
-TUICD.Cooldowns.GetOrderedIcons = GetOrderedIcons
+Cooldowns.GetOrderedIcons = GetOrderedIcons
 
 -- Clear icon order cache (session cache and optionally persistent savedIconOrder)
 local function ClearIconOrderCache(trackerKey, clearPersistent)
@@ -892,16 +1106,6 @@ local function ApplyBorderAlpha(icon, alpha)
     end)
 end
 
--- Helper to get font path from LibSharedMedia
-local function GetFontPath(fontName)
-    if not fontName or fontName == "Default" then return nil end
-    local LSM = LibStub and LibStub("LibSharedMedia-3.0", true)
-    if LSM then
-        return LSM:Fetch("font", fontName)
-    end
-    return nil
-end
-
 -- Apply cooldown text scale to an icon
 local function ApplyCooldownTextScale(icon, scale, offsetX, offsetY, r, g, b, fontName)
     if not icon then return end
@@ -912,86 +1116,97 @@ local function ApplyCooldownTextScale(icon, scale, offsetX, offsetY, r, g, b, fo
     local cd = icon.Cooldown or icon.cooldown
     if not cd then return end
     
-    local customFontPath = GetFontPath(fontName)
-    
-    -- Helper to apply all text properties
-    local function ApplyTextProperties(fs)
-        if not fs or not fs.GetFont then return end
-        
-        -- Mark this as cooldown text so ApplyCountTextScale skips it
-        fs._TUI_isCooldownText = true
-        
-        -- Store original values
-        if not fs._TUI_origFontSize then
-            local font, size, flags = fs:GetFont()
-            if font and size then
-                fs._TUI_origFontSize = size
-                fs._TUI_origFont = font
-                fs._TUI_origFlags = flags or ""
-            end
-        end
-        
-        -- Apply scale and font
-        if fs._TUI_origFontSize then
-            local fontToUse = customFontPath or fs._TUI_origFont
-            fs:SetFont(fontToUse, fs._TUI_origFontSize * scale, fs._TUI_origFlags)
-        end
-        
-        -- Apply offset (adjust from center)
-        if (offsetX ~= 0 or offsetY ~= 0) and fs.ClearAllPoints and fs.SetPoint then
-            if not fs._TUI_origPoint then
-                local point, relativeTo, relPoint, x, y = fs:GetPoint(1)
-                if point then
-                    fs._TUI_origPoint = point
-                    fs._TUI_origRelativeTo = relativeTo
-                    fs._TUI_origRelPoint = relPoint or point
-                    fs._TUI_origX = x or 0
-                    fs._TUI_origY = y or 0
-                end
-            end
-            if fs._TUI_origPoint then
-                fs:ClearAllPoints()
-                fs:SetPoint(fs._TUI_origPoint, fs._TUI_origRelativeTo, fs._TUI_origRelPoint, 
-                           fs._TUI_origX + offsetX, fs._TUI_origY + offsetY)
-            end
-        end
-        
-        -- Apply color
-        if r and g and b and fs.SetTextColor then
-            fs:SetTextColor(r, g, b)
+    -- Get font path from LibSharedMedia if specified
+    local fontPath = nil
+    if fontName and fontName ~= "Default" then
+        local LSM = LibStub and LibStub("LibSharedMedia-3.0", true)
+        if LSM then
+            fontPath = LSM:Fetch("font", fontName)
         end
     end
     
     pcall(function()
+        -- Helper to apply settings to a fontstring
+        local function ApplyToFontString(fs)
+            if not fs then return end
+            
+            -- Mark this as cooldown text so ApplyCountTextScale skips it
+            fs._TUI_isCooldownText = true
+            
+            -- Store original values
+            if not fs._TUI_origFontSize then
+                local font, size, flags = fs:GetFont()
+                if font and size then
+                    fs._TUI_origFontSize = size
+                    fs._TUI_origFont = font
+                    fs._TUI_origFlags = flags or ""
+                end
+            end
+            
+            -- Store original position
+            if not fs._TUI_origPoint then
+                local point, relativeTo, relativePoint, x, y = fs:GetPoint()
+                if point then
+                    fs._TUI_origPoint = point
+                    fs._TUI_origRelativeTo = relativeTo
+                    fs._TUI_origRelativePoint = relativePoint
+                    fs._TUI_origX = x or 0
+                    fs._TUI_origY = y or 0
+                end
+            end
+            
+            -- Apply font and scale
+            if fs._TUI_origFontSize then
+                local useFont = fontPath or fs._TUI_origFont
+                fs:SetFont(useFont, fs._TUI_origFontSize * scale, fs._TUI_origFlags)
+            end
+            
+            -- Apply color if specified
+            if r and g and b then
+                fs:SetTextColor(r, g, b, 1)
+            end
+            
+            -- Apply offset
+            if fs._TUI_origPoint and (offsetX ~= 0 or offsetY ~= 0) then
+                fs:ClearAllPoints()
+                fs:SetPoint(fs._TUI_origPoint, fs._TUI_origRelativeTo, fs._TUI_origRelativePoint, 
+                    fs._TUI_origX + offsetX, fs._TUI_origY + offsetY)
+            end
+        end
+        
         -- Method 1: Direct cooldown.text (OmniCC style)
         if cd.text then
-            ApplyTextProperties(cd.text)
+            ApplyToFontString(cd.text)
         end
         
         -- Method 2: Check for Text fontstring in cooldown frame
         if cd.Text then
-            ApplyTextProperties(cd.Text)
+            ApplyToFontString(cd.Text)
         end
         
         -- Method 3: Search cooldown frame regions for fontstrings
         if cd.GetRegions then
             for _, region in ipairs({cd:GetRegions()}) do
                 if region and region:GetObjectType() == "FontString" then
-                    ApplyTextProperties(region)
+                    ApplyToFontString(region)
                 end
             end
         end
     end)
 end
 
--- Apply count/charge text properties to an icon
+-- Apply count/charge text scale to an icon
 local function ApplyCountTextScale(icon, scale, offsetX, offsetY, r, g, b, fontName)
     if not icon then return end
     scale = scale or 1.0
     offsetX = offsetX or 0
     offsetY = offsetY or 0
     
-    local customFontPath = GetFontPath(fontName)
+    -- Get custom font path if specified
+    local customFontPath = nil
+    if fontName and fontName ~= "Default" and TUICD.Media then
+        customFontPath = TUICD.Media:GetFontPath(fontName)
+    end
     
     -- Helper to apply all text properties to a fontstring
     local function ApplyTextProperties(fs)
@@ -1108,20 +1323,26 @@ local function ApplyCountTextScale(icon, scale, offsetX, offsetY, r, g, b, fontN
             ApplyTextProperties(countText)
         end
         
-        -- Method 2: Check cooldown frame for charge display
+        -- Method 2: Check cooldown frame for charge display (but NOT cooldown text)
         local cooldown = icon.Cooldown or icon.cooldown
         if cooldown then
-            -- Some cooldown frames have a charges fontstring
-            if cooldown.Count then ApplyTextProperties(cooldown.Count) end
-            if cooldown.count then ApplyTextProperties(cooldown.count) end
-            if cooldown.Charges then ApplyTextProperties(cooldown.Charges) end
-            if cooldown.charges then ApplyTextProperties(cooldown.charges) end
-            
-            -- Search cooldown's children too
-            SearchFrame(cooldown, 0)
+            -- Some cooldown frames have a charges fontstring (separate from countdown)
+            if cooldown.Count and not cooldown.Count._TUI_isCooldownText then 
+                ApplyTextProperties(cooldown.Count) 
+            end
+            if cooldown.count and not cooldown.count._TUI_isCooldownText then 
+                ApplyTextProperties(cooldown.count) 
+            end
+            if cooldown.Charges and not cooldown.Charges._TUI_isCooldownText then 
+                ApplyTextProperties(cooldown.Charges) 
+            end
+            if cooldown.charges and not cooldown.charges._TUI_isCooldownText then 
+                ApplyTextProperties(cooldown.charges) 
+            end
+            -- DO NOT search inside cooldown frame - that's where countdown text lives
         end
         
-        -- Method 3: Recursive search of icon frame
+        -- Method 3: Recursive search of icon frame (skips Cooldown frames)
         SearchFrame(icon, 0)
     end)
 end
@@ -1188,6 +1409,109 @@ local function DumpIconStructure(icon, trackerKey)
     end
 end
 
+-- Get or create a mask texture for a tracker icon (Essential/Utility/Buffs)
+local function GetOrCreateTrackerIconMask(icon)
+    if trackerIconMasks[icon] then
+        return trackerIconMasks[icon]
+    end
+    
+    local textureObj = icon.Icon or icon.icon
+    if not textureObj then return nil end
+    
+    -- Create mask texture
+    local mask = icon:CreateMaskTexture()
+    mask:SetAllPoints(textureObj)
+    mask:SetTexture("Interface\\AddOns\\!TUICD\\Media\\Textures\\Masks\\Mask_Rounded", "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+    
+    trackerIconMasks[icon] = mask
+    return mask
+end
+
+-- Apply edge style to a tracker icon
+local function ApplyTrackerIconEdgeStyle(icon, trackerKey, iconWidth, iconHeight)
+    -- Check for global icon edge style override first
+    local edgeStyle
+    if TUICD.Media and TUICD.Media:IsUsingGlobalIconEdgeStyle() then
+        edgeStyle = TUICD.Media:GetGlobalIconEdgeStyle() or "sharp"
+    else
+        edgeStyle = GetSetting(trackerKey, "iconEdgeStyle") or "sharp"
+    end
+    local zoom = GetSetting(trackerKey, "zoom") or 0.08
+    
+    local textureObj = icon.Icon or icon.icon
+    if not textureObj or not textureObj.SetTexCoord then return end
+    
+    local mask = trackerIconMasks[icon]
+    
+    -- Remove existing mask first
+    if mask then
+        pcall(function() textureObj:RemoveMaskTexture(mask) end)
+    end
+    
+    if edgeStyle == "rounded" then
+        -- Full texture for mask-based rounding
+        local left, right, top, bottom = 0, 1, 0, 1
+        
+        -- Still apply aspect ratio cropping if non-square
+        if iconWidth and iconHeight then
+            if iconWidth > iconHeight then
+                local cropAmount = (1 - iconHeight / iconWidth) / 2
+                top = cropAmount
+                bottom = 1 - cropAmount
+            elseif iconHeight > iconWidth then
+                local cropAmount = (1 - iconWidth / iconHeight) / 2
+                left = cropAmount
+                right = 1 - cropAmount
+            end
+        end
+        
+        textureObj:SetTexCoord(left, right, top, bottom)
+        
+        -- Apply mask
+        mask = GetOrCreateTrackerIconMask(icon)
+        if mask then
+            pcall(function() textureObj:AddMaskTexture(mask) end)
+        end
+    elseif edgeStyle == "square" then
+        -- No zoom, full texture (with aspect ratio crop)
+        local left, right, top, bottom = 0, 1, 0, 1
+        
+        if iconWidth and iconHeight then
+            if iconWidth > iconHeight then
+                local cropAmount = (1 - iconHeight / iconWidth) / 2
+                top = cropAmount
+                bottom = 1 - cropAmount
+            elseif iconHeight > iconWidth then
+                local cropAmount = (1 - iconWidth / iconHeight) / 2
+                left = cropAmount
+                right = 1 - cropAmount
+            end
+        end
+        
+        textureObj:SetTexCoord(left, right, top, bottom)
+    else
+        -- "sharp" (default) - zoom with aspect ratio cropping
+        local left = zoom
+        local right = 1 - zoom
+        local top = zoom
+        local bottom = 1 - zoom
+        
+        if iconWidth and iconHeight then
+            if iconWidth > iconHeight then
+                local cropAmount = (1 - iconHeight / iconWidth) / 2
+                top = top + cropAmount * (1 - 2 * zoom)
+                bottom = bottom - cropAmount * (1 - 2 * zoom)
+            elseif iconHeight > iconWidth then
+                local cropAmount = (1 - iconWidth / iconHeight) / 2
+                left = left + cropAmount * (1 - 2 * zoom)
+                right = right - cropAmount * (1 - 2 * zoom)
+            end
+        end
+        
+        textureObj:SetTexCoord(left, right, top, bottom)
+    end
+end
+
 -- Helper function to get opacity based on combat state
 local function GetCombatAwareOpacity(trackerKey)
     local inCombat = InCombatLockdown() or UnitAffectingCombat("player")
@@ -1195,6 +1519,47 @@ local function GetCombatAwareOpacity(trackerKey)
         return GetSetting(trackerKey, "iconOpacityCombat") or 1.0
     else
         return GetSetting(trackerKey, "iconOpacity") or 1.0
+    end
+end
+
+-- Helper function to set up tooltip handling for an icon
+-- Essential and Utility trackers have native Blizzard tooltip handlers
+-- Buff tracker doesn't have tooltips (Blizzard doesn't provide them for BuffIconCooldownViewer)
+local function SetupIconTooltip(icon, trackerKey, slotIndex)
+    if not icon then return end
+    
+    -- Clear old TUI tooltip properties that caused taint issues
+    if icon._TUI_cachedSpellId ~= nil then
+        icon._TUI_cachedSpellId = nil
+    end
+    
+    -- Buff tracker: no tooltip support (Blizzard doesn't provide handlers)
+    if trackerKey == "buffs" then
+        return
+    end
+    
+    -- Essential/Utility trackers: respect showTooltip setting
+    local showTooltip = GetSetting(trackerKey, "showTooltip")
+    
+    if showTooltip == false then
+        -- User wants tooltips disabled
+        if not icon._TUI_TooltipDisabled then
+            icon._TUI_SavedOnEnter = icon:GetScript("OnEnter")
+            icon._TUI_SavedOnLeave = icon:GetScript("OnLeave")
+            icon:SetScript("OnEnter", function() end)
+            icon:SetScript("OnLeave", function() end)
+            icon._TUI_TooltipDisabled = true
+        end
+    else
+        -- User wants tooltips enabled - restore if we disabled them
+        if icon._TUI_TooltipDisabled then
+            icon:SetScript("OnEnter", icon._TUI_SavedOnEnter)
+            icon:SetScript("OnLeave", icon._TUI_SavedOnLeave)
+            icon._TUI_TooltipDisabled = nil
+            icon._TUI_SavedOnEnter = nil
+            icon._TUI_SavedOnLeave = nil
+        end
+        -- Otherwise don't touch - Blizzard's native handlers work
     end
 end
 
@@ -1212,7 +1577,7 @@ local function ApplyGridLayout(viewer, trackerKey)
         return false
     end
     
-    -- Apply per-icon hide based on layout order (BEFORE any reversal)
+    -- Apply per-icon hide based on layout order
     for idx, icon in ipairs(icons) do
         local isHiddenByPerIcon = false
         if trackerKey == "buffs" then
@@ -1253,8 +1618,8 @@ local function ApplyGridLayout(viewer, trackerKey)
     local cooldownTextOffsetX = GetSetting(trackerKey, "cooldownTextOffsetX") or 0
     local cooldownTextOffsetY = GetSetting(trackerKey, "cooldownTextOffsetY") or 0
     local cooldownTextColorR = GetSetting(trackerKey, "cooldownTextColorR") or 1.0
-    local cooldownTextColorG = GetSetting(trackerKey, "cooldownTextColorG") or 1.0
-    local cooldownTextColorB = GetSetting(trackerKey, "cooldownTextColorB") or 1.0
+    local cooldownTextColorG = GetSetting(trackerKey, "cooldownTextColorG") or 0.82
+    local cooldownTextColorB = GetSetting(trackerKey, "cooldownTextColorB") or 0.0
     local cooldownTextFont = GetSetting(trackerKey, "cooldownTextFont") or "Default"
     local countTextScale = GetSetting(trackerKey, "countTextScale") or 1.0
     local countTextOffsetX = GetSetting(trackerKey, "countTextOffsetX") or 0
@@ -1317,10 +1682,11 @@ local function ApplyGridLayout(viewer, trackerKey)
     
     -- Check if custom grid is enabled
     local useCustomGrid = GetSetting(trackerKey, "useCustomGrid") or false
+    local customLayout = GetSetting(trackerKey, "customLayout") or ""
     
-    -- Debug: print custom grid status
+    -- Debug: Always print custom grid status
     if settings and settings.global and settings.global.debugMode then
-        print(string.format("|cff00ff00[TUI:CD]|r ApplyGridLayout [%s]: useCustomGrid=%s, customLayout='%s'", 
+        print(string.format("|cff00ff00[TUI CD]|r ApplyGridLayout [%s]: useCustomGrid=%s, customLayout='%s'", 
             trackerKey, tostring(useCustomGrid), customLayout))
     end
     
@@ -1360,6 +1726,10 @@ local function ApplyGridLayout(viewer, trackerKey)
     -- Determine if primary direction is horizontal or vertical
     local primaryIsHorizontal = (growDir == "LEFT" or growDir == "RIGHT")
     
+    -- Enhanced debug for column mode troubleshooting
+    dprint(string.format("ApplyGridLayout [%s]: useCustomGrid=%s, useCustomLayout=%s, primaryIsHorizontal=%s", 
+        trackerKey, tostring(useCustomGrid), tostring(useCustomLayout), tostring(primaryIsHorizontal)))
+    
     -- For vertical primary, we need to know how many rows to use
     local numRows = maxRows
     if not primaryIsHorizontal and numRows == 0 then
@@ -1378,11 +1748,11 @@ local function ApplyGridLayout(viewer, trackerKey)
         
         -- Get custom grid settings
         local customGridMode = GetSetting(trackerKey, "customGridMode") or "ROW"
-        local customGridAlign = GetSetting(trackerKey, "customGridAlign") or "START"
+        local customGridAlign = GetSetting(trackerKey, "customGridAlign") or (customGridMode == "COLUMN" and "TOP" or "LEFT")
         
         local iconIdx = 1
-        local maxPrimary = 0    -- Track the max size in primary direction
-        local totalSecondary = 0 -- Track total in secondary direction
+        local maxPrimary = 0    -- Track the max size in primary direction (width for rows, height for columns)
+        local totalSecondary = 0 -- Track total in secondary direction (rows for row mode, columns for column mode)
         
         -- Determine overflow size (use last non-zero pattern value)
         local overflowSize = customRowSizes[#customRowSizes]
@@ -1397,7 +1767,7 @@ local function ApplyGridLayout(viewer, trackerKey)
         if overflowSize == 0 then overflowSize = columns end
         
         -- Helper function to apply styling to an icon
-        local function StyleIcon(icon)
+        local function StyleIcon(icon, currentIconIdx)
             icon:SetSize(iconWidth, iconHeight)
             
             -- Apply opacity (skip if icon is hidden by per-icon settings)
@@ -1467,46 +1837,32 @@ local function ApplyGridLayout(viewer, trackerKey)
                 RemoveFromMasque(icon)
             end
             
-            local showTooltip = GetSetting(trackerKey, "showTooltip")
-            if showTooltip == false then
-                if not icon._TUI_TooltipHooked then
-                    icon._TUI_OriginalOnEnter = icon:GetScript("OnEnter")
-                    icon:SetScript("OnEnter", function(self) end)
-                    icon._TUI_TooltipHooked = true
-                    icon._TUI_TooltipDisabled = true
-                end
-            else
-                -- Tooltips enabled - restore if we previously hooked them
-                if icon._TUI_TooltipHooked and icon._TUI_TooltipDisabled then
-                    if icon._TUI_OriginalOnEnter then
-                        icon:SetScript("OnEnter", icon._TUI_OriginalOnEnter)
-                    end
-                    icon._TUI_TooltipDisabled = false
-                end
-            end
+            -- Set up tooltip handling (pass slotIndex for buff tracker persistent cache)
+            SetupIconTooltip(icon, trackerKey, currentIconIdx)
         end
         
         -- Track placed icons for second-pass alignment
-        local placedIcons = {}
+        local placedIcons = {}  -- { {icon, primaryIdx, secondaryIdx, groupSize}, ... }
         
         if customGridMode == "COLUMN" then
             -- COLUMN MODE: Fill down (primary), then wrap right (secondary)
+            -- Pattern specifies how many icons in each column
             local currentCol = 0
             
+            -- Process pattern
             for _, colSize in ipairs(customRowSizes) do
                 if colSize == 0 then
+                    -- Blank column - just increment column counter
                     currentCol = currentCol + 1
                 else
                     local iconsInThisCol = 0
                     for rowIdx = 1, colSize do
                         if iconIdx <= #icons then
                             local icon = icons[iconIdx]
-                            local currentIconIdx = iconIdx
                             iconIdx = iconIdx + 1
                             iconCount = iconCount + 1
                             icon:Show()
-                            StyleIcon(icon)
-                            
+                            StyleIcon(icon, iconIdx - 1)
                             table.insert(placedIcons, {icon = icon, col = currentCol, row = rowIdx - 1, groupSize = colSize})
                             iconsInThisCol = iconsInThisCol + 1
                         end
@@ -1519,23 +1875,22 @@ local function ApplyGridLayout(viewer, trackerKey)
                 end
             end
             
-            -- Handle overflow
+            -- Handle overflow icons
             while iconIdx <= #icons do
                 local iconsInThisCol = 0
-                local overflowStartIdx = #placedIcons + 1
+                local overflowStartIdx = #placedIcons + 1  -- Track where overflow icons start
                 for rowIdx = 1, overflowSize do
                     if iconIdx <= #icons then
                         local icon = icons[iconIdx]
-                        local currentIconIdx = iconIdx
                         iconIdx = iconIdx + 1
                         iconCount = iconCount + 1
                         icon:Show()
-                        StyleIcon(icon)
-                        
-                        table.insert(placedIcons, {icon = icon, col = currentCol, row = rowIdx - 1, groupSize = 0})
+                        StyleIcon(icon, iconIdx - 1)
+                        table.insert(placedIcons, {icon = icon, col = currentCol, row = rowIdx - 1, groupSize = 0})  -- Will update after
                         iconsInThisCol = iconsInThisCol + 1
                     end
                 end
+                -- Update groupSize for all icons in this overflow column to actual count
                 for i = overflowStartIdx, #placedIcons do
                     placedIcons[i].groupSize = iconsInThisCol
                 end
@@ -1555,6 +1910,7 @@ local function ApplyGridLayout(viewer, trackerKey)
                 local xOffset = placed.col * (iconWidth + spacingH)
                 local yOffset = 0
                 
+                -- Apply vertical alignment within column
                 local actualColSize = placed.groupSize
                 local colHeight = actualColSize * iconHeight + math.max(0, actualColSize - 1) * spacingV
                 
@@ -1563,6 +1919,7 @@ local function ApplyGridLayout(viewer, trackerKey)
                 elseif customGridAlign == "END" then
                     yOffset = -(totalHeight - colHeight)
                 end
+                -- START alignment: yOffset = 0 (default)
                 
                 yOffset = yOffset - placed.row * (iconHeight + spacingV)
                 
@@ -1575,22 +1932,23 @@ local function ApplyGridLayout(viewer, trackerKey)
             
         else
             -- ROW MODE: Fill right (primary), then wrap down (secondary)
+            -- Pattern specifies how many icons in each row
             local currentRow = 0
             
+            -- Process pattern
             for _, rowSize in ipairs(customRowSizes) do
                 if rowSize == 0 then
+                    -- Blank row - just increment row counter
                     currentRow = currentRow + 1
                 else
                     local iconsInThisRow = 0
                     for colIdx = 1, rowSize do
                         if iconIdx <= #icons then
                             local icon = icons[iconIdx]
-                            local currentIconIdx = iconIdx
                             iconIdx = iconIdx + 1
                             iconCount = iconCount + 1
                             icon:Show()
-                            StyleIcon(icon)
-                            
+                            StyleIcon(icon, iconIdx - 1)
                             table.insert(placedIcons, {icon = icon, col = colIdx - 1, row = currentRow, groupSize = rowSize})
                             iconsInThisRow = iconsInThisRow + 1
                         end
@@ -1603,23 +1961,22 @@ local function ApplyGridLayout(viewer, trackerKey)
                 end
             end
             
-            -- Handle overflow
+            -- Handle overflow icons
             while iconIdx <= #icons do
                 local iconsInThisRow = 0
-                local overflowStartIdx = #placedIcons + 1
+                local overflowStartIdx = #placedIcons + 1  -- Track where overflow icons start
                 for colIdx = 1, overflowSize do
                     if iconIdx <= #icons then
                         local icon = icons[iconIdx]
-                        local currentIconIdx = iconIdx
                         iconIdx = iconIdx + 1
                         iconCount = iconCount + 1
                         icon:Show()
-                        StyleIcon(icon)
-                        
-                        table.insert(placedIcons, {icon = icon, col = colIdx - 1, row = currentRow, groupSize = 0})
+                        StyleIcon(icon, iconIdx - 1)
+                        table.insert(placedIcons, {icon = icon, col = colIdx - 1, row = currentRow, groupSize = 0})  -- Will update after
                         iconsInThisRow = iconsInThisRow + 1
                     end
                 end
+                -- Update groupSize for all icons in this overflow row to actual count
                 for i = overflowStartIdx, #placedIcons do
                     placedIcons[i].groupSize = iconsInThisRow
                 end
@@ -1639,6 +1996,7 @@ local function ApplyGridLayout(viewer, trackerKey)
                 local yOffset = -placed.row * (iconHeight + spacingV)
                 local xOffset = 0
                 
+                -- Apply horizontal alignment within row
                 local actualRowSize = placed.groupSize
                 local rowWidth = actualRowSize * iconWidth + math.max(0, actualRowSize - 1) * spacingH
                 
@@ -1647,6 +2005,7 @@ local function ApplyGridLayout(viewer, trackerKey)
                 elseif customGridAlign == "END" then
                     xOffset = totalWidth - rowWidth
                 end
+                -- START alignment: xOffset = 0 (default)
                 
                 xOffset = xOffset + placed.col * (iconWidth + spacingH)
                 
@@ -1679,131 +2038,37 @@ local function ApplyGridLayout(viewer, trackerKey)
             end
         end
         
+        -- Update container size to match new layout (for Layout Mode overlay)
+        if TUICD.CooldownContainers and TUICD.CooldownContainers.UpdateContainerSize then
+            C_Timer.After(0.05, function()
+                TUICD.CooldownContainers:UpdateContainerSize(trackerKey)
+            end)
+        end
+        
         viewer._TUI_applying = false
         dprint(string.format("ApplyGridLayout [%s]: Complete with custom grid (%d visible)", trackerKey, iconCount))
         return  -- Early return for custom grid
     end
     
-    -- STANDARD GRID LAYOUT (no custom grid enabled)
-    -- Parse custom layout pattern for legacy support
-    local customRowSizes = {}
-    local useCustomLayout = false
-    if customLayout and customLayout ~= "" then
-        for num in customLayout:gmatch("(%d+)") do
-            local n = tonumber(num)
-            if n and n >= 0 then
-                table.insert(customRowSizes, n)
-                -- Only mark as custom layout if at least one row has icons
-                if n > 0 then
-                    useCustomLayout = true
-                end
-            end
-        end
-        -- If we parsed numbers but all were 0, don't use custom layout
-        if #customRowSizes > 0 and not useCustomLayout then
-            customRowSizes = {}
-        end
-    end
+    -- STANDARD GRID LAYOUT (respects direction, alignment, secondary direction)
+    dprint(string.format("ApplyGridLayout [%s]: Using STANDARD grid layout, primaryIsHorizontal=%s, numRows=%d", 
+        trackerKey, tostring(primaryIsHorizontal), numRows))
     
-    -- Build cumulative index to row/col mapping for custom layout
-    -- Row index increments even for 0-sized rows (creating blank space)
-    local customMapping = {}  -- [iconIndex] = { row = n, col = n }
-    if useCustomLayout then
-        local iconIdx = 1
-        for row, rowSize in ipairs(customRowSizes) do
-            for col = 1, rowSize do
-                customMapping[iconIdx] = { row = row - 1, col = col - 1 }
-                iconIdx = iconIdx + 1
-            end
-        end
-    end
-    
-    dprint(string.format("ApplyGridLayout [%s]: %d icons, size=%.0fx%.0f, cols=%d, spacingH=%d, spacingV=%d, grow=%s/%s%s", 
-        trackerKey, #icons, iconWidth, iconHeight, columns, spacingH, spacingV, growDir, growSec,
-        useCustomLayout and string.format(", custom=%s", customLayout) or ""))
-    
-    -- Determine if primary direction is horizontal or vertical
-    local primaryIsHorizontal = (growDir == "LEFT" or growDir == "RIGHT")
-    
-    -- For vertical primary, we need to know how many rows to use
-    local numRows = maxRows
-    if not primaryIsHorizontal and numRows == 0 then
-        -- Calculate rows needed based on columns and icon count
-        numRows = math.ceil(#icons / columns)
-    end
-    
-    -- Calculate total grid dimensions FIRST for proper alignment
-    local totalCols, totalRows
-    if useCustomLayout then
-        totalRows = #customRowSizes
-        totalCols = 0
-        for _, rowSize in ipairs(customRowSizes) do
-            totalCols = math.max(totalCols, rowSize)
-        end
-    else
-        if primaryIsHorizontal then
-            totalCols = math.min(#icons, columns)
-            totalRows = math.ceil(#icons / columns)
-        else
-            local effectiveRows = numRows > 0 and numRows or math.ceil(#icons / columns)
-            totalRows = math.min(#icons, effectiveRows)
-            totalCols = math.ceil(#icons / effectiveRows)
-        end
-    end
-    
-    local totalWidth = totalCols * iconWidth + (totalCols - 1) * spacingH
-    local totalHeight = totalRows * iconHeight + (totalRows - 1) * spacingV
-    
-    -- Set viewer size to match content (important for alignment to work)
-    viewer:SetSize(totalWidth, totalHeight)
-    
-    -- Check if viewer is controlled by our container system
-    local isContainerControlled = viewer._TUICD_Controlled
-    
-    -- If container controlled, re-anchor viewer to container after size change
-    if isContainerControlled then
-        local container = viewer._TUICD_Container
-        if container then
-            -- Temporarily allow positioning
-            viewer._TUICD_Controlled = false
-            viewer:ClearAllPoints()
-            viewer:SetPoint("CENTER", container, "CENTER", 0, 0)
-            viewer._TUICD_Controlled = true
-        end
-        
-        -- Refresh container size after viewer resize
-        if TUICD.LayoutMode then
-            C_Timer.After(0.1, function()
-                TUICD.LayoutMode:RefreshContainerSize(trackerKey)
-            end)
-        end
-    end
-    
-    -- Position each icon in grid
-    local iconCount = 0
     for i, icon in ipairs(icons) do
         local col, row
+        local idx = i - 1
         
-        if useCustomLayout and customMapping[i] then
-            -- Use custom layout mapping
-            col = customMapping[i].col
-            row = customMapping[i].row
+        if primaryIsHorizontal then
+            -- Horizontal primary (LEFT/RIGHT): fill rows first, then wrap to next row
+            -- Row 1: 1,2,3 | Row 2: 4,5,6 | Row 3: 7,8,9
+            col = idx % columns
+            row = math.floor(idx / columns)
         else
-            -- Standard grid layout
-            local idx = i - 1
-            
-            if primaryIsHorizontal then
-                -- Horizontal primary (LEFT/RIGHT): fill rows first, then wrap to next row
-                -- Row 1: 1,2,3 | Row 2: 4,5,6 | Row 3: 7,8,9
-                col = idx % columns
-                row = math.floor(idx / columns)
-            else
-                -- Vertical primary (UP/DOWN): fill columns first, then wrap to next column
-                -- Col 1: 1,4,7 | Col 2: 2,5,8 | Col 3: 3,6,9
-                local effectiveRows = numRows > 0 and numRows or math.ceil(#icons / columns)
-                row = idx % effectiveRows
-                col = math.floor(idx / effectiveRows)
-            end
+            -- Vertical primary (UP/DOWN): fill columns first, then wrap to next column
+            -- Col 1: 1,4,7 | Col 2: 2,5,8 | Col 3: 3,6,9
+            local effectiveRows = numRows > 0 and numRows or math.ceil(#icons / columns)
+            row = idx % effectiveRows
+            col = math.floor(idx / effectiveRows)
         end
         
         -- Check row limit (0 = unlimited)
@@ -1853,60 +2118,46 @@ local function ApplyGridLayout(viewer, trackerKey)
                 yOffset = -row * (iconHeight + spacingV)
             end
             
-            -- Calculate alignment offset based on primary direction
+            -- Calculate alignment offset
             local alignOffsetX = 0
             local alignOffsetY = 0
             
             if primaryIsHorizontal then
-                -- Row mode: alignment affects horizontal positioning
+                -- Horizontal primary: alignment affects horizontal positioning
                 if alignment == "CENTER" or alignment == "RIGHT" then
-                    local iconsInThisRow = columns
-                    if useCustomLayout and customRowSizes[row + 1] then
-                        iconsInThisRow = customRowSizes[row + 1]
-                    else
-                        -- Standard grid: last row may have fewer icons
-                        local iconsBeforeThisRow = row * columns
-                        local iconsRemaining = #icons - iconsBeforeThisRow
-                        iconsInThisRow = math.min(columns, iconsRemaining)
-                    end
+                    -- Calculate actual icons in this row
+                    local iconsBeforeThisRow = row * columns
+                    local iconsRemaining = #icons - iconsBeforeThisRow
+                    local iconsInThisRow = math.min(columns, iconsRemaining)
                     
                     local rowWidth = iconsInThisRow * iconWidth + (iconsInThisRow - 1) * spacingH
-                    local maxRowWidth = totalWidth
+                    local viewerWidth = viewer:GetWidth() or rowWidth
                     
                     if alignment == "CENTER" then
-                        alignOffsetX = (maxRowWidth - rowWidth) / 2
-                    elseif alignment == "RIGHT" then
-                        alignOffsetX = maxRowWidth - rowWidth
+                        alignOffsetX = (viewerWidth - rowWidth) / 2
+                    else -- RIGHT
+                        alignOffsetX = viewerWidth - rowWidth
                     end
                 end
-                -- LEFT alignment = 0 offset (default)
             else
-                -- Column mode: alignment affects vertical positioning (TOP/MIDDLE/BOTTOM)
+                -- Vertical primary (column mode): alignment affects vertical positioning
+                -- LEFT = Top, CENTER = Middle, RIGHT = Bottom
                 if alignment == "CENTER" or alignment == "RIGHT" then
-                    -- Calculate how many icons are in this column
+                    -- Calculate actual icons in this column
                     local effectiveRows = numRows > 0 and numRows or math.ceil(#icons / columns)
-                    local fullColumns = math.floor(#icons / effectiveRows)
-                    local remainder = #icons % effectiveRows
+                    local iconsBeforeThisCol = col * effectiveRows
+                    local iconsRemaining = #icons - iconsBeforeThisCol
+                    local iconsInThisCol = math.min(effectiveRows, iconsRemaining)
                     
-                    local iconsInThisCol
-                    if col < fullColumns then
-                        iconsInThisCol = effectiveRows
-                    elseif col == fullColumns and remainder > 0 then
-                        iconsInThisCol = remainder
-                    else
-                        iconsInThisCol = 0
-                    end
-                    
-                    local colHeight = (iconsInThisCol * iconHeight) + ((iconsInThisCol - 1) * spacingV)
-                    local maxColHeight = totalHeight
+                    local colHeight = iconsInThisCol * iconHeight + (iconsInThisCol - 1) * spacingV
+                    local viewerHeight = viewer:GetHeight() or colHeight
                     
                     if alignment == "CENTER" then
-                        alignOffsetY = -(maxColHeight - colHeight) / 2
-                    elseif alignment == "RIGHT" then -- RIGHT = BOTTOM in column mode
-                        alignOffsetY = -(maxColHeight - colHeight)
+                        alignOffsetY = -(viewerHeight - colHeight) / 2
+                    else -- RIGHT (means Bottom in column mode)
+                        alignOffsetY = -(viewerHeight - colHeight)
                     end
                 end
-                -- LEFT/TOP alignment = 0 offset (default)
             end
             
             -- Apply position relative to viewer with alignment
@@ -1916,11 +2167,11 @@ local function ApplyGridLayout(viewer, trackerKey)
             -- Apply size
             icon:SetSize(iconWidth, iconHeight)
             
-            -- Apply opacity (skip if hidden by per-icon settings)
-            if not icon._TUI_hiddenByPerIcon then
-                if trackerKey ~= "buffs" or not GetSetting("buffs", "greyscaleInactive") then
-                    icon:SetAlpha(iconOpacity)
-                end
+            -- Apply opacity (per-icon hide is applied after visual slots are assigned)
+            if trackerKey ~= "buffs" or not GetSetting("buffs", "greyscaleInactive") then
+                -- Only set alpha here if not buffs with greyscale enabled
+                -- (buff state ticker handles alpha for buffs with greyscale)
+                icon:SetAlpha(iconOpacity)
             end
             
             -- Check if Masque is handling appearance
@@ -1931,160 +2182,72 @@ local function ApplyGridLayout(viewer, trackerKey)
                 ApplyBorderAlpha(icon, borderAlpha)
             end
             
-            -- Apply zoom and aspect ratio cropping to icon texture
-            -- Skip if Masque is enabled (Masque handles texcoords)
+            -- Apply icon edge style (skip if Masque is handling it)
             if not useMasque then
-                -- Aspect ratio cropping: crop the texture to match the icon's aspect ratio
-                -- Zoom: additional uniform inset (0 = no zoom, 0.1 = 10% inset)
                 pcall(function()
-                    local textureObj = icon.Icon or icon.icon
-                    if textureObj and textureObj.SetTexCoord then
-                        -- Start with zoom inset
-                        local left = zoom
-                        local right = 1 - zoom
-                        local top = zoom
-                        local bottom = 1 - zoom
-                        
-                        -- Calculate aspect ratio cropping
-                        -- Textures are assumed square, so we crop to match icon dimensions
-                        if iconWidth > iconHeight then
-                            -- Wide icon: crop top and bottom
-                            local cropAmount = (1 - iconHeight / iconWidth) / 2
-                            top = top + cropAmount * (1 - 2 * zoom)
-                            bottom = bottom - cropAmount * (1 - 2 * zoom)
-                        elseif iconHeight > iconWidth then
-                            -- Tall icon: crop left and right
-                            local cropAmount = (1 - iconWidth / iconHeight) / 2
-                            left = left + cropAmount * (1 - 2 * zoom)
-                            right = right - cropAmount * (1 - 2 * zoom)
-                        end
-                        
-                        textureObj:SetTexCoord(left, right, top, bottom)
-                    end
+                    ApplyTrackerIconEdgeStyle(icon, trackerKey, iconWidth, iconHeight)
                 end)
             end
             
-            -- Apply cooldown text properties using helper function
-            ApplyCooldownTextScale(icon, cooldownTextScale, cooldownTextOffsetX, cooldownTextOffsetY, 
-                                  cooldownTextColorR, cooldownTextColorG, cooldownTextColorB, cooldownTextFont)
+            -- Apply cooldown text settings (scale, offset, color, font)
+            ApplyCooldownTextScale(icon, cooldownTextScale, cooldownTextOffsetX, cooldownTextOffsetY,
+                               cooldownTextColorR, cooldownTextColorG, cooldownTextColorB, cooldownTextFont)
             
-            -- Apply count text properties using helper function
+            -- Apply count text settings (scale, offset, color, font)
             ApplyCountTextScale(icon, countTextScale, countTextOffsetX, countTextOffsetY,
                                countTextColorR, countTextColorG, countTextColorB, countTextFont)
             
             -- Apply cooldown visibility settings (sweep and countdown text)
-            local cdFrame = icon.Cooldown or icon.cooldown
-            if cdFrame then
+            local cd = icon.Cooldown or icon.cooldown
+            if cd then
                 -- Apply current settings
                 pcall(function()
-                    cdFrame:SetDrawSwipe(showSweep)
-                    cdFrame:SetHideCountdownNumbers(not showCountdownText)
+                    cd:SetDrawSwipe(showSweep)
+                    cd:SetHideCountdownNumbers(not showCountdownText)
                 end)
                 
                 -- Hook SetCooldown to reapply settings after each Blizzard update
-                if not cdFrame._TUI_CooldownHooked then
-                    cdFrame._TUI_showSweep = showSweep
-                    cdFrame._TUI_showCountdownText = showCountdownText
-                    hooksecurefunc(cdFrame, "SetCooldown", function(self)
+                if not cd._TUI_CooldownHooked then
+                    cd._TUI_showSweep = showSweep
+                    cd._TUI_showCountdownText = showCountdownText
+                    hooksecurefunc(cd, "SetCooldown", function(self)
                         pcall(function()
                             self:SetDrawSwipe(self._TUI_showSweep)
                             self:SetHideCountdownNumbers(not self._TUI_showCountdownText)
                         end)
                     end)
                     -- Also hook SetCooldownFromDurationObject for Midnight API
-                    if cdFrame.SetCooldownFromDurationObject then
-                        hooksecurefunc(cdFrame, "SetCooldownFromDurationObject", function(self)
+                    if cd.SetCooldownFromDurationObject then
+                        hooksecurefunc(cd, "SetCooldownFromDurationObject", function(self)
                             pcall(function()
                                 self:SetDrawSwipe(self._TUI_showSweep)
                                 self:SetHideCountdownNumbers(not self._TUI_showCountdownText)
                             end)
                         end)
                     end
-                    cdFrame._TUI_CooldownHooked = true
+                    cd._TUI_CooldownHooked = true
                 else
                     -- Update stored settings for existing hook
-                    cdFrame._TUI_showSweep = showSweep
-                    cdFrame._TUI_showCountdownText = showCountdownText
+                    cd._TUI_showSweep = showSweep
+                    cd._TUI_showCountdownText = showCountdownText
                 end
             end
             
-            -- Add to Masque group if enabled
+            -- Add to Masque if enabled and not already added
             if useMasque and not icon._TUI_MasqueGroup then
-                -- Reset texcoords to default before Masque takes over
-                pcall(function()
-                    local textureObj = icon.Icon or icon.icon
-                    if textureObj and textureObj.SetTexCoord then
-                        textureObj:SetTexCoord(0, 1, 0, 1)
-                    end
-                    
-                    -- Make icon texture fill the entire frame
-                    if textureObj and textureObj.ClearAllPoints and textureObj.SetAllPoints then
-                        textureObj:ClearAllPoints()
-                        textureObj:SetAllPoints(icon)
-                    end
-                end)
-                
-                -- Disable cooldown edge drawing (Masque handles this)
-                pcall(function()
-                    local cd = icon.Cooldown or icon.cooldown
-                    if cd and cd.SetDrawEdge then
-                        cd:SetDrawEdge(false)
-                    end
-                    -- Make cooldown fill the frame too
-                    if cd and cd.ClearAllPoints and cd.SetAllPoints then
-                        cd:ClearAllPoints()
-                        cd:SetAllPoints(icon)
-                    end
-                end)
-                
-                -- Hide backdrop if icon has one
-                pcall(function()
-                    if icon.SetBackdrop then
-                        icon:SetBackdrop(nil)
-                    end
-                    if icon.SetBackdropColor then
-                        icon:SetBackdropColor(0, 0, 0, 0)
-                    end
-                    if icon.SetBackdropBorderColor then
-                        icon:SetBackdropBorderColor(0, 0, 0, 0)
-                    end
-                end)
-                
-                AddToMasque(trackerKey, icon)
+                AddToMasque(trackerKey, icon, {
+                    Icon = icon.Icon or icon.icon,
+                    Cooldown = icon.Cooldown or icon.cooldown,
+                    Count = icon.Count or icon.count,
+                    Border = icon.Border or icon.IconBorder,
+                })
+            -- Remove from Masque if disabled but was previously added
             elseif not useMasque and icon._TUI_MasqueGroup then
-                -- Remove from Masque if it was disabled
                 RemoveFromMasque(icon)
-                
-                -- Re-enable cooldown edge
-                pcall(function()
-                    local cd = icon.Cooldown or icon.cooldown
-                    if cd and cd.SetDrawEdge then
-                        cd:SetDrawEdge(true)
-                    end
-                end)
             end
             
-            -- Hook tooltip behavior based on showTooltip setting
-            local showTooltip = GetSetting(trackerKey, "showTooltip")
-            if showTooltip == false then
-                -- Disable tooltips: hook OnEnter to suppress
-                if not icon._TUI_TooltipHooked then
-                    icon._TUI_OriginalOnEnter = icon:GetScript("OnEnter")
-                    icon:SetScript("OnEnter", function(self)
-                        -- Do nothing - tooltip suppressed
-                    end)
-                    icon._TUI_TooltipHooked = true
-                    icon._TUI_TooltipDisabled = true
-                end
-            else
-                -- Tooltips enabled - restore if we previously hooked them
-                if icon._TUI_TooltipHooked and icon._TUI_TooltipDisabled then
-                    if icon._TUI_OriginalOnEnter then
-                        icon:SetScript("OnEnter", icon._TUI_OriginalOnEnter)
-                    end
-                    icon._TUI_TooltipDisabled = false
-                end
-            end
+            -- Set up tooltip handling (pass slot index for buff tracker persistent cache)
+            SetupIconTooltip(icon, trackerKey, i)
             
             -- Debug: dump first icon structure when debug mode enabled
             if iconCount == 1 and GetSetting("global", "debugMode") then
@@ -2096,7 +2259,7 @@ local function ApplyGridLayout(viewer, trackerKey)
     -- Calculate total layout dimensions for Edit Mode frame sizing
     local totalCols, totalRows
     if useCustomLayout and #customRowSizes > 0 then
-        -- Custom layout: find max columns and count rows
+        -- Custom grid: find max row width and count rows (including blank rows)
         totalCols = 0
         for _, rowSize in ipairs(customRowSizes) do
             totalCols = math.max(totalCols, rowSize)
@@ -2153,6 +2316,14 @@ local function ApplyGridLayout(viewer, trackerKey)
     
     viewer._TUI_applying = false
     dprint(string.format("ApplyGridLayout [%s]: Complete (%d visible)", trackerKey, iconCount))
+    
+    -- Update container size to match new layout (for Layout Mode overlay)
+    if TUICD.CooldownContainers and TUICD.CooldownContainers.UpdateContainerSize then
+        C_Timer.After(0.05, function()
+            TUICD.CooldownContainers:UpdateContainerSize(trackerKey)
+        end)
+    end
+    
     return true
 end
 
@@ -2168,8 +2339,15 @@ function Cooldowns.RefreshTrackerLayout(trackerKey)
                 end
             end)
         end
+    elseif trackerKey == "buffs" then
+        local viewer = _G["BuffIconCooldownViewer"]
+        if viewer and viewer:IsShown() then
+            C_Timer.After(0, function()
+                pcall(ApplyGridLayout, viewer, "buffs")
+            end)
+        end
     else
-        -- For Blizzard trackers, find viewer and apply layout
+        -- For Essential/Utility trackers
         local viewerName
         for _, tracker in ipairs(TRACKERS) do
             if tracker.key == trackerKey then
@@ -2212,8 +2390,7 @@ Cooldowns.InvalidateBuffStateCache = function(slotIndex)
     local viewer = _G["BuffIconCooldownViewer"]
     if not viewer then return end
     
-    -- Use GetOrderedIcons for consistent ordering with per-icon settings
-    local icons = GetOrderedIcons(viewer, "buffs")
+    local icons = CollectIcons(viewer)
     local icon = icons[slotIndex]
     if icon then
         buffStateCache[icon] = nil  -- Clear cache entry to force re-apply on next tick
@@ -2292,8 +2469,8 @@ local function UpdateBuffVisualStates()
     local viewer = _G["BuffIconCooldownViewer"]
     if not viewer or not viewer:IsShown() then return end
     
-    -- Get all icons - use GetOrderedIcons for consistent ordering with per-icon settings
-    local icons = GetOrderedIcons(viewer, "buffs")
+    -- Get all icons
+    local icons = CollectIcons(viewer)
     
     local activeCount, inactiveCount = 0, 0
     for i, icon in ipairs(icons) do
@@ -2333,6 +2510,12 @@ local function StopBuffStateTracking()
         dprint("Buff state tracking stopped")
     end
 end
+
+-- ============================================================================
+-- RANGE INDICATOR CONTROL (Essential/Utility trackers only)
+-- ============================================================================
+-- We create our own overlay and neutralize Blizzard's built-in one
+-- Only applies to Essential and Utility trackers (not Buffs - those aren't abilities)
 
 -- ============================================================================
 -- CUSTOM TRACKER SYSTEM
@@ -2405,21 +2588,21 @@ local function AddCustomEntry(entryType, idOrName)
         -- Try to parse as ID first
         local numID = tonumber(idOrName)
         if numID then
-            local spellInfo = C_Spell.GetSpellInfo(numID)
+            local spellInfo = SpellAPI:GetSpellInfo(numID)
             if spellInfo then
                 entryID = numID
                 entryName = spellInfo.name
-                entryTexture = C_Spell.GetSpellTexture(numID)
+                entryTexture = SpellAPI:GetSpellTexture(numID)
             else
                 return false, "Spell ID not found: " .. numID
             end
         else
             -- Try to find by name
-            local spellInfo = C_Spell.GetSpellInfo(idOrName)
+            local spellInfo = SpellAPI:GetSpellInfo(idOrName)
             if spellInfo then
                 entryID = spellInfo.spellID
                 entryName = spellInfo.name
-                entryTexture = C_Spell.GetSpellTexture(entryID)
+                entryTexture = SpellAPI:GetSpellTexture(entryID)
             else
                 return false, "Spell not found: " .. idOrName
             end
@@ -2491,6 +2674,12 @@ local function AddCustomEntry(entryType, idOrName)
         }
     end
     
+    -- Auto-enable custom tracker when first entry is added
+    if not GetSetting("customTrackers", "enabled") then
+        SetSetting("customTrackers", "enabled", true)
+        dprint("Auto-enabled custom tracker for first entry")
+    end
+    
     dprint(string.format("Added custom entry: %s %d (%s)", entryType, entryID, entryName or "unknown"))
     return true, "Added: " .. (entryName or entryType .. " " .. entryID)
 end
@@ -2506,17 +2695,6 @@ local function RemoveCustomEntry(index)
         return true
     end
     return false
-end
-
--- Toggle entry enabled state
-local function ToggleCustomEntry(index)
-    local entries = GetCurrentSpecEntries()
-    if index < 1 or index > #entries then return false end
-    
-    local entry = entries[index]
-    entry.enabled = not entry.enabled
-    dprint(string.format("Toggled entry %d enabled: %s", index, tostring(entry.enabled)))
-    return true
 end
 
 -- Set entry enabled state
@@ -2574,21 +2752,6 @@ local function ScanEquippedOnUseItems()
     return items
 end
 
--- Add equipped slot as tracked entry if it has on-use and isn't already tracked
-local function AddEquippedSlotIfNeeded(slotID)
-    local itemID = GetInventoryItemID("player", slotID)
-    if not itemID then return false end
-    
-    local hasOnUse = HasOnUseAbility(itemID)
-    if not hasOnUse then return false end
-    
-    -- Check if this slot is already tracked
-    if EntryExists("equipped", slotID) then return false end
-    
-    -- Add as equipped entry
-    return AddCustomEntry("equipped", slotID)
-end
-
 -- Get info for an entry (handles all types)
 local function GetEntryDisplayInfo(entry)
     if entry.type == "spell" then
@@ -2599,8 +2762,8 @@ local function GetEntryDisplayInfo(entry)
             return cached.name, cached.texture, entry.id
         end
         
-        local spellInfo = C_Spell.GetSpellInfo(entry.id)
-        local texture = C_Spell.GetSpellTexture(entry.id)
+        local spellInfo = SpellAPI:GetSpellInfo(entry.id)
+        local texture = SpellAPI:GetSpellTexture(entry.id)
         local name = spellInfo and spellInfo.name or "Unknown Spell"
         
         -- Update cache
@@ -2695,28 +2858,41 @@ local function CreateCustomTrackerIcon(entry, parent)
     -- Generate unique key
     local entryKey = entry.type .. "_" .. entry.id
     
-    -- Create simple button frame
+    -- Create button frame
     local frame = CreateFrame("Button", "TweaksUI_CustomTracker_" .. entryKey, parent)
     frame:SetSize(36, 36)
     
     -- Create icon texture
-    local icon = frame:CreateTexture(nil, "ARTWORK")
+    local icon = frame:CreateTexture(nil, "BACKGROUND")
     icon:SetAllPoints(frame)
     icon:SetTexture(displayTexture)
-    icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    
+    -- Create mask texture for rounded corners (hidden by default)
+    local iconMask = frame:CreateMaskTexture()
+    iconMask:SetAllPoints(icon)
+    iconMask:SetTexture("Interface\\AddOns\\!TUICD\\Media\\Textures\\Masks\\Mask_Rounded", "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+    
+    -- Apply initial edge style
+    local trackerKey = "customTrackers"
+    local edgeStyle = GetSetting(trackerKey, "iconEdgeStyle") or "sharp"
+    local zoom = GetSetting(trackerKey, "zoom") or 0.08
+    
+    if edgeStyle == "rounded" then
+        icon:SetTexCoord(0, 1, 0, 1)  -- Full texture for mask
+        icon:AddMaskTexture(iconMask)
+    elseif edgeStyle == "square" then
+        icon:SetTexCoord(0, 1, 0, 1)  -- No zoom
+    else  -- "sharp" (default)
+        icon:SetTexCoord(zoom, 1 - zoom, zoom, 1 - zoom)
+    end
     
     -- Create cooldown frame overlay
     local cd = CreateFrame("Cooldown", nil, frame, "CooldownFrameTemplate")
     cd:SetAllPoints(frame)
-    cd:SetDrawEdge(false)
+    cd:SetDrawEdge(true)
     cd:SetDrawSwipe(true)
     cd:SetSwipeColor(0, 0, 0, 0.8)
     cd:SetHideCountdownNumbers(false)
-    
-    -- Disable bling effects
-    if cd.SetDrawBling then cd:SetDrawBling(false) end
-    if cd.SetBlingTexture then cd:SetBlingTexture("") end
-    if cd.SetEdgeTexture then cd:SetEdgeTexture("") end
     
     -- Count text (for items with stacks or spell charges)
     local countText = frame:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
@@ -2731,23 +2907,17 @@ local function CreateCustomTrackerIcon(entry, parent)
     -- Store references
     frame.icon = icon
     frame.Icon = icon
+    frame.iconMask = iconMask
     frame.cooldown = cd
     frame.Cooldown = cd
     frame.count = countText
-    frame.Count = countText
-    frame.entry = entry
-    frame.entryType = entry.type
+    frame.entry = entry           -- Store the full entry
+    frame.entryType = entry.type  -- For backwards compat
     frame.entryID = entry.id
     frame.entryKey = entryKey
     frame.entryName = displayName
-    frame.trackType = trackType
-    frame.trackID = trackID
-    
-    -- Store spellID for Midnight API compatibility (CooldownHighlights needs this)
-    if trackType == "spell" and trackID then
-        frame.spellID = trackID
-        frame.SpellID = trackID
-    end
+    frame.trackType = trackType   -- Actual type for cooldown tracking
+    frame.trackID = trackID       -- Actual ID for cooldown tracking
     
     -- Enable mouse for tooltips
     frame:EnableMouse(true)
@@ -2757,7 +2927,7 @@ local function CreateCustomTrackerIcon(entry, parent)
         if InCombatLockdown() then return end
         
         -- Check if tooltips are disabled for this tracker
-        if GetSetting("customTrackers", "showTooltip") == false then return end
+        if GetSetting(trackerKey, "showTooltip") == false then return end
         
         pcall(function()
             GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
@@ -2787,17 +2957,6 @@ local function CreateCustomTrackerIcon(entry, parent)
             GameTooltip:Hide()
         end
     end)
-    
-    -- Add to Masque if enabled
-    if IsMasqueEnabled("customTrackers") then
-        -- Reset texcoords for Masque
-        icon:SetTexCoord(0, 1, 0, 1)
-        
-        -- Disable cooldown edge (Masque handles this)
-        cd:SetDrawEdge(false)
-        
-        AddToMasque("customTrackers", frame)
-    end
     
     dprint(string.format("Created custom tracker icon: %s %d (%s)", entry.type, entry.id, displayName or "?"))
     
@@ -2864,12 +3023,17 @@ local function UpdateCustomTrackerCooldown(iconFrame)
     elseif trackType == "spell" then
         -- =====================================================================
         -- SPELL COOLDOWN - Midnight API compatible
-        -- Use Duration Objects and GetSpellDisplayCount for secret value safety
+        -- Use Duration Objects which handle secret values internally
+        -- CRITICAL: During combat, cooldown values are SECRET - don't try to
+        -- read them directly or do arithmetic on them!
         -- =====================================================================
         local cooldownSet = false
         
+        -- Check if we're in a restricted state (combat, encounter, M+, etc.)
+        local isRestricted = InCombatLockdown()
+        
         -- Try charges cooldown first (C_Spell.GetSpellChargesCooldownDuration)
-        -- If this returns a valid duration, the spell has charges and is recharging
+        -- Duration Objects are safe to use with SetCooldownFromDurationObject
         if C_Spell.GetSpellChargesCooldownDuration then
             pcall(function()
                 local chargeDuration = C_Spell.GetSpellChargesCooldownDuration(trackID)
@@ -2880,7 +3044,7 @@ local function UpdateCustomTrackerCooldown(iconFrame)
             end)
         end
         
-        -- If no charge cooldown, try regular cooldown
+        -- If no charge cooldown, try regular cooldown Duration Object
         if not cooldownSet and C_Spell.GetSpellCooldownDuration then
             pcall(function()
                 local duration = C_Spell.GetSpellCooldownDuration(trackID)
@@ -2891,34 +3055,45 @@ local function UpdateCustomTrackerCooldown(iconFrame)
             end)
         end
         
-        -- Final fallback: Traditional API
-        if not cooldownSet then
+        -- Traditional API fallback - ONLY when not in combat
+        -- During combat, info.startTime and info.duration are SECRET values
+        -- and cannot be passed to SetCooldown or used in arithmetic
+        if not cooldownSet and not isRestricted then
             pcall(function()
                 local info = C_Spell.GetSpellCooldown(trackID)
                 if info and info.duration and info.startTime then
-                    iconFrame.cooldown:SetCooldown(info.startTime, info.duration)
+                    if info.duration > 0 then
+                        iconFrame.cooldown:SetCooldown(info.startTime, info.duration)
+                    else
+                        iconFrame.cooldown:Clear()
+                    end
                     cooldownSet = true
                 end
             end)
         end
         
-        if not cooldownSet then
+        -- IMPORTANT: Don't call Clear() during combat!
+        -- If Duration Object APIs didn't set a cooldown, just leave it alone.
+        -- Calling Clear() every tick when APIs fail causes flashing.
+        if not cooldownSet and not isRestricted then
             pcall(function() iconFrame.cooldown:Clear() end)
         end
         
-        -- Check cooldown state from SOURCE API (not the frame - avoid forbidden table)
-        -- Use C_Spell.GetSpellCooldown which returns non-secret values for player spells
-        pcall(function()
-            local info = C_Spell.GetSpellCooldown(trackID)
-            if info and info.duration and info.startTime then
-                local duration = info.duration
-                local remaining = (info.startTime + duration) - GetTime()
-                -- Only consider "on cooldown" if duration > GCD and remaining > 0.1s
-                if duration > GCD_THRESHOLD and remaining > 0.1 then
-                    isOnCooldown = true
+        -- Desaturation check - ONLY when not in combat
+        -- During combat, we cannot read cooldown values (they're secret)
+        -- so we skip desaturation updates - the visual cooldown swipe is enough
+        if not isRestricted then
+            pcall(function()
+                local info = C_Spell.GetSpellCooldown(trackID)
+                if info and info.duration and info.startTime then
+                    local duration = info.duration
+                    local remaining = (info.startTime + duration) - GetTime()
+                    if duration > GCD_THRESHOLD and remaining > 0.1 then
+                        isOnCooldown = true
+                    end
                 end
-            end
-        end)
+            end)
+        end
         
         -- =====================================================================
         -- CHARGE/COUNT DISPLAY - Use Midnight's GetSpellDisplayCount API
@@ -2927,19 +3102,17 @@ local function UpdateCustomTrackerCooldown(iconFrame)
         local countSet = false
         
         -- Primary: Use C_Spell.GetSpellDisplayCount (Midnight API)
-        -- This returns a formatted string (or empty) that's safe to display
         if C_Spell.GetSpellDisplayCount then
             pcall(function()
                 local displayCount = C_Spell.GetSpellDisplayCount(trackID)
-                -- Pass directly to SetText - don't check if empty, let the API handle it
                 iconFrame.count:SetText(displayCount or "")
                 iconFrame.count:Show()
                 countSet = true
             end)
         end
         
-        -- Fallback: Try GetSpellCharges for non-Midnight clients
-        if not countSet then
+        -- Fallback: Try GetSpellCharges (only when not in combat)
+        if not countSet and not isRestricted then
             pcall(function()
                 local chargesInfo = C_Spell.GetSpellCharges(trackID)
                 if chargesInfo and chargesInfo.maxCharges and chargesInfo.maxCharges > 1 then
@@ -2949,15 +3122,57 @@ local function UpdateCustomTrackerCooldown(iconFrame)
                     iconFrame.count:Hide()
                 end
             end)
+        elseif not countSet then
+            -- During combat without GetSpellDisplayCount, just hide count
+            iconFrame.count:Hide()
         end
     end
     
     -- Apply desaturation based on cooldown state
+    -- Note: During combat, isOnCooldown may be false even when on cooldown
+    -- because we can't read secret values. This is acceptable - the swipe is visible.
     pcall(function()
         if iconFrame.icon and iconFrame.icon.SetDesaturated then
             iconFrame.icon:SetDesaturated(isOnCooldown)
         end
     end)
+end
+
+-- Apply edge style settings to all custom tracker icons
+local function ApplyCustomTrackerEdgeStyles()
+    local trackerKey = "customTrackers"
+    
+    -- Check for global icon edge style override first
+    local edgeStyle
+    if TUICD.Media and TUICD.Media:IsUsingGlobalIconEdgeStyle() then
+        edgeStyle = TUICD.Media:GetGlobalIconEdgeStyle() or "sharp"
+    else
+        edgeStyle = GetSetting(trackerKey, "iconEdgeStyle") or "sharp"
+    end
+    local zoom = GetSetting(trackerKey, "zoom") or 0.08
+    
+    for key, iconFrame in pairs(customTrackerIcons) do
+        local icon = iconFrame.icon
+        local iconMask = iconFrame.iconMask
+        
+        if icon then
+            -- Remove existing mask first
+            if iconMask then
+                icon:RemoveMaskTexture(iconMask)
+            end
+            
+            if edgeStyle == "rounded" then
+                icon:SetTexCoord(0, 1, 0, 1)  -- Full texture for mask
+                if iconMask then
+                    icon:AddMaskTexture(iconMask)
+                end
+            elseif edgeStyle == "square" then
+                icon:SetTexCoord(0, 1, 0, 1)  -- No zoom
+            else  -- "sharp" (default)
+                icon:SetTexCoord(zoom, 1 - zoom, zoom, 1 - zoom)
+            end
+        end
+    end
 end
 
 -- Create the custom tracker display frame
@@ -2996,6 +3211,11 @@ end
 
 -- Check if custom tracker frame should be visible based on conditions
 local function ShouldShowCustomTrackers()
+    -- Force all visible mode bypasses all visibility conditions
+    if TUICD.forceAllVisible then
+        return true
+    end
+    
     -- Always show in Edit Mode for positioning
     if EditModeManagerFrame and EditModeManagerFrame:IsShown() then
         return true
@@ -3055,15 +3275,6 @@ local function ShouldShowCustomTrackers()
         shouldShow = true
     end
     
-    -- Mounted state
-    local isMounted = IsMounted()
-    if isMounted and GetSetting(trackerKey, "showMounted") then
-        shouldShow = true
-    end
-    if not isMounted and GetSetting(trackerKey, "showNotMounted") then
-        shouldShow = true
-    end
-    
     return shouldShow
 end
 
@@ -3071,16 +3282,17 @@ end
 local function UpdateCustomTrackerVisibility()
     if not customTrackerFrame then return end
     
-    -- Check if hidden by Individual Icons settings FIRST (highest priority except disabled)
-    if TUICD.CooldownHighlights and TUICD.CooldownHighlights.IsTrackerHidden and TUICD.CooldownHighlights:IsTrackerHidden("custom") then
-        customTrackerFrame:Hide()
-        return
-    end
-    
-    -- Always show in Edit Mode for positioning (but not if hidden by per-icon)
+    -- Always show in Edit Mode for positioning
     if EditModeManagerFrame and EditModeManagerFrame:IsShown() then
         customTrackerFrame:Show()
         customTrackerFrame:SetAlpha(1.0)
+        return
+    end
+    
+    -- Check if hidden via per-icon settings
+    local CooldownHighlights = TUICD.CooldownHighlights
+    if CooldownHighlights and CooldownHighlights:IsTrackerHidden("custom") then
+        customTrackerFrame:Hide()
         return
     end
     
@@ -3112,24 +3324,21 @@ end
 local function LayoutCustomTrackerIcons()
     if not customTrackerFrame then return end
     
-    -- Check if hidden by Individual Icons settings - we'll still layout but hide frame at end
-    local isHiddenByPerIcon = TUICD.CooldownHighlights and TUICD.CooldownHighlights.IsTrackerHidden and TUICD.CooldownHighlights:IsTrackerHidden("custom")
-    
-    -- Collect visible icons and sort by listIndex to maintain order
-    local icons = {}
+    -- Collect all icons (including hidden) and sort by listIndex
+    local allIcons = {}
     for key, iconFrame in pairs(customTrackerIcons) do
-        icons[#icons + 1] = iconFrame
+        allIcons[#allIcons + 1] = iconFrame
     end
     
-    -- Sort by listIndex to maintain user-defined order
-    table.sort(icons, function(a, b)
+    -- Sort by listIndex to get consistent order for per-icon settings
+    table.sort(allIcons, function(a, b)
         return (a.listIndex or 0) < (b.listIndex or 0)
     end)
     
-    -- Apply per-icon hide based on layout order (BEFORE any reversal)
-    for idx, icon in ipairs(icons) do
-        local isIconHidden = TUICD.CooldownHighlights and TUICD.CooldownHighlights:IsIconHidden("custom", idx)
-        if isIconHidden then
+    -- Apply per-icon hide BEFORE layout based on listIndex order
+    for idx, icon in ipairs(allIcons) do
+        local isHiddenByPerIcon = TUICD.CooldownHighlights and TUICD.CooldownHighlights:IsIconHidden("custom", idx)
+        if isHiddenByPerIcon then
             icon:SetAlpha(0)
             icon._TUI_hiddenByPerIcon = true
         else
@@ -3137,9 +3346,17 @@ local function LayoutCustomTrackerIcons()
         end
     end
     
+    -- Now filter to only visible icons for layout
+    local icons = {}
+    for _, iconFrame in ipairs(allIcons) do
+        if iconFrame:IsShown() then
+            icons[#icons + 1] = iconFrame
+        end
+    end
+    
     if #icons == 0 then
-        -- Only show placeholder during Edit Mode (and not hidden by per-icon settings)
-        if EditModeManagerFrame and EditModeManagerFrame:IsShown() and not isHiddenByPerIcon then
+        -- Only show placeholder during Edit Mode
+        if EditModeManagerFrame and EditModeManagerFrame:IsShown() then
             -- Create or show placeholder for empty frame (for Edit Mode visibility)
             if not customTrackerFrame.placeholder then
                 local placeholder = customTrackerFrame:CreateTexture(nil, "BACKGROUND")
@@ -3158,13 +3375,10 @@ local function LayoutCustomTrackerIcons()
             customTrackerFrame:SetSize(50, 50)  -- Minimum size for Edit Mode visibility
             customTrackerFrame:Show()
         else
-            -- Hide placeholder outside Edit Mode or when hidden by per-icon
+            -- Hide placeholder outside Edit Mode
             if customTrackerFrame.placeholder then
                 customTrackerFrame.placeholder:Hide()
                 customTrackerFrame.placeholderText:Hide()
-            end
-            if isHiddenByPerIcon then
-                customTrackerFrame:Hide()
             end
         end
         return
@@ -3196,12 +3410,13 @@ local function LayoutCustomTrackerIcons()
     
     local zoom = GetSetting(trackerKey, "zoom") or 0.08
     local iconOpacity = GetCombatAwareOpacity(trackerKey)
+    local borderAlpha = GetSetting(trackerKey, "borderAlpha") or 1.0
     local cooldownTextScale = GetSetting(trackerKey, "cooldownTextScale") or 1.0
     local cooldownTextOffsetX = GetSetting(trackerKey, "cooldownTextOffsetX") or 0
     local cooldownTextOffsetY = GetSetting(trackerKey, "cooldownTextOffsetY") or 0
     local cooldownTextColorR = GetSetting(trackerKey, "cooldownTextColorR") or 1.0
-    local cooldownTextColorG = GetSetting(trackerKey, "cooldownTextColorG") or 1.0
-    local cooldownTextColorB = GetSetting(trackerKey, "cooldownTextColorB") or 1.0
+    local cooldownTextColorG = GetSetting(trackerKey, "cooldownTextColorG") or 0.82
+    local cooldownTextColorB = GetSetting(trackerKey, "cooldownTextColorB") or 0.0
     local cooldownTextFont = GetSetting(trackerKey, "cooldownTextFont") or "Default"
     local countTextScale = GetSetting(trackerKey, "countTextScale") or 1.0
     local countTextOffsetX = GetSetting(trackerKey, "countTextOffsetX") or 0
@@ -3257,15 +3472,12 @@ local function LayoutCustomTrackerIcons()
         iconWidth, iconHeight = iconSize, iconSize
     end
     
-    -- Get border alpha for styling
-    local borderAlpha = GetSetting(trackerKey, "borderAlpha") or 1.0
-    
     -- Check if custom grid is enabled
     local useCustomGrid = GetSetting(trackerKey, "useCustomGrid") or false
     
-    -- Debug: print custom grid status for custom trackers
+    -- Debug: Always print custom grid status for custom trackers
     if settings and settings.global and settings.global.debugMode then
-        print(string.format("|cff00ff00[TUI:CD]|r LayoutCustomTrackerIcons: useCustomGrid=%s, customLayout='%s'", 
+        print(string.format("|cff00ff00[TUI CD]|r LayoutCustomTrackerIcons: useCustomGrid=%s, customLayout='%s'", 
             tostring(useCustomGrid), customLayout))
     end
     
@@ -3299,19 +3511,19 @@ local function LayoutCustomTrackerIcons()
     
     -- CUSTOM GRID MODE: Row or Column based pattern with alignment
     if useCustomLayout and #customRowSizes > 0 then
-        -- Hide all icons first to reset visibility
+        -- Hide all icons first
         for _, icon in ipairs(icons) do
             icon:Hide()
         end
         
         -- Get custom grid settings
         local customGridMode = GetSetting(trackerKey, "customGridMode") or "ROW"
-        local customGridAlign = GetSetting(trackerKey, "customGridAlign") or "START"
+        local customGridAlign = GetSetting(trackerKey, "customGridAlign") or (customGridMode == "COLUMN" and "TOP" or "LEFT")
         
         local iconCount = 0
         local iconIdx = 1
-        local maxPrimary = 0
-        local totalSecondary = 0
+        local maxPrimary = 0    -- Track the max size in primary direction
+        local totalSecondary = 0 -- Track total in secondary direction
         
         -- Determine overflow size
         local overflowSize = customRowSizes[#customRowSizes]
@@ -3326,13 +3538,13 @@ local function LayoutCustomTrackerIcons()
         if overflowSize == 0 then overflowSize = columns end
         
         -- Helper function to apply styling to an icon
-        local function StyleIcon(icon)
+        local function StyleIcon(icon, currentIconIdx)
             icon:SetSize(iconWidth, iconHeight)
-            
-            -- Apply opacity (skip if icon is hidden by per-icon settings)
+            -- Skip alpha if icon is hidden by per-icon settings
             if not icon._TUI_hiddenByPerIcon then
                 icon:SetAlpha(iconOpacity)
             end
+            -- Per-icon hide is applied before layout
             
             local useMasque = IsMasqueEnabled(trackerKey)
             if not useMasque then
@@ -3348,38 +3560,38 @@ local function LayoutCustomTrackerIcons()
                                countTextColorR, countTextColorG, countTextColorB, countTextFont)
             
             -- Apply cooldown visibility settings (sweep and countdown text)
-            local cd = icon.Cooldown or icon.cooldown
-            if cd then
+            local cdFrame = icon.Cooldown or icon.cooldown
+            if cdFrame then
                 -- Apply current settings
                 pcall(function()
-                    cd:SetDrawSwipe(showSweep)
-                    cd:SetHideCountdownNumbers(not showCountdownText)
+                    cdFrame:SetDrawSwipe(showSweep)
+                    cdFrame:SetHideCountdownNumbers(not showCountdownText)
                 end)
                 
                 -- Hook SetCooldown to reapply settings after each Blizzard update
-                if not cd._TUI_CooldownHooked then
-                    cd._TUI_showSweep = showSweep
-                    cd._TUI_showCountdownText = showCountdownText
-                    hooksecurefunc(cd, "SetCooldown", function(self)
+                if not cdFrame._TUI_CooldownHooked then
+                    cdFrame._TUI_showSweep = showSweep
+                    cdFrame._TUI_showCountdownText = showCountdownText
+                    hooksecurefunc(cdFrame, "SetCooldown", function(self)
                         pcall(function()
                             self:SetDrawSwipe(self._TUI_showSweep)
                             self:SetHideCountdownNumbers(not self._TUI_showCountdownText)
                         end)
                     end)
                     -- Also hook SetCooldownFromDurationObject for Midnight API
-                    if cd.SetCooldownFromDurationObject then
-                        hooksecurefunc(cd, "SetCooldownFromDurationObject", function(self)
+                    if cdFrame.SetCooldownFromDurationObject then
+                        hooksecurefunc(cdFrame, "SetCooldownFromDurationObject", function(self)
                             pcall(function()
                                 self:SetDrawSwipe(self._TUI_showSweep)
                                 self:SetHideCountdownNumbers(not self._TUI_showCountdownText)
                             end)
                         end)
                     end
-                    cd._TUI_CooldownHooked = true
+                    cdFrame._TUI_CooldownHooked = true
                 else
                     -- Update stored settings for existing hook
-                    cd._TUI_showSweep = showSweep
-                    cd._TUI_showCountdownText = showCountdownText
+                    cdFrame._TUI_showSweep = showSweep
+                    cdFrame._TUI_showCountdownText = showCountdownText
                 end
             end
             
@@ -3394,30 +3606,15 @@ local function LayoutCustomTrackerIcons()
                 RemoveFromMasque(icon)
             end
             
-            local showTooltip = GetSetting(trackerKey, "showTooltip")
-            if showTooltip == false then
-                if not icon._TUI_TooltipHooked then
-                    icon._TUI_OriginalOnEnter = icon:GetScript("OnEnter")
-                    icon:SetScript("OnEnter", function(self) end)
-                    icon._TUI_TooltipHooked = true
-                    icon._TUI_TooltipDisabled = true
-                end
-            else
-                -- Tooltips enabled - restore if we previously hooked them
-                if icon._TUI_TooltipHooked and icon._TUI_TooltipDisabled then
-                    if icon._TUI_OriginalOnEnter then
-                        icon:SetScript("OnEnter", icon._TUI_OriginalOnEnter)
-                    end
-                    icon._TUI_TooltipDisabled = false
-                end
-            end
+            -- Set up tooltip handling (pass slot index for buff tracker persistent cache)
+            SetupIconTooltip(icon, trackerKey, currentIconIdx)
         end
         
         -- Track placed icons for second-pass alignment
         local placedIcons = {}
         
         if customGridMode == "COLUMN" then
-            -- COLUMN MODE: Fill down, then wrap right
+            -- COLUMN MODE: Fill down (primary), then wrap right (secondary)
             local currentCol = 0
             
             for _, colSize in ipairs(customRowSizes) do
@@ -3428,12 +3625,10 @@ local function LayoutCustomTrackerIcons()
                     for rowIdx = 1, colSize do
                         if iconIdx <= #icons then
                             local icon = icons[iconIdx]
-                            local currentIconIdx = iconIdx
                             iconIdx = iconIdx + 1
                             iconCount = iconCount + 1
                             icon:Show()
-                            StyleIcon(icon)
-                            
+                            StyleIcon(icon, iconIdx - 1)
                             table.insert(placedIcons, {icon = icon, col = currentCol, row = rowIdx - 1, groupSize = colSize})
                             iconsInThisCol = iconsInThisCol + 1
                         end
@@ -3449,20 +3644,19 @@ local function LayoutCustomTrackerIcons()
             -- Handle overflow
             while iconIdx <= #icons do
                 local iconsInThisCol = 0
-                local overflowStartIdx = #placedIcons + 1
+                local overflowStartIdx = #placedIcons + 1  -- Track where overflow icons start
                 for rowIdx = 1, overflowSize do
                     if iconIdx <= #icons then
                         local icon = icons[iconIdx]
-                        local currentIconIdx = iconIdx
                         iconIdx = iconIdx + 1
                         iconCount = iconCount + 1
                         icon:Show()
-                        StyleIcon(icon)
-                        
-                        table.insert(placedIcons, {icon = icon, col = currentCol, row = rowIdx - 1, groupSize = 0})
+                        StyleIcon(icon, iconIdx - 1)
+                        table.insert(placedIcons, {icon = icon, col = currentCol, row = rowIdx - 1, groupSize = 0})  -- Will update after
                         iconsInThisCol = iconsInThisCol + 1
                     end
                 end
+                -- Update groupSize for all icons in this overflow column to actual count
                 for i = overflowStartIdx, #placedIcons do
                     placedIcons[i].groupSize = iconsInThisCol
                 end
@@ -3500,11 +3694,11 @@ local function LayoutCustomTrackerIcons()
             end
             
             customTrackerFrame:SetSize(totalWidth, totalHeight)
-            dprint(string.format("LayoutCustomTrackerIcons: Custom COLUMN grid - %d/%d icons, %d cols, size=%.0fx%.0f, align=%s", 
-                iconCount, #icons, totalSecondary, totalWidth, totalHeight, customGridAlign))
+            dprint(string.format("LayoutCustomTrackerIcons [%s]: Custom COLUMN grid - %d/%d icons, %d cols, maxHeight=%d, size=%.0fx%.0f, align=%s", 
+                trackerKey, iconCount, #icons, totalSecondary, maxPrimary, totalWidth, totalHeight, customGridAlign))
             
         else
-            -- ROW MODE: Fill right, then wrap down
+            -- ROW MODE: Fill right (primary), then wrap down (secondary)
             local currentRow = 0
             
             for _, rowSize in ipairs(customRowSizes) do
@@ -3515,12 +3709,10 @@ local function LayoutCustomTrackerIcons()
                     for colIdx = 1, rowSize do
                         if iconIdx <= #icons then
                             local icon = icons[iconIdx]
-                            local currentIconIdx = iconIdx
                             iconIdx = iconIdx + 1
                             iconCount = iconCount + 1
                             icon:Show()
-                            StyleIcon(icon)
-                            
+                            StyleIcon(icon, iconIdx - 1)
                             table.insert(placedIcons, {icon = icon, col = colIdx - 1, row = currentRow, groupSize = rowSize})
                             iconsInThisRow = iconsInThisRow + 1
                         end
@@ -3536,20 +3728,19 @@ local function LayoutCustomTrackerIcons()
             -- Handle overflow
             while iconIdx <= #icons do
                 local iconsInThisRow = 0
-                local overflowStartIdx = #placedIcons + 1
+                local overflowStartIdx = #placedIcons + 1  -- Track where overflow icons start
                 for colIdx = 1, overflowSize do
                     if iconIdx <= #icons then
                         local icon = icons[iconIdx]
-                        local currentIconIdx = iconIdx
                         iconIdx = iconIdx + 1
                         iconCount = iconCount + 1
                         icon:Show()
-                        StyleIcon(icon)
-                        
-                        table.insert(placedIcons, {icon = icon, col = colIdx - 1, row = currentRow, groupSize = 0})
+                        StyleIcon(icon, iconIdx - 1)
+                        table.insert(placedIcons, {icon = icon, col = colIdx - 1, row = currentRow, groupSize = 0})  -- Will update after
                         iconsInThisRow = iconsInThisRow + 1
                     end
                 end
+                -- Update groupSize for all icons in this overflow row to actual count
                 for i = overflowStartIdx, #placedIcons do
                     placedIcons[i].groupSize = iconsInThisRow
                 end
@@ -3587,53 +3778,14 @@ local function LayoutCustomTrackerIcons()
             end
             
             customTrackerFrame:SetSize(totalWidth, totalHeight)
-            dprint(string.format("LayoutCustomTrackerIcons: Custom ROW grid - %d/%d icons, %d rows, size=%.0fx%.0f, align=%s", 
-                iconCount, #icons, totalSecondary, totalWidth, totalHeight, customGridAlign))
-        end
-        
-        -- Show or hide based on per-icon settings
-        if isHiddenByPerIcon then
-            customTrackerFrame:Hide()
-        else
-            customTrackerFrame:Show()
+            dprint(string.format("LayoutCustomTrackerIcons [%s]: Custom ROW grid - %d/%d icons, %d rows, maxWidth=%d, size=%.0fx%.0f, align=%s", 
+                trackerKey, iconCount, #icons, totalSecondary, maxPrimary, totalWidth, totalHeight, customGridAlign))
         end
         
         return  -- Early return for custom grid
     end
     
-    -- STANDARD LAYOUT (no custom grid)
-    -- Parse custom layout pattern
-    local customRowSizes = {}
-    local useCustomLayout = false
-    if customLayout and customLayout ~= "" then
-        for num in customLayout:gmatch("(%d+)") do
-            local n = tonumber(num)
-            if n and n >= 0 then
-                table.insert(customRowSizes, n)
-                -- Only mark as custom layout if at least one row has icons
-                if n > 0 then
-                    useCustomLayout = true
-                end
-            end
-        end
-        -- If we parsed numbers but all were 0, don't use custom layout
-        if #customRowSizes > 0 and not useCustomLayout then
-            customRowSizes = {}
-        end
-    end
-    
-    -- Build cumulative index to row/col mapping for custom layout
-    -- Row index increments even for 0-sized rows (creating blank space)
-    local customMapping = {}
-    if useCustomLayout then
-        local iconIdx = 1
-        for row, rowSize in ipairs(customRowSizes) do
-            for col = 1, rowSize do
-                customMapping[iconIdx] = { row = row - 1, col = col - 1 }
-                iconIdx = iconIdx + 1
-            end
-        end
-    end
+    -- Standard grid layout (no custom pattern)
     
     -- Determine if primary direction is horizontal or vertical
     local primaryIsHorizontal = (growDir == "LEFT" or growDir == "RIGHT")
@@ -3653,21 +3805,15 @@ local function LayoutCustomTrackerIcons()
     
     for i, icon in ipairs(icons) do
         local col, row
+        local idx = i - 1
         
-        if useCustomLayout and customMapping[i] then
-            col = customMapping[i].col
-            row = customMapping[i].row
+        if primaryIsHorizontal then
+            col = idx % columns
+            row = math.floor(idx / columns)
         else
-            local idx = i - 1
-            
-            if primaryIsHorizontal then
-                col = idx % columns
-                row = math.floor(idx / columns)
-            else
-                local effectiveRows = numRows > 0 and numRows or math.ceil(#icons / columns)
-                row = idx % effectiveRows
-                col = math.floor(idx / effectiveRows)
-            end
+            local effectiveRows = numRows > 0 and numRows or math.ceil(#icons / columns)
+            row = idx % effectiveRows
+            col = math.floor(idx / effectiveRows)
         end
         
         -- Check row limit
@@ -3751,47 +3897,39 @@ local function LayoutCustomTrackerIcons()
             local alignOffsetY = 0
             
             if primaryIsHorizontal then
-                -- Row mode: alignment affects horizontal positioning
+                -- Horizontal primary: alignment affects horizontal positioning
                 if alignment == "CENTER" or alignment == "RIGHT" then
-                    local iconsInThisRow = columns
-                    if useCustomLayout and customRowSizes[pos.row + 1] then
-                        iconsInThisRow = customRowSizes[pos.row + 1]
-                    else
-                        -- Standard grid: last row may have fewer icons
-                        local iconsBeforeThisRow = pos.row * columns
-                        local iconsRemaining = #icons - iconsBeforeThisRow
-                        iconsInThisRow = math.min(columns, iconsRemaining)
-                    end
+                    -- Calculate actual icons in this row
+                    local iconsBeforeThisRow = pos.row * columns
+                    local iconsRemaining = #icons - iconsBeforeThisRow
+                    local iconsInThisRow = math.min(columns, iconsRemaining)
                     
                     local rowWidth = iconsInThisRow * iconWidth + (iconsInThisRow - 1) * spacingH
                     
                     if alignment == "CENTER" then
                         alignOffsetX = (totalWidth - rowWidth) / 2
-                    elseif alignment == "RIGHT" then
+                    else -- RIGHT
                         alignOffsetX = totalWidth - rowWidth
                     end
                 end
-                -- LEFT alignment = 0 offset (default)
             else
-                -- Column mode: alignment affects vertical positioning (TOP/MIDDLE/BOTTOM)
+                -- Vertical primary (column mode): alignment affects vertical positioning
+                -- LEFT = Top, CENTER = Middle, RIGHT = Bottom
                 if alignment == "CENTER" or alignment == "RIGHT" then
-                    -- Count icons in this column
-                    local iconsInThisCol = 0
-                    for _, p in ipairs(iconPositions) do
-                        if p and not p.hidden and p.col == pos.col then
-                            iconsInThisCol = iconsInThisCol + 1
-                        end
-                    end
+                    -- Calculate actual icons in this column
+                    local effectiveRows = numRows > 0 and numRows or math.ceil(#icons / columns)
+                    local iconsBeforeThisCol = pos.col * effectiveRows
+                    local iconsRemaining = #icons - iconsBeforeThisCol
+                    local iconsInThisCol = math.min(effectiveRows, iconsRemaining)
                     
-                    local colHeight = (iconsInThisCol * iconHeight) + ((iconsInThisCol - 1) * spacingV)
+                    local colHeight = iconsInThisCol * iconHeight + (iconsInThisCol - 1) * spacingV
                     
                     if alignment == "CENTER" then
                         alignOffsetY = -(totalHeight - colHeight) / 2
-                    elseif alignment == "RIGHT" then -- RIGHT = BOTTOM in column mode
+                    else -- RIGHT (means Bottom in column mode)
                         alignOffsetY = -(totalHeight - colHeight)
                     end
                 end
-                -- LEFT/TOP alignment = 0 offset (default)
             end
             
             finalX = finalX + alignOffsetX
@@ -3800,14 +3938,16 @@ local function LayoutCustomTrackerIcons()
             icon:ClearAllPoints()
             icon:SetPoint("TOPLEFT", customTrackerFrame, "TOPLEFT", finalX, finalY)
             icon:SetSize(iconWidth, iconHeight)
-            
-            -- Apply opacity (skip if icon is hidden by per-icon settings)
-            if not icon._TUI_hiddenByPerIcon then
-                icon:SetAlpha(iconOpacity)
-            end
+            icon:SetAlpha(iconOpacity)
+            -- Per-icon hide is applied after visual slots are assigned
             
             -- Check if Masque is handling appearance
             local useMasque = IsMasqueEnabled("customTrackers")
+            
+            -- Apply border alpha (skip if Masque is handling it)
+            if not useMasque then
+                ApplyBorderAlpha(icon, borderAlpha)
+            end
             
             -- Apply zoom and aspect ratio cropping (skip if Masque is handling it)
             if not useMasque then
@@ -3834,11 +3974,11 @@ local function LayoutCustomTrackerIcons()
                 end)
             end
             
-            -- Apply cooldown text properties
+            -- Apply cooldown text settings (scale, offset, color, font)
             ApplyCooldownTextScale(icon, cooldownTextScale, cooldownTextOffsetX, cooldownTextOffsetY,
-                                  cooldownTextColorR, cooldownTextColorG, cooldownTextColorB, cooldownTextFont)
+                               cooldownTextColorR, cooldownTextColorG, cooldownTextColorB, cooldownTextFont)
             
-            -- Apply count text properties
+            -- Apply count text settings (scale, offset, color, font)
             ApplyCountTextScale(icon, countTextScale, countTextOffsetX, countTextOffsetY,
                                countTextColorR, countTextColorG, countTextColorB, countTextFont)
             
@@ -3878,35 +4018,17 @@ local function LayoutCustomTrackerIcons()
                 end
             end
             
-            -- Handle Masque group membership
+            -- Add to Masque if enabled and not already added
             if useMasque and not icon._TUI_MasqueGroup then
-                -- Reset texcoords to default before Masque takes over
-                pcall(function()
-                    local textureObj = icon.Icon or icon.icon
-                    if textureObj and textureObj.SetTexCoord then
-                        textureObj:SetTexCoord(0, 1, 0, 1)
-                    end
-                end)
-                
-                -- Disable cooldown edge drawing (Masque handles this)
-                pcall(function()
-                    local cd = icon.Cooldown or icon.cooldown
-                    if cd and cd.SetDrawEdge then
-                        cd:SetDrawEdge(false)
-                    end
-                end)
-                
-                AddToMasque("customTrackers", icon)
+                AddToMasque("customTrackers", icon, {
+                    Icon = icon.icon,
+                    Cooldown = icon.cooldown,
+                    Count = icon.count,
+                    Border = icon.border,
+                })
+            -- Remove from Masque if disabled but was previously added
             elseif not useMasque and icon._TUI_MasqueGroup then
                 RemoveFromMasque(icon)
-                
-                -- Re-enable cooldown edge
-                pcall(function()
-                    local cd = icon.Cooldown or icon.cooldown
-                    if cd and cd.SetDrawEdge then
-                        cd:SetDrawEdge(true)
-                    end
-                end)
             end
         end
     end
@@ -3916,19 +4038,20 @@ local function LayoutCustomTrackerIcons()
     totalHeight = math.max(totalHeight, 1)
     customTrackerFrame:SetSize(totalWidth, totalHeight)
     
-    -- Show or hide based on per-icon settings
-    if isHiddenByPerIcon then
-        customTrackerFrame:Hide()
-    else
+    -- Only show if not hidden via per-icon settings
+    local CooldownHighlights = TUICD.CooldownHighlights
+    if not (CooldownHighlights and CooldownHighlights:IsTrackerHidden("custom")) then
         customTrackerFrame:Show()
     end
     
-    dprint(string.format("LayoutCustomTrackerIcons: %d visible icons (of %d total), %.0fx%.0f size, hidden=%s", 
-        iconCount, #icons, totalWidth, totalHeight, tostring(isHiddenByPerIcon)))
+    dprint(string.format("LayoutCustomTrackerIcons: %d visible icons (of %d total), %.0fx%.0f size", 
+        iconCount, #icons, totalWidth, totalHeight))
 end
 
--- Export for RefreshTrackerLayout to call
-Cooldowns.LayoutCustomTrackerIcons = LayoutCustomTrackerIcons
+-- Export for use by RefreshTrackerLayout
+Cooldowns.LayoutCustomTrackerIcons = function()
+    pcall(LayoutCustomTrackerIcons)
+end
 
 -- Rebuild all custom tracker icons
 local function RebuildCustomTrackerIcons()
@@ -3936,13 +4059,12 @@ local function RebuildCustomTrackerIcons()
         CreateCustomTrackerFrame()
     end
     
-    -- Hide and release all existing icons (remove from Masque first)
+    -- Hide and release all existing icons
     for key, iconFrame in pairs(customTrackerIcons) do
-        RemoveFromMasque(iconFrame)
         iconFrame:Hide()
         iconFrame:SetParent(nil)
     end
-    customTrackerIcons = {}
+    wipe(customTrackerIcons)  -- Use wipe() to preserve table reference
     
     -- Check if custom trackers are enabled
     if not GetSetting("customTrackers", "enabled") then
@@ -4001,19 +4123,8 @@ end
 
 -- Update all custom tracker cooldowns
 local function UpdateAllCustomTrackerCooldowns()
-    for entryKey, iconFrame in pairs(customTrackerIcons) do
-        -- Wrap each icon update in pcall so one error doesn't stop all updates
-        local success, err = pcall(UpdateCustomTrackerCooldown, iconFrame)
-        if not success then
-            -- Only print error once per icon to avoid spam
-            if not iconFrame._TUI_UpdateError then
-                dprint(string.format("UpdateCustomTrackerCooldown error for %s: %s", entryKey or "unknown", tostring(err)))
-                iconFrame._TUI_UpdateError = true
-            end
-        else
-            -- Clear error flag on success
-            iconFrame._TUI_UpdateError = nil
-        end
+    for _, iconFrame in pairs(customTrackerIcons) do
+        UpdateCustomTrackerCooldown(iconFrame)
     end
 end
 
@@ -4023,13 +4134,6 @@ local function StartCustomTrackerUpdates()
     
     customTrackerUpdateTicker = C_Timer.NewTicker(CUSTOM_TRACKER_UPDATE_INTERVAL, function()
         if GetSetting("customTrackers", "enabled") then
-            -- If hidden by Individual Icons settings, just ensure it stays hidden and skip all updates
-            if TUICD.CooldownHighlights and TUICD.CooldownHighlights.IsTrackerHidden and TUICD.CooldownHighlights:IsTrackerHidden("custom") then
-                if customTrackerFrame and customTrackerFrame:IsShown() then
-                    customTrackerFrame:Hide()
-                end
-                return
-            end
             pcall(UpdateAllCustomTrackerCooldowns)
             pcall(UpdateCustomTrackerVisibility)
         end
@@ -4074,6 +4178,19 @@ local function OnSpecChanged()
 end
 
 -- ============================================================================
+-- EXPORTS FOR SPELLBOOKHELPER
+-- ============================================================================
+
+Cooldowns.GetCurrentSpecEntries = GetCurrentSpecEntries
+Cooldowns.AddCustomEntry = AddCustomEntry
+Cooldowns.RemoveCustomEntry = RemoveCustomEntry
+Cooldowns.RebuildCustomTrackerIcons = RebuildCustomTrackerIcons
+Cooldowns.customTrackerIcons = customTrackerIcons
+
+-- Export to TUICD namespace so SpellbookHelper can find it
+TUICD.Cooldowns = Cooldowns
+
+-- ============================================================================
 -- VISIBILITY SYSTEM
 -- ============================================================================
 -- Handles show/hide based on combat, group, instance conditions
@@ -4110,6 +4227,11 @@ end
 
 -- Check if viewer should be visible based on conditions
 local function ShouldBeVisible(trackerKey)
+    -- Force all visible mode bypasses all visibility conditions
+    if TUICD.forceAllVisible then
+        return true
+    end
+    
     -- Always show in Edit Mode for positioning
     if EditModeManagerFrame and EditModeManagerFrame:IsShown() then
         return true
@@ -4142,18 +4264,6 @@ end
 
 -- Get the target alpha for a tracker based on visibility
 local function GetTargetAlpha(trackerKey)
-    -- Check if CooldownHighlights wants to hide essential/utility trackers (highest priority)
-    if trackerKey == "essential" or trackerKey == "utility" then
-        local CooldownHighlights = TUICD.CooldownHighlights
-        if CooldownHighlights and CooldownHighlights.IsTrackerHidden and CooldownHighlights:IsTrackerHidden(trackerKey) then
-            -- Check if we're in layout mode - show during layout mode
-            local layoutContainer = _G["TweaksUI_LayoutContainer"]
-            if not (layoutContainer and layoutContainer:IsShown()) then
-                return 0  -- Hidden by Individual Icons settings
-            end
-        end
-    end
-    
     -- Check if BuffHighlights wants to hide the buff tracker (highest priority)
     if trackerKey == "buffs" then
         local BuffHighlights = TUICD.BuffHighlights
@@ -4226,36 +4336,30 @@ local function ApplyClickthrough(trackerKey)
         end
     end
     
-    if trackerKey == "custom" then
-        -- Custom tracker frame
-        if customTrackerFrame then
-            SetMouseRecursive(customTrackerFrame, enableMouse)
-            -- Also apply to all icon frames
-            for _, iconFrame in pairs(customTrackerIcons) do
-                if iconFrame then
-                    SetMouseRecursive(iconFrame, enableMouse)
-                end
-            end
-        end
-    else
-        -- Blizzard tracker
-        local trackerInfo = GetTrackerInfo(trackerKey)
-        if trackerInfo then
-            local viewer = _G[trackerInfo.name]
-            if viewer then
-                -- Disable mouse on the viewer itself
-                SetMouseRecursive(viewer, enableMouse)
-                
-                -- Also explicitly get icons and disable them
-                local icons = CollectIcons(viewer)
-                for _, icon in ipairs(icons) do
-                    SetMouseRecursive(icon, enableMouse)
-                end
+    -- Blizzard tracker
+    local trackerInfo = GetTrackerInfo(trackerKey)
+    if trackerInfo then
+        local viewer = _G[trackerInfo.name]
+        if viewer then
+            -- Disable mouse on the viewer itself
+            SetMouseRecursive(viewer, enableMouse)
+            
+            -- Also explicitly get icons and disable them
+            local icons = CollectIcons(viewer)
+            for _, icon in ipairs(icons) do
+                SetMouseRecursive(icon, enableMouse)
             end
         end
     end
     
     dprint(string.format("[%s] Clickthrough: %s", trackerKey, tostring(clickthrough)))
+end
+
+-- Apply clickthrough settings to all trackers
+local function ApplyAllClickthrough()
+    for _, tracker in ipairs(TRACKERS) do
+        ApplyClickthrough(tracker.key)
+    end
 end
 
 -- Update visibility for a single tracker (called from ticker and events)
@@ -4266,6 +4370,13 @@ local function UpdateTrackerVisibility(trackerKey)
     local viewer = _G[trackerInfo.name]
     if not viewer then return end
     
+    -- During initialization, keep everything hidden
+    local TUIFrame = TUICD.TUIFrame
+    if TUIFrame and not TUIFrame.IsInitializationComplete() then
+        -- Skip visibility updates during init - frames will be revealed later
+        return
+    end
+    
     local targetAlpha = GetTargetAlpha(trackerKey)
     local currentAlpha = viewer:GetAlpha()
     
@@ -4273,38 +4384,6 @@ local function UpdateTrackerVisibility(trackerKey)
     if math.abs(currentAlpha - targetAlpha) > 0.01 then
         viewer:SetAlpha(targetAlpha)
         dprint(string.format("[%s] Alpha: %.2f -> %.2f", trackerKey, currentAlpha, targetAlpha))
-    end
-    
-    -- Handle mouse interaction for essential/utility trackers when hidden by Individual Icons settings
-    if trackerKey == "essential" or trackerKey == "utility" then
-        local CooldownHighlights = TUICD.CooldownHighlights
-        if CooldownHighlights and CooldownHighlights.IsTrackerHidden and CooldownHighlights:IsTrackerHidden(trackerKey) then
-            local layoutContainer = _G["TweaksUI_LayoutContainer"]
-            local isLayoutMode = layoutContainer and layoutContainer:IsShown()
-            if not isLayoutMode then
-                viewer:EnableMouse(false)
-                -- Also disable mouse on the container frame
-                local containerName = "TweaksUI_" .. trackerKey:sub(1,1):upper() .. trackerKey:sub(2) .. "Container"
-                local container = _G[containerName]
-                if container then
-                    container:EnableMouse(false)
-                    container:SetAlpha(0)
-                end
-            else
-                viewer:EnableMouse(true)
-                local containerName = "TweaksUI_" .. trackerKey:sub(1,1):upper() .. trackerKey:sub(2) .. "Container"
-                local container = _G[containerName]
-                if container then
-                    container:EnableMouse(true)
-                    container:SetAlpha(1)
-                end
-            end
-        else
-            -- Restore mouse interaction when not hidden
-            if targetAlpha > 0 then
-                viewer:EnableMouse(true)
-            end
-        end
     end
     
     -- Handle mouse interaction for buff tracker when hidden by Individual Icons settings
@@ -4369,6 +4448,11 @@ local function StopVisibilitySystem()
     end
 end
 
+-- Public method to update all tracker visibility (used by /tui showall)
+function Cooldowns:UpdateAllTrackerVisibility()
+    UpdateAllVisibility()
+end
+
 -- ============================================================================
 -- VIEWER HOOKING
 -- ============================================================================
@@ -4381,22 +4465,41 @@ local function HookViewer(viewer, trackerKey)
     
     dprint(string.format("Hooking viewer: %s [%s]", viewer:GetName() or "unnamed", trackerKey))
     
+    -- Helper to check if we're in a restricted scenario
+    local function IsRestricted()
+        if InCombatLockdown() then return true end
+        if TUICD.RestrictionAPI and TUICD.RestrictionAPI.IsInRestrictedContent then
+            return TUICD.RestrictionAPI:IsInRestrictedContent()
+        end
+        return false
+    end
+    
     -- Hook Layout function to intercept Blizzard's layout and apply ours
     if viewer.Layout then
         hooksecurefunc(viewer, "Layout", function(self)
             -- Skip if we're currently applying our layout
             if self._TUI_applying then return end
             
-            dprint(string.format("Layout hook fired for [%s]", trackerKey))
-            
-            if self:IsShown() then
-                -- CRITICAL: During combat, icon positions may be SECRET VALUES
-                -- Skip order capture entirely during combat to avoid errors
-                if not InCombatLockdown() then
-                    -- Capture order from Blizzard positions when Cooldown Manager changes (all trackers)
-                    local icons = CollectIcons(self)
-                    local shown = {}
-                    local hasValidPositions = false
+            -- CRITICAL: Defer all work to next frame to break taint chain
+            -- This prevents our hook from propagating taint to Blizzard's subsequent code
+            -- which can cause "attempt to compare secret value" errors in their code
+            local viewerRef = self
+            C_Timer.After(0, function()
+                -- Verify viewer still exists and is shown
+                if not viewerRef or not viewerRef:IsShown() then return end
+                -- Skip if we started applying in the meantime
+                if viewerRef._TUI_applying then return end
+                
+                -- CRITICAL: Skip during restricted scenarios to avoid secret value errors
+                if IsRestricted() then return end
+                
+                dprint(string.format("Layout hook fired for [%s] (deferred)", trackerKey))
+                
+                -- Capture order from Blizzard positions when Cooldown Manager changes (all trackers)
+                -- (Already checked IsRestricted() above which includes combat check)
+                local icons = CollectIcons(viewerRef)
+                local shown = {}
+                local hasValidPositions = false
                     
                     for _, icon in ipairs(icons) do
                         if icon:IsShown() then
@@ -4463,24 +4566,29 @@ local function HookViewer(viewer, trackerKey)
                             end
                         end
                     end
-                end
                 
                 -- Apply our layout
-                pcall(ApplyGridLayout, self, trackerKey)
-            end
+                pcall(ApplyGridLayout, viewerRef, trackerKey)
+            end)
         end)
     end
     
     -- Hook Show to catch when viewer becomes visible
     hooksecurefunc(viewer, "Show", function(self)
-        dprint(string.format("Show hook fired for [%s]", trackerKey))
-        -- Apply layout
-        if self:IsShown() then
-            pcall(ApplyGridLayout, self, trackerKey)
-        end
-        -- Set alpha directly based on visibility conditions
-        local targetAlpha = GetTargetAlpha(trackerKey)
-        self:SetAlpha(targetAlpha)
+        -- Defer to next frame to avoid taint propagation
+        local viewerRef = self
+        C_Timer.After(0, function()
+            if not viewerRef then return end
+            
+            dprint(string.format("Show hook fired for [%s] (deferred)", trackerKey))
+            -- Apply layout
+            if viewerRef:IsShown() then
+                pcall(ApplyGridLayout, viewerRef, trackerKey)
+            end
+            -- Set alpha directly based on visibility conditions
+            local targetAlpha = GetTargetAlpha(trackerKey)
+            viewerRef:SetAlpha(targetAlpha)
+        end)
     end)
     
     -- Initial layout if already visible
@@ -4488,30 +4596,49 @@ local function HookViewer(viewer, trackerKey)
         pcall(ApplyGridLayout, viewer, trackerKey)
     end
     
-    -- Always run initial visibility check
-    local targetAlpha = GetTargetAlpha(trackerKey)
-    viewer:SetAlpha(targetAlpha)
-    dprint(string.format("[%s] Initial alpha: %.2f", trackerKey, targetAlpha))
+    -- Set visibility based on initialization state
+    -- During init, keep viewers hidden - they'll be revealed by TUIFrame.RevealAllFrames()
+    -- After init, apply normal visibility rules
+    local TUIFrame = TUICD.TUIFrame
+    if TUIFrame and not TUIFrame.IsInitializationComplete() then
+        -- Keep hidden during initialization
+        viewer:SetAlpha(0)
+        dprint(string.format("[%s] Init phase - keeping hidden", trackerKey))
+    else
+        -- Apply normal visibility
+        local targetAlpha = GetTargetAlpha(trackerKey)
+        viewer:SetAlpha(targetAlpha)
+        dprint(string.format("[%s] Initial alpha: %.2f", trackerKey, targetAlpha))
+    end
 end
 
 local function HookAllViewers()
+    local hookedCount = 0
+    local missingCount = 0
+    
     for _, tracker in ipairs(TRACKERS) do
         local viewer = _G[tracker.name]
         if viewer then
             HookViewer(viewer, tracker.key)
+            hookedCount = hookedCount + 1
+            dprint(string.format("Viewer found and hooked: %s [%s]", tracker.name, tracker.key))
         else
-            dprint(string.format("Viewer not found: %s", tracker.name))
+            missingCount = missingCount + 1
+            dprint(string.format("Viewer not found: %s - CDM may be disabled in Edit Mode", tracker.name))
         end
     end
-end
-
--- Apply clickthrough settings to all trackers
-local function ApplyAllClickthrough()
-    for _, tracker in ipairs(TRACKERS) do
-        ApplyClickthrough(tracker.key)
+    
+    -- Alert user if no viewers found
+    if hookedCount == 0 and missingCount > 0 then
+        -- Viewers don't exist - CDM is likely disabled
+        C_Timer.After(5, function()
+            -- Only warn once per session
+            if not TUICD._cdmWarningShown then
+                TUICD._cdmWarningShown = true
+                TUICD:Print("|cffFF6666Warning:|r Cooldown trackers not found. Enable them in Edit Mode → Account Settings → Cooldown Manager")
+            end
+        end)
     end
-    -- Also apply to custom tracker
-    ApplyClickthrough("custom")
 end
 
 -- ============================================================================
@@ -4520,9 +4647,9 @@ end
 
 local eventFrame = CreateFrame("Frame")
 local updateTimer = 0
-local UPDATE_THROTTLE = 0.1  -- Process pending updates 10x per second (was 20x)
+local UPDATE_THROTTLE = 0.1
 local layoutEnforceTimer = 0
-local LAYOUT_ENFORCE_INTERVAL = 0.25  -- Check layout 4x per second (was 20x - major performance fix)
+local LAYOUT_ENFORCE_INTERVAL = 0.2  -- Check layout 5x per second (like CMT)
 local clickthroughEnforceTimer = 0
 local CLICKTHROUGH_ENFORCE_INTERVAL = 0.25  -- Enforce clickthrough 4x per second
 
@@ -4533,7 +4660,7 @@ local function OnEvent(self, event, arg1, ...)
         
     elseif event == "PLAYER_ENTERING_WORLD" then
         -- Hide trackers immediately to prevent showing in wrong position
-        -- They'll be revealed after layout is applied and positions are stable
+        -- They'll be revealed by TUIFrame.RevealAllFrames() after layout is complete
         for _, tracker in ipairs(TRACKERS) do
             local viewer = _G[tracker.name]
             if viewer then
@@ -4551,7 +4678,8 @@ local function OnEvent(self, event, arg1, ...)
                     ApplyGridLayout(viewer, tracker.key)
                 end
             end
-            -- Don't restore alpha yet - wait for stable positions
+            -- Note: Don't restore alpha here - TUIFrame.RevealAllFrames() handles visibility
+            -- after all modules have finished positioning at 3.5s
         end)
         
         -- DELAYED CACHE RESET: Clear session caches and recapture after positions are stable
@@ -4567,9 +4695,6 @@ local function OnEvent(self, event, arg1, ...)
                     ApplyGridLayout(viewer, tracker.key)
                 end
             end
-            
-            -- NOW reveal trackers - layout is applied and stable
-            UpdateAllVisibility()
         end)
         
         -- Force Edit Mode to re-apply positions multiple times after load
@@ -4595,10 +4720,8 @@ local function OnEvent(self, event, arg1, ...)
             end
         end
         
-        -- Try at multiple intervals to ensure position is correct
-        C_Timer.After(1.0, RefreshEditModePositions)
-        C_Timer.After(2.0, RefreshEditModePositions)
-        C_Timer.After(4.0, RefreshEditModePositions)
+        -- Note: We no longer call RefreshEditModePositions as it conflicts with our
+        -- Layout system. TUICD manages positions via TUIFrame/containers.
         
     elseif event == "SPELL_UPDATE_COOLDOWN" or event == "ACTIONBAR_UPDATE_COOLDOWN" then
         -- Icons might have changed, schedule layout update
@@ -4656,26 +4779,6 @@ local function OnEvent(self, event, arg1, ...)
         -- Mount state changed - update visibility
         UpdateAllVisibility()
         
-    elseif event == "SPELL_ACTIVATION_OVERLAY_GLOW_SHOW" or event == "SPELL_ACTIVATION_OVERLAY_GLOW_HIDE" then
-        -- Proc glow changed - refresh highlight frames to show/hide glow
-        -- arg1 is the spellID that triggered the glow
-        local spellID = arg1
-        if spellID then
-            -- Refresh cooldown highlights (essential, utility)
-            if TUICD.CooldownHighlights then
-                TUICD.CooldownHighlights:RefreshAllHighlights("essential")
-                TUICD.CooldownHighlights:RefreshAllHighlights("utility")
-            end
-            -- Refresh buff highlights
-            if TUICD.BuffHighlights then
-                TUICD.BuffHighlights:RefreshAllHighlights()
-            end
-            -- Refresh docks
-            if TUICD.Docks then
-                TUICD.Docks:RefreshAllDocks()
-            end
-        end
-        
     elseif event == "EDIT_MODE_LAYOUTS_UPDATED" then
         -- Edit Mode has applied positions - now apply our grid layouts
         dprint("EDIT_MODE_LAYOUTS_UPDATED fired")
@@ -4723,7 +4826,7 @@ local function OnUpdate(self, elapsed)
         end
     end
     
-    -- Aggressive layout enforcement (20x per second)
+    -- Aggressive layout enforcement (5x per second like CMT)
     -- This catches Blizzard resetting layouts during combat
     -- Only enforce when customLayout is actually defined (non-empty string)
     if layoutEnforceTimer >= LAYOUT_ENFORCE_INTERVAL then
@@ -4732,7 +4835,7 @@ local function OnUpdate(self, elapsed)
         for _, tracker in ipairs(TRACKERS) do
             local viewer = _G[tracker.name]
             if viewer and viewer:IsShown() and not viewer._TUI_applying then
-                local trackerSettings = TUICD.Database:GetTrackerSettings(tracker.key)
+                local trackerSettings = settings[tracker.key]
                 -- Check for non-empty customLayout string
                 if trackerSettings and trackerSettings.customLayout and trackerSettings.customLayout ~= "" then
                     pcall(ApplyGridLayout, viewer, tracker.key)
@@ -4746,15 +4849,10 @@ local function OnUpdate(self, elapsed)
     if clickthroughEnforceTimer >= CLICKTHROUGH_ENFORCE_INTERVAL then
         clickthroughEnforceTimer = 0
         for _, tracker in ipairs(TRACKERS) do
-            local trackerSettings = TUICD.Database:GetTrackerSettings(tracker.key)
+            local trackerSettings = settings[tracker.key]
             if trackerSettings and trackerSettings.clickthrough then
                 pcall(ApplyClickthrough, tracker.key)
             end
-        end
-        -- Also enforce on custom tracker
-        local customSettings = TUICD.Database:GetTrackerSettings("custom")
-        if customSettings and customSettings.clickthrough and customTrackerFrame then
-            pcall(ApplyClickthrough, "custom")
         end
     end
 end
@@ -4920,13 +5018,9 @@ function Cooldowns:ShowImportDialog()
         local str = editBox:GetText()
         local newSettings, err = DeserializeCooldownSettings(str)
         if newSettings then
-            -- Apply new settings via database
-            for trackerKey, trackerData in pairs(newSettings) do
-                if type(trackerData) == "table" then
-                    for settingKey, value in pairs(trackerData) do
-                        TUICD.Database:SetTrackerSetting(trackerKey, settingKey, value)
-                    end
-                end
+            -- Apply new settings
+            for k, v in pairs(newSettings) do
+                settings[k] = v
             end
             -- Refresh all layouts
             for _, tracker in ipairs(TRACKERS) do
@@ -4950,7 +5044,7 @@ function Cooldowns:ShowImportDialog()
 end
 
 -- ============================================================================
--- SETTINGS HUB (for standalone panels)
+-- SETTINGS HUB
 -- ============================================================================
 
 function Cooldowns:CreateHub(parent)
@@ -5037,6 +5131,35 @@ function Cooldowns:CreateHub(parent)
     end)
     yOffset = yOffset - BUTTON_HEIGHT - BUTTON_SPACING
     
+    yOffset = yOffset - 6
+    
+    -- Dynamic Docks section label
+    local docksLabel = hub:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    docksLabel:SetPoint("TOP", 0, yOffset)
+    docksLabel:SetText("|cff888888Dynamic Docks|r")
+    yOffset = yOffset - 16
+    
+    -- Dynamic Docks button
+    local docksBtn = CreateFrame("Button", nil, hub, "UIPanelButtonTemplate")
+    docksBtn:SetSize(HUB_WIDTH - 30, BUTTON_HEIGHT)
+    docksBtn:SetPoint("TOP", 0, yOffset)
+    docksBtn:SetText("Dock Settings")
+    docksBtn:SetScript("OnClick", function()
+        if TUICD.DocksUI then
+            TUICD.DocksUI:Toggle()
+        end
+    end)
+    docksBtn:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:AddLine("Dynamic Docks", 1, 1, 1)
+        GameTooltip:AddLine("Group icons from any tracker into custom containers", 0.7, 0.7, 0.7, true)
+        GameTooltip:Show()
+    end)
+    docksBtn:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+    yOffset = yOffset - BUTTON_HEIGHT - BUTTON_SPACING
+    
     yOffset = yOffset - 4
     
     -- Blizzard Cooldown Settings button
@@ -5055,7 +5178,7 @@ function Cooldowns:CreateHub(parent)
                 cooldownFrame:Show()
             end
         else
-            print("|cff00ff00TUI:CD|r Cooldown Settings not available.")
+            print("|cff00ff00TweaksUI:|r Cooldown Settings not available.")
         end
     end)
     blizzSettingsBtn:SetScript("OnEnter", function(self)
@@ -5117,6 +5240,11 @@ function Cooldowns:CreateHub(parent)
         TUICD:Print("Refreshed all tracker layouts")
     end)
     
+    -- Register with GlobalScale for settings scaling
+    if TUICD.GlobalScale then
+        TUICD.GlobalScale:RegisterSettingsPanel(hub, 1.0)
+    end
+    
     cooldownHub = hub
     return hub
 end
@@ -5134,44 +5262,49 @@ function Cooldowns:ShowHub(parent)
     cooldownHub:Show()
 end
 
+-- Toggle the cooldowns settings panel (called from main Settings hub)
+function Cooldowns:ToggleSettingsPanel(parent)
+    if not cooldownHub then
+        self:CreateHub(parent)
+    end
+    
+    if cooldownHub:IsShown() then
+        self:HideAllPanels()
+    else
+        if parent then
+            cooldownHub:ClearAllPoints()
+            cooldownHub:SetPoint("TOPLEFT", parent, "TOPRIGHT", 0, 0)
+        end
+        cooldownHub:Show()
+    end
+end
+
 function Cooldowns:HideAllPanels()
     for _, panel in pairs(settingsPanels) do
         if panel then panel:Hide() end
     end
+    if TUICD.DocksUI then TUICD.DocksUI:Hide() end
     if cooldownHub then cooldownHub:Hide() end
-    
-    -- Hide DocksUI panel (use global frame name for reliability)
-    local docksPanel = _G["TUICD_DocksPanel"]
-    if docksPanel and docksPanel:IsShown() then
-        docksPanel:Hide()
+    currentOpenPanel = nil
+end
+
+-- Hide just the tracker settings panels (not hub or docks)
+function Cooldowns:HideTrackerPanels()
+    for _, panel in pairs(settingsPanels) do
+        if panel then panel:Hide() end
     end
-    
-    -- Hide profiles panel
-    if _G["TUICD_ProfilesPanel"] and _G["TUICD_ProfilesPanel"]:IsShown() then
-        _G["TUICD_ProfilesPanel"]:Hide()
-    end
-    
     currentOpenPanel = nil
 end
 
 function Cooldowns:TogglePanel(trackerKey)
-    -- Hide other tracker panels
+    -- Hide other panels
     for key, panel in pairs(settingsPanels) do
         if panel and key ~= trackerKey then
             panel:Hide()
         end
     end
-    
-    -- Hide DocksUI panel (use global frame name for reliability)
-    local docksPanel = _G["TUICD_DocksPanel"]
-    if docksPanel and docksPanel:IsShown() then
-        docksPanel:Hide()
-    end
-    
-    -- Hide profiles panel
-    if _G["TUICD_ProfilesPanel"] and _G["TUICD_ProfilesPanel"]:IsShown() then
-        _G["TUICD_ProfilesPanel"]:Hide()
-    end
+    -- Also hide Docks panel when opening tracker settings
+    if TUICD.DocksUI then TUICD.DocksUI:Hide() end
     
     if settingsPanels[trackerKey] then
         if settingsPanels[trackerKey]:IsShown() then
@@ -5205,24 +5338,11 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
     
     local panel = CreateFrame("Frame", "TweaksUI_Cooldowns_" .. trackerKey .. "_Panel", UIParent, "BackdropTemplate")
     panel:SetSize(PANEL_WIDTH, PANEL_HEIGHT)
+    panel:SetPoint("TOPLEFT", cooldownHub, "TOPRIGHT", 0, 0)
     panel:SetBackdrop(darkBackdrop)
     panel:SetBackdropColor(0.08, 0.08, 0.08, 0.95)
     panel:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
     panel:SetFrameStrata("DIALOG")
-    panel:SetMovable(true)
-    panel:EnableMouse(true)
-    panel:RegisterForDrag("LeftButton")
-    panel:SetScript("OnDragStart", panel.StartMoving)
-    panel:SetScript("OnDragStop", panel.StopMovingOrSizing)
-    panel:SetClampedToScreen(true)
-    
-    -- Anchor to Settings hub if it exists, otherwise center
-    local settingsHub = _G["TUICD_SettingsHub"]
-    if settingsHub then
-        panel:SetPoint("TOPLEFT", settingsHub, "TOPRIGHT", 5, 0)
-    else
-        panel:SetPoint("CENTER", UIParent, "CENTER", 100, 0)
-    end
     
     settingsPanels[trackerKey] = panel
     
@@ -5429,43 +5549,6 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         return yOffset - 28
     end
     
-    -- Helper function to enable/disable controls for mutual exclusivity
-    local function SetControlEnabled(control, enabled)
-        if not control then return end
-        
-        -- Handle different control types
-        if control.SetEnabled then
-            control:SetEnabled(enabled)
-        end
-        
-        if control.Enable and control.Disable then
-            if enabled then control:Enable() else control:Disable() end
-        end
-        
-        -- Grey out text for labels/fontstrings
-        if control.SetTextColor then
-            if enabled then
-                control:SetTextColor(1, 1, 1)
-            else
-                control:SetTextColor(0.5, 0.5, 0.5)
-            end
-        end
-        
-        -- Handle dropdowns (UIDropDownMenu)
-        if control.Button then
-            control.Button:SetEnabled(enabled)
-        end
-        
-        -- Handle checkboxes
-        if control.Text and control.Text.SetTextColor then
-            if enabled then
-                control.Text:SetTextColor(1, 0.82, 0)
-            else
-                control.Text:SetTextColor(0.5, 0.5, 0.5)
-            end
-        end
-    end
-    
     -- ========================================
     -- TAB 1: Layout
     -- ========================================
@@ -5587,98 +5670,308 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         
         y = CreateHeader(parent, y, "Direction & Alignment")
         
-        -- Note: Standard direction/alignment options
-        local standardNote = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        standardNote:SetPoint("TOPLEFT", 10, y)
-        standardNote:SetText("(These options are ignored when Custom Grid is enabled)")
-        standardNote:SetTextColor(0.6, 0.6, 0.6)
-        -- Only show note if custom grid is enabled
-        if GetSetting(trackerKey, "useCustomGrid") then
-            standardNote:Show()
-            y = y - 14
-        else
-            standardNote:Hide()
+        -- Store references to controls for enable/disable toggling
+        local standardControls = {}
+        local customGridControls = {}
+        
+        -- Helper to set control enabled/disabled state
+        local function SetControlEnabled(control, enabled)
+            if not control then return end
+            if control.SetEnabled then
+                control:SetEnabled(enabled)
+            end
+            -- For dropdowns, we need to handle the UIDropDownMenu
+            if control.dropdown then
+                if enabled then
+                    UIDropDownMenu_EnableDropDown(control.dropdown)
+                else
+                    UIDropDownMenu_DisableDropDown(control.dropdown)
+                end
+            end
+            -- For sliders
+            if control.slider then
+                if enabled then
+                    control.slider:Enable()
+                    if control.slider.Text then control.slider.Text:SetTextColor(1, 1, 1) end
+                else
+                    control.slider:Disable()
+                    if control.slider.Text then control.slider.Text:SetTextColor(0.5, 0.5, 0.5) end
+                end
+            end
+            -- For checkboxes
+            if control.checkbox then
+                control.checkbox:SetEnabled(enabled)
+                if control.checkbox.Text then
+                    control.checkbox.Text:SetTextColor(enabled and 1 or 0.5, enabled and 1 or 0.5, enabled and 1 or 0.5)
+                end
+            end
+            -- For edit boxes
+            if control.editbox then
+                control.editbox:SetEnabled(enabled)
+                if enabled then
+                    control.editbox:SetTextColor(1, 1, 1)
+                else
+                    control.editbox:SetTextColor(0.5, 0.5, 0.5)
+                end
+            end
+            -- For buttons
+            if control.button then
+                control.button:SetEnabled(enabled)
+            end
+            -- For labels
+            if control.label then
+                control.label:SetTextColor(enabled and 0.8 or 0.4, enabled and 0.8 or 0.4, enabled and 0.8 or 0.4)
+            end
         end
         
-        -- Primary direction: which way icons fill first
-        -- Horizontal (Left/Right) = row mode: 1,2,3 / 4,5,6
-        -- Vertical (Up/Down) = column mode: 1,4,7 / 2,5,8
+        -- Function to update all control states based on useCustomGrid
+        local function UpdateControlStates()
+            local useCustomGrid = GetSetting(trackerKey, "useCustomGrid") or false
+            -- Standard controls disabled when custom grid is on
+            for _, ctrl in ipairs(standardControls) do
+                SetControlEnabled(ctrl, not useCustomGrid)
+            end
+            -- Custom grid controls disabled when custom grid is off
+            for _, ctrl in ipairs(customGridControls) do
+                SetControlEnabled(ctrl, useCustomGrid)
+            end
+        end
+        
+        -- Primary direction dropdown
         local growOpts = {
             { label = "Right (Row Mode)", value = "RIGHT" }, 
             { label = "Left (Row Mode)", value = "LEFT" },
             { label = "Down (Column Mode)", value = "DOWN" },
             { label = "Up (Column Mode)", value = "UP" },
         }
-        y = CreateDropdown(parent, y, "Primary", growOpts,
-            function() return GetSetting(trackerKey, "growDirection") or "RIGHT" end,
-            function(v) SetSetting(trackerKey, "growDirection", v) end)
         
-        -- Secondary direction: which way to wrap after filling primary
+        local primaryLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        primaryLabel:SetPoint("TOPLEFT", 10, y)
+        primaryLabel:SetText("Primary")
+        
+        local primaryDropdown = CreateFrame("Frame", "TUI_" .. trackerKey .. "_PrimaryDropdown", parent, "UIDropDownMenuTemplate")
+        primaryDropdown:SetPoint("TOPLEFT", -5, y - 14)
+        UIDropDownMenu_SetWidth(primaryDropdown, 200)
+        UIDropDownMenu_Initialize(primaryDropdown, function(self, level)
+            for _, opt in ipairs(growOpts) do
+                local info = UIDropDownMenu_CreateInfo()
+                info.text = opt.label
+                info.value = opt.value
+                info.func = function()
+                    UIDropDownMenu_SetSelectedValue(primaryDropdown, opt.value)
+                    UIDropDownMenu_SetText(primaryDropdown, opt.label)
+                    SetSetting(trackerKey, "growDirection", opt.value)
+                    RefreshLayout()
+                end
+                info.checked = (GetSetting(trackerKey, "growDirection") or "RIGHT") == opt.value
+                UIDropDownMenu_AddButton(info, level)
+            end
+        end)
+        local currentGrow = GetSetting(trackerKey, "growDirection") or "RIGHT"
+        for _, opt in ipairs(growOpts) do
+            if opt.value == currentGrow then
+                UIDropDownMenu_SetText(primaryDropdown, opt.label)
+                break
+            end
+        end
+        table.insert(standardControls, { dropdown = primaryDropdown, label = primaryLabel })
+        y = y - 45
+        
+        -- Secondary direction dropdown
         local growSecOpts = {
             { label = "Down", value = "DOWN" }, 
             { label = "Up", value = "UP" },
             { label = "Right", value = "RIGHT" },
             { label = "Left", value = "LEFT" },
         }
-        y = CreateDropdown(parent, y, "Secondary", growSecOpts,
-            function() return GetSetting(trackerKey, "growSecondary") or "DOWN" end,
-            function(v) SetSetting(trackerKey, "growSecondary", v) end)
         
-        local alignOpts = {{ label = "Left", value = "LEFT" }, { label = "Center", value = "CENTER" }, { label = "Right", value = "RIGHT" }}
-        y = CreateDropdown(parent, y, "Alignment", alignOpts,
-            function() return GetSetting(trackerKey, "alignment") or "LEFT" end,
-            function(v) SetSetting(trackerKey, "alignment", v) end)
+        local secondaryLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        secondaryLabel:SetPoint("TOPLEFT", 10, y)
+        secondaryLabel:SetText("Secondary")
         
-        y = CreateCheckbox(parent, y, "Reverse Icon Order",
-            function() return GetSetting(trackerKey, "reverseOrder") or false end,
-            function(v) SetSetting(trackerKey, "reverseOrder", v) end)
+        local secondaryDropdown = CreateFrame("Frame", "TUI_" .. trackerKey .. "_SecondaryDropdown", parent, "UIDropDownMenuTemplate")
+        secondaryDropdown:SetPoint("TOPLEFT", -5, y - 14)
+        UIDropDownMenu_SetWidth(secondaryDropdown, 200)
+        UIDropDownMenu_Initialize(secondaryDropdown, function(self, level)
+            for _, opt in ipairs(growSecOpts) do
+                local info = UIDropDownMenu_CreateInfo()
+                info.text = opt.label
+                info.value = opt.value
+                info.func = function()
+                    UIDropDownMenu_SetSelectedValue(secondaryDropdown, opt.value)
+                    UIDropDownMenu_SetText(secondaryDropdown, opt.label)
+                    SetSetting(trackerKey, "growSecondary", opt.value)
+                    RefreshLayout()
+                end
+                info.checked = (GetSetting(trackerKey, "growSecondary") or "DOWN") == opt.value
+                UIDropDownMenu_AddButton(info, level)
+            end
+        end)
+        local currentGrowSec = GetSetting(trackerKey, "growSecondary") or "DOWN"
+        for _, opt in ipairs(growSecOpts) do
+            if opt.value == currentGrowSec then
+                UIDropDownMenu_SetText(secondaryDropdown, opt.label)
+                break
+            end
+        end
+        table.insert(standardControls, { dropdown = secondaryDropdown, label = secondaryLabel })
+        y = y - 45
+        
+        -- Alignment dropdown
+        local alignOpts = {
+            { label = "Left", value = "LEFT" }, 
+            { label = "Center", value = "CENTER" }, 
+            { label = "Right", value = "RIGHT" }
+        }
+        
+        local alignLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        alignLabel:SetPoint("TOPLEFT", 10, y)
+        alignLabel:SetText("Alignment")
+        
+        local alignDropdown = CreateFrame("Frame", "TUI_" .. trackerKey .. "_AlignDropdown", parent, "UIDropDownMenuTemplate")
+        alignDropdown:SetPoint("TOPLEFT", -5, y - 14)
+        UIDropDownMenu_SetWidth(alignDropdown, 200)
+        UIDropDownMenu_Initialize(alignDropdown, function(self, level)
+            for _, opt in ipairs(alignOpts) do
+                local info = UIDropDownMenu_CreateInfo()
+                info.text = opt.label
+                info.value = opt.value
+                info.func = function()
+                    UIDropDownMenu_SetSelectedValue(alignDropdown, opt.value)
+                    UIDropDownMenu_SetText(alignDropdown, opt.label)
+                    SetSetting(trackerKey, "alignment", opt.value)
+                    RefreshLayout()
+                end
+                info.checked = (GetSetting(trackerKey, "alignment") or "LEFT") == opt.value
+                UIDropDownMenu_AddButton(info, level)
+            end
+        end)
+        local currentAlign = GetSetting(trackerKey, "alignment") or "LEFT"
+        for _, opt in ipairs(alignOpts) do
+            if opt.value == currentAlign then
+                UIDropDownMenu_SetText(alignDropdown, opt.label)
+                break
+            end
+        end
+        table.insert(standardControls, { dropdown = alignDropdown, label = alignLabel })
+        y = y - 45
+        
+        -- Reverse Icon Order checkbox
+        local reverseCheck = CreateFrame("CheckButton", nil, parent, "InterfaceOptionsCheckButtonTemplate")
+        reverseCheck:SetPoint("TOPLEFT", 10, y)
+        reverseCheck.Text:SetText("Reverse Icon Order")
+        reverseCheck:SetChecked(GetSetting(trackerKey, "reverseOrder") or false)
+        reverseCheck:SetScript("OnClick", function(self)
+            SetSetting(trackerKey, "reverseOrder", self:GetChecked())
+            RefreshLayout()
+        end)
+        table.insert(standardControls, { checkbox = reverseCheck })
+        y = y - 28
         
         -- ========== CUSTOM GRID SECTION ==========
         y = CreateHeader(parent, y, "Custom Grid (Advanced)")
         
-        y = CreateCheckbox(parent, y, "Enable Custom Grid Pattern",
-            function() return GetSetting(trackerKey, "useCustomGrid") or false end,
-            function(v) 
-                SetSetting(trackerKey, "useCustomGrid", v)
-                -- Both enabling and disabling benefit from a reload for clean state
-                StaticPopupDialogs["TUICD_RELOAD_CUSTOM_GRID"] = {
-                    text = "Custom Grid changes require a UI reload to fully apply. Reload now?",
-                    button1 = "Reload",
-                    button2 = "Later",
-                    OnAccept = function()
-                        ReloadUI()
-                    end,
-                    timeout = 0,
-                    whileDead = true,
-                    hideOnEscape = true,
-                }
-                StaticPopup_Show("TUICD_RELOAD_CUSTOM_GRID")
-            end)
+        -- Enable Custom Grid checkbox - this one stays always enabled
+        local customGridCheck = CreateFrame("CheckButton", nil, parent, "InterfaceOptionsCheckButtonTemplate")
+        customGridCheck:SetPoint("TOPLEFT", 10, y)
+        customGridCheck.Text:SetText("Enable Custom Grid Pattern")
+        customGridCheck:SetChecked(GetSetting(trackerKey, "useCustomGrid") or false)
+        customGridCheck:SetScript("OnClick", function(self)
+            local enabled = self:GetChecked()
+            SetSetting(trackerKey, "useCustomGrid", enabled)
+            UpdateControlStates()
+            -- Prompt for reload
+            StaticPopupDialogs["TUI_RELOAD_CUSTOM_GRID"] = {
+                text = "Custom Grid changes require a UI reload to fully apply. Reload now?",
+                button1 = "Reload",
+                button2 = "Later",
+                OnAccept = function()
+                    ReloadUI()
+                end,
+                timeout = 0,
+                whileDead = true,
+                hideOnEscape = true,
+            }
+            StaticPopup_Show("TUI_RELOAD_CUSTOM_GRID")
+        end)
+        y = y - 28
         
-        -- Mode dropdown (Row vs Column)
+        -- Custom Grid Mode dropdown
         local modeOpts = {
             { label = "Row Mode (right then down)", value = "ROW" },
             { label = "Column Mode (down then right)", value = "COLUMN" },
         }
-        y = CreateDropdown(parent, y, "Mode", modeOpts,
-            function() return GetSetting(trackerKey, "customGridMode") or "ROW" end,
-            function(v) 
-                SetSetting(trackerKey, "customGridMode", v)
-                RefreshLayout()
-            end)
         
-        -- Alignment dropdown - uses START/CENTER/END internally
-        local alignOptsCustom = {
+        local modeLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        modeLabel:SetPoint("TOPLEFT", 10, y)
+        modeLabel:SetText("Mode")
+        
+        local modeDropdown = CreateFrame("Frame", "TUI_" .. trackerKey .. "_ModeDropdown", parent, "UIDropDownMenuTemplate")
+        modeDropdown:SetPoint("TOPLEFT", -5, y - 14)
+        UIDropDownMenu_SetWidth(modeDropdown, 200)
+        UIDropDownMenu_Initialize(modeDropdown, function(self, level)
+            for _, opt in ipairs(modeOpts) do
+                local info = UIDropDownMenu_CreateInfo()
+                info.text = opt.label
+                info.value = opt.value
+                info.func = function()
+                    UIDropDownMenu_SetSelectedValue(modeDropdown, opt.value)
+                    UIDropDownMenu_SetText(modeDropdown, opt.label)
+                    SetSetting(trackerKey, "customGridMode", opt.value)
+                    RefreshLayout()
+                end
+                info.checked = (GetSetting(trackerKey, "customGridMode") or "ROW") == opt.value
+                UIDropDownMenu_AddButton(info, level)
+            end
+        end)
+        local currentMode = GetSetting(trackerKey, "customGridMode") or "ROW"
+        for _, opt in ipairs(modeOpts) do
+            if opt.value == currentMode then
+                UIDropDownMenu_SetText(modeDropdown, opt.label)
+                break
+            end
+        end
+        table.insert(customGridControls, { dropdown = modeDropdown, label = modeLabel })
+        y = y - 45
+        
+        -- Custom Grid Alignment dropdown
+        local customAlignOpts = {
             { label = "Start (Left/Top)", value = "START" },
             { label = "Center (Middle)", value = "CENTER" },
             { label = "End (Right/Bottom)", value = "END" },
         }
-        y = CreateDropdown(parent, y, "Alignment", alignOptsCustom,
-            function() return GetSetting(trackerKey, "customGridAlign") or "START" end,
-            function(v) 
-                SetSetting(trackerKey, "customGridAlign", v)
-                RefreshLayout()
-            end)
+        
+        local customAlignLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        customAlignLabel:SetPoint("TOPLEFT", 10, y)
+        customAlignLabel:SetText("Alignment")
+        
+        local customAlignDropdown = CreateFrame("Frame", "TUI_" .. trackerKey .. "_CustomAlignDropdown", parent, "UIDropDownMenuTemplate")
+        customAlignDropdown:SetPoint("TOPLEFT", -5, y - 14)
+        UIDropDownMenu_SetWidth(customAlignDropdown, 200)
+        UIDropDownMenu_Initialize(customAlignDropdown, function(self, level)
+            for _, opt in ipairs(customAlignOpts) do
+                local info = UIDropDownMenu_CreateInfo()
+                info.text = opt.label
+                info.value = opt.value
+                info.func = function()
+                    UIDropDownMenu_SetSelectedValue(customAlignDropdown, opt.value)
+                    UIDropDownMenu_SetText(customAlignDropdown, opt.label)
+                    SetSetting(trackerKey, "customGridAlign", opt.value)
+                    RefreshLayout()
+                end
+                info.checked = (GetSetting(trackerKey, "customGridAlign") or "START") == opt.value
+                UIDropDownMenu_AddButton(info, level)
+            end
+        end)
+        local currentCustomAlign = GetSetting(trackerKey, "customGridAlign") or "START"
+        for _, opt in ipairs(customAlignOpts) do
+            if opt.value == currentCustomAlign then
+                UIDropDownMenu_SetText(customAlignDropdown, opt.label)
+                break
+            end
+        end
+        table.insert(customGridControls, { dropdown = customAlignDropdown, label = customAlignLabel })
+        y = y - 45
         
         -- Custom pattern edit box
         local patternLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -5713,6 +6006,8 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
             RefreshLayout()
             patternBox:ClearFocus()
         end)
+        
+        table.insert(customGridControls, { editbox = patternBox, label = patternLabel, button = applyBtn })
         y = y - 26
         
         -- Hint text
@@ -5720,7 +6015,11 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         hintLabel:SetPoint("TOPLEFT", 10, y)
         hintLabel:SetText("Use 0 for blank rows/columns (e.g. 3,0,3 = gap)")
         hintLabel:SetTextColor(0.6, 0.6, 0.6)
+        table.insert(customGridControls, { label = hintLabel })
         y = y - 18
+        
+        -- Initialize control states
+        UpdateControlStates()
         
         -- Reset Layout Settings button
         local resetBtn = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
@@ -5740,11 +6039,20 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
             SetSetting(trackerKey, "customLayout", "")
             SetSetting(trackerKey, "customGridMode", "ROW")
             SetSetting(trackerKey, "customGridAlign", "START")
+            SetSetting(trackerKey, "customLayoutMode", nil)
             -- Refresh
             RefreshLayout()
             -- Update UI
             patternBox:SetText("")
-            TweaksUI_Cooldowns:Print("Layout settings reset for " .. trackerKey)
+            customGridCheck:SetChecked(false)
+            UpdateControlStates()
+            -- Update dropdown texts
+            UIDropDownMenu_SetText(primaryDropdown, "Right (Row Mode)")
+            UIDropDownMenu_SetText(secondaryDropdown, "Down")
+            UIDropDownMenu_SetText(alignDropdown, "Left")
+            UIDropDownMenu_SetText(modeDropdown, "Row Mode (right then down)")
+            UIDropDownMenu_SetText(customAlignDropdown, "Start (Left/Top)")
+            TUICD:Print("Layout settings reset for " .. trackerKey)
         end)
         y = y - 30
         
@@ -5798,32 +6106,62 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
                 end
             end)
         
-        -- Masque support (only show if Masque is installed)
+        -- Icon Edge Style dropdown
+        local edgeStyleLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        edgeStyleLabel:SetPoint("TOPLEFT", 10, y - 10)
+        edgeStyleLabel:SetText("Icon Edge Style")
+        y = y - 25
+        
+        local edgeStyles = {
+            {value = "sharp", label = "Sharp (Zoomed)"},
+            {value = "rounded", label = "Rounded Corners"},
+            {value = "square", label = "Square (Full)"},
+        }
+        
+        local edgeDropdown = CreateFrame("Frame", "TweaksUI_" .. trackerKey .. "_EdgeStyle", parent, "UIDropDownMenuTemplate")
+        edgeDropdown:SetPoint("TOPLEFT", 0, y)
+        UIDropDownMenu_SetWidth(edgeDropdown, 150)
+        
+        local currentEdge = GetSetting(trackerKey, "iconEdgeStyle") or "sharp"
+        for _, opt in ipairs(edgeStyles) do
+            if opt.value == currentEdge then
+                UIDropDownMenu_SetText(edgeDropdown, opt.label)
+                break
+            end
+        end
+        
+        UIDropDownMenu_Initialize(edgeDropdown, function(self, level)
+            for _, opt in ipairs(edgeStyles) do
+                local info = UIDropDownMenu_CreateInfo()
+                info.text = opt.label
+                info.value = opt.value
+                info.func = function(self)
+                    SetSetting(trackerKey, "iconEdgeStyle", self.value)
+                    UIDropDownMenu_SetText(edgeDropdown, self:GetText())
+                    -- Force layout refresh
+                    local viewer = _G[GetTrackerInfo(trackerKey).name]
+                    if viewer then ApplyGridLayout(viewer, trackerKey) end
+                end
+                info.checked = (GetSetting(trackerKey, "iconEdgeStyle") or "sharp") == opt.value
+                UIDropDownMenu_AddButton(info, level)
+            end
+        end)
+        y = y - 35
+        
+        -- Masque checkbox (only show if Masque is available)
         if Masque then
-            y = y - 15  -- Add some spacing
             y = CreateCheckbox(parent, y, "Use Masque Skinning",
                 function() return GetSetting(trackerKey, "useMasque") or false end,
                 function(v) 
-                    SetSetting(trackerKey, "useMasque", v)
-                    -- Force layout update to apply/remove Masque skinning
-                    if trackerKey == "customTrackers" then
-                        LayoutCustomTrackerIcons()
+                    SetSetting(trackerKey, "useMasque", v) 
+                    -- Force layout refresh
+                    local viewer = _G[GetTrackerInfo(trackerKey).name]
+                    if viewer then ApplyGridLayout(viewer, trackerKey) end
+                    -- Reskin group if enabling
+                    if v then
                         ReskinMasqueGroup(trackerKey)
-                    else
-                        local viewer = _G[GetTrackerInfo(trackerKey).name]
-                        if viewer then 
-                            ApplyGridLayout(viewer, trackerKey) 
-                            ReskinMasqueGroup(trackerKey)
-                        end
                     end
                 end)
-            
-            -- Add info label
-            local masqueInfo = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-            masqueInfo:SetPoint("TOPLEFT", parent, "TOPLEFT", 30, y - 3)
-            masqueInfo:SetText("|cff888888Configure skin via /masque|r")
-            masqueInfo:SetJustifyH("LEFT")
-            y = y - 20
         end
         
         parent:SetHeight(math.abs(y) + 20)
@@ -5835,30 +6173,14 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
     local function BuildTextTab(parent)
         local y = -10
         
-        -- Helper to trigger layout update
+        -- Local RefreshLayout helper
         local function RefreshLayout()
             local viewer = _G[GetTrackerInfo(trackerKey).name]
             if viewer then ApplyGridLayout(viewer, trackerKey) end
         end
         
-        -- Get available fonts from LibSharedMedia
-        local function GetFontList()
-            local fonts = {"Default"}
-            local LSM = LibStub and LibStub("LibSharedMedia-3.0", true)
-            if LSM then
-                local mediaFonts = LSM:HashTable("font")
-                if mediaFonts then
-                    for name in pairs(mediaFonts) do
-                        table.insert(fonts, name)
-                    end
-                    table.sort(fonts)
-                end
-            end
-            return fonts
-        end
-        
         -- Helper to create a font dropdown
-        local function CreateFontDropdown(parent, yPos, labelText, settingKey)
+        local function CreateFontDropdown(yPos, labelText, settingKey)
             local label = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
             label:SetPoint("TOPLEFT", 10, yPos)
             label:SetText(labelText)
@@ -5873,7 +6195,7 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
             end
             
             UIDropDownMenu_Initialize(dropdown, function(self, level)
-                local fonts = GetFontList()
+                local fonts = TUICD.Media and TUICD.Media:GetFontList() or {"Default"}
                 for _, fontName in ipairs(fonts) do
                     local info = UIDropDownMenu_CreateInfo()
                     info.text = fontName
@@ -5893,7 +6215,7 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         end
         
         -- Helper to create a color picker button
-        local function CreateColorButton(parent, yPos, labelText, rKey, gKey, bKey)
+        local function CreateColorButton(yPos, labelText, rKey, gKey, bKey)
             local label = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
             label:SetPoint("TOPLEFT", 10, yPos)
             label:SetText(labelText)
@@ -5910,7 +6232,7 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
                 GetSetting(trackerKey, gKey) or 1,
                 GetSetting(trackerKey, bKey) or 1
             )
-            colorBtn.colorTex = colorTex  -- Store reference
+            colorBtn.colorTex = colorTex
             
             local border = colorBtn:CreateTexture(nil, "BACKGROUND")
             border:SetAllPoints()
@@ -5941,7 +6263,6 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
                 })
             end)
             
-            -- Update color on show
             colorBtn:SetScript("OnShow", function(self)
                 self.colorTex:SetColorTexture(
                     GetSetting(trackerKey, rKey) or 1,
@@ -5956,28 +6277,7 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         -- ========== COOLDOWN TEXT ==========
         y = CreateHeader(parent, y, "Cooldown Text")
         
-        -- Show countdown text toggle
-        y = CreateCheckbox(parent, y, "Show Countdown Text",
-            function() 
-                local val = GetSetting(trackerKey, "showCountdownText")
-                return val == nil or val == true  -- Default to true
-            end,
-            function(v) 
-                SetSetting(trackerKey, "showCountdownText", v)
-                RefreshLayout()
-                -- Also refresh highlight frames
-                if trackerKey == "buffs" then
-                    if TUICD.BuffHighlights and TUICD.BuffHighlights.RefreshAllHighlights then
-                        TUICD.BuffHighlights:RefreshAllHighlights()
-                    end
-                else
-                    if TUICD.CooldownHighlights and TUICD.CooldownHighlights.RefreshAllHighlights then
-                        TUICD.CooldownHighlights:RefreshAllHighlights(trackerKey)
-                    end
-                end
-            end)
-        
-        y = CreateFontDropdown(parent, y, "Font:", "cooldownTextFont")
+        y = CreateFontDropdown(y, "Font:", "cooldownTextFont")
         
         y = CreateSlider(parent, y, "Scale", 0.5, 2.0, 0.1,
             function() return GetSetting(trackerKey, "cooldownTextScale") or 1.0 end,
@@ -5989,23 +6289,23 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         y = CreateSlider(parent, y, "Offset X", -20, 20, 1,
             function() return GetSetting(trackerKey, "cooldownTextOffsetX") or 0 end,
             function(v) 
-                SetSetting(trackerKey, "cooldownTextOffsetX", v) 
+                SetSetting(trackerKey, "cooldownTextOffsetX", v)
                 RefreshLayout()
             end)
         
         y = CreateSlider(parent, y, "Offset Y", -20, 20, 1,
             function() return GetSetting(trackerKey, "cooldownTextOffsetY") or 0 end,
             function(v) 
-                SetSetting(trackerKey, "cooldownTextOffsetY", v) 
+                SetSetting(trackerKey, "cooldownTextOffsetY", v)
                 RefreshLayout()
             end)
         
-        y = CreateColorButton(parent, y, "Color:", "cooldownTextColorR", "cooldownTextColorG", "cooldownTextColorB")
+        y = CreateColorButton(y, "Color:", "cooldownTextColorR", "cooldownTextColorG", "cooldownTextColorB")
         
         -- ========== COUNT/CHARGE TEXT ==========
         y = CreateHeader(parent, y - 10, "Count/Charge Text")
         
-        y = CreateFontDropdown(parent, y, "Font:", "countTextFont")
+        y = CreateFontDropdown(y, "Font:", "countTextFont")
         
         y = CreateSlider(parent, y, "Scale", 0.5, 2.0, 0.1,
             function() return GetSetting(trackerKey, "countTextScale") or 1.0 end,
@@ -6028,7 +6328,7 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
                 RefreshLayout()
             end)
         
-        y = CreateColorButton(parent, y, "Color:", "countTextColorR", "countTextColorG", "countTextColorB")
+        y = CreateColorButton(y, "Color:", "countTextColorR", "countTextColorG", "countTextColorB")
         
         parent:SetHeight(math.abs(y) + 20)
     end
@@ -6041,22 +6341,19 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         
         y = CreateHeader(parent, y, "Behavior")
         
-        y = CreateCheckbox(parent, y, "Show Tooltips on Mouseover",
-            function() return GetSetting(trackerKey, "showTooltip") ~= false end,
-            function(v) 
-                SetSetting(trackerKey, "showTooltip", v)
-                -- Re-apply layout to update tooltip hooks
-                local viewer = _G[TRACKERS[1].name]  -- Get viewer for this tracker
-                for _, t in ipairs(TRACKERS) do
-                    if t.key == trackerKey then
-                        viewer = _G[t.name]
-                        break
+        -- Tooltip option only for Essential/Utility (not buffs - no tooltip support)
+        if trackerKey ~= "buffs" then
+            y = CreateCheckbox(parent, y, "Show Tooltips on Mouseover",
+                function() return GetSetting(trackerKey, "showTooltip") ~= false end,
+                function(v) 
+                    SetSetting(trackerKey, "showTooltip", v)
+                    -- Re-apply layout to update tooltip hooks
+                    local viewer = _G[GetTrackerInfo(trackerKey).name]
+                    if viewer then
+                        pcall(ApplyGridLayout, viewer, trackerKey)
                     end
-                end
-                if viewer then
-                    pcall(ApplyGridLayout, viewer, trackerKey)
-                end
-            end)
+                end)
+        end
         
         y = CreateHeader(parent, y, "Visibility Conditions")
         
@@ -6142,19 +6439,14 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
                 else
                     local viewer = _G["BuffIconCooldownViewer"]
                     if viewer then
-                        -- Use GetOrderedIcons for consistent ordering with per-icon settings
-                        local icons = GetOrderedIcons(viewer, "buffs")
-                        for idx, icon in ipairs(icons) do
+                        local icons = CollectIcons(viewer)
+                        for _, icon in ipairs(icons) do
                             pcall(function()
                                 local textureObj = icon.Icon or icon.icon
                                 if textureObj and textureObj.SetDesaturated then
                                     textureObj:SetDesaturated(false)
                                 end
-                                -- Respect per-icon hidden state
-                                local isHidden = TUICD.BuffHighlights and TUICD.BuffHighlights:IsIconHidden(idx)
-                                if not isHidden then
-                                    icon:SetAlpha(GetCombatAwareOpacity("buffs"))
-                                end
+                                icon:SetAlpha(GetCombatAwareOpacity("buffs"))
                             end)
                         end
                     end
@@ -6201,7 +6493,7 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         header:SetText("Individual Icons")
         header:SetTextColor(1, 0.82, 0)
         
-        -- Refresh button at top right (script set later after RefreshSlotList is defined)
+        -- Refresh button (at top right, script set later after RefreshSlotList is defined)
         local refreshBtn = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
         refreshBtn:SetPoint("TOPRIGHT", -5, y)
         refreshBtn:SetSize(100, 20)
@@ -6224,6 +6516,7 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         hideTrackerCheck:SetScript("OnClick", function(self)
             if BuffHighlights then
                 BuffHighlights:SetTrackerHidden(self:GetChecked())
+                Cooldowns:SaveSettings()
             end
         end)
         
@@ -6257,14 +6550,31 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         
         y = y - 100
         
-        -- Controls panel (no backdrop - content scrolls with parent)
-        local controlsPanel = CreateFrame("Frame", nil, parent)
-        controlsPanel:SetPoint("TOPLEFT", 5, y)
-        controlsPanel:SetSize(PANEL_WIDTH - 60, 600)
+        -- Controls container with backdrop (outer frame)
+        local controlsContainer = CreateFrame("Frame", nil, parent, "BackdropTemplate")
+        controlsContainer:SetPoint("TOPLEFT", 5, y)
+        controlsContainer:SetSize(PANEL_WIDTH - 60, 650)
+        controlsContainer:SetBackdrop({
+            bgFile = "Interface\\Buttons\\WHITE8x8",
+            edgeFile = "Interface\\Buttons\\WHITE8x8",
+            edgeSize = 1,
+        })
+        controlsContainer:SetBackdropColor(0.12, 0.12, 0.12, 0.9)
+        controlsContainer:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
         
-        -- "No Selection" label
-        local noSelectionLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        noSelectionLabel:SetPoint("CENTER", 0, 100)
+        -- Scroll frame inside container
+        local controlsScrollFrame = CreateFrame("ScrollFrame", nil, controlsContainer, "UIPanelScrollFrameTemplate")
+        controlsScrollFrame:SetPoint("TOPLEFT", 2, -2)
+        controlsScrollFrame:SetPoint("BOTTOMRIGHT", -22, 2)
+        
+        -- Controls panel as scroll child (content area)
+        local controlsPanel = CreateFrame("Frame", nil, controlsScrollFrame)
+        controlsPanel:SetSize(PANEL_WIDTH - 84, 860)  -- Height for full content
+        controlsScrollFrame:SetScrollChild(controlsPanel)
+        
+        -- "No Selection" label (on container, not scroll child, so it stays centered)
+        local noSelectionLabel = controlsContainer:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        noSelectionLabel:SetPoint("CENTER")
         noSelectionLabel:SetText("Select a buff slot above")
         noSelectionLabel:SetTextColor(0.5, 0.5, 0.5)
         
@@ -6295,7 +6605,7 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.enableLabel:SetTextColor(0.9, 0.9, 0.9)
         controls.enableLabel:Hide()
         
-        -- Hide icon checkbox (state-independent - hides icon completely)
+        -- Hide in tracker checkbox (hide main tracker icon, keep highlight visible)
         controls.hideCheck = CreateFrame("CheckButton", nil, controlsPanel, "UICheckButtonTemplate")
         controls.hideCheck:SetPoint("LEFT", controls.enableLabel, "RIGHT", 20, 0)
         controls.hideCheck:SetSize(24, 24)
@@ -6303,7 +6613,7 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         
         controls.hideLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         controls.hideLabel:SetPoint("LEFT", controls.hideCheck, "RIGHT", 2, 0)
-        controls.hideLabel:SetText("Hide Icon in Tracker")
+        controls.hideLabel:SetText("Hide in Tracker")
         controls.hideLabel:SetTextColor(0.9, 0.9, 0.9)
         controls.hideLabel:Hide()
         
@@ -6449,51 +6759,37 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.customH:SetMaxLetters(3)
         controls.customH:Hide()
         
-        -- =====================================================================
-        -- DOCK ASSIGNMENT SECTION
-        -- =====================================================================
+        -- =====================================================
+        -- Dock Assignment
+        -- =====================================================
         controls.dockHeader = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        controls.dockHeader:SetPoint("TOPLEFT", 10, -305)
-        controls.dockHeader:SetText("|cff00ccffDock Assignment|r")
+        controls.dockHeader:SetPoint("TOPLEFT", 10, -265)
+        controls.dockHeader:SetText("Dock Assignment")
+        controls.dockHeader:SetTextColor(1, 0.82, 0)
         controls.dockHeader:Hide()
         
         controls.dockLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.dockLabel:SetPoint("TOPLEFT", 10, -325)
+        controls.dockLabel:SetPoint("TOPLEFT", 10, -285)
         controls.dockLabel:SetText("Assign to Dock:")
         controls.dockLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.dockLabel:Hide()
         
         controls.dockDropdown = CreateFrame("Frame", nil, controlsPanel, "UIDropDownMenuTemplate")
-        controls.dockDropdown:SetPoint("TOPLEFT", 80, -318)
+        controls.dockDropdown:SetPoint("TOPLEFT", 80, -278)
         UIDropDownMenu_SetWidth(controls.dockDropdown, 120)
         controls.dockDropdown:Hide()
         
-        -- Text Scale Section Header
-        -- =====================================================================
-        -- COOLDOWN TEXT SECTION
-        -- =====================================================================
-        
-        -- Anchor options for text elements
-        local ANCHOR_OPTIONS = {
-            { label = "Center", value = "CENTER" },
-            { label = "Top Left", value = "TOPLEFT" },
-            { label = "Top", value = "TOP" },
-            { label = "Top Right", value = "TOPRIGHT" },
-            { label = "Left", value = "LEFT" },
-            { label = "Right", value = "RIGHT" },
-            { label = "Bottom Left", value = "BOTTOMLEFT" },
-            { label = "Bottom", value = "BOTTOM" },
-            { label = "Bottom Right", value = "BOTTOMRIGHT" },
-        }
-        
+        -- =====================================================
+        -- Per-Icon Text Controls (Cooldown Timer)
+        -- =====================================================
         controls.cooldownTextHeader = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        controls.cooldownTextHeader:SetPoint("TOPLEFT", 10, -360)
+        controls.cooldownTextHeader:SetPoint("TOPLEFT", 10, -345)
         controls.cooldownTextHeader:SetText("Cooldown Text")
         controls.cooldownTextHeader:SetTextColor(1, 0.82, 0)
         controls.cooldownTextHeader:Hide()
         
         controls.cooldownTextScaleLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.cooldownTextScaleLabel:SetPoint("TOPLEFT", 10, -380)
+        controls.cooldownTextScaleLabel:SetPoint("TOPLEFT", 10, -365)
         controls.cooldownTextScaleLabel:SetText("Scale:")
         controls.cooldownTextScaleLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.cooldownTextScaleLabel:Hide()
@@ -6514,19 +6810,8 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.cooldownTextValue:SetTextColor(1, 1, 1)
         controls.cooldownTextValue:Hide()
         
-        controls.cooldownTextAnchorLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.cooldownTextAnchorLabel:SetPoint("LEFT", controls.cooldownTextValue, "RIGHT", 15, 0)
-        controls.cooldownTextAnchorLabel:SetText("Anchor:")
-        controls.cooldownTextAnchorLabel:SetTextColor(0.8, 0.8, 0.8)
-        controls.cooldownTextAnchorLabel:Hide()
-        
-        controls.cooldownTextAnchorDropdown = CreateFrame("Frame", nil, controlsPanel, "UIDropDownMenuTemplate")
-        controls.cooldownTextAnchorDropdown:SetPoint("LEFT", controls.cooldownTextAnchorLabel, "RIGHT", -10, 0)
-        UIDropDownMenu_SetWidth(controls.cooldownTextAnchorDropdown, 80)
-        controls.cooldownTextAnchorDropdown:Hide()
-        
         controls.cooldownTextColorLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.cooldownTextColorLabel:SetPoint("TOPLEFT", 10, -405)
+        controls.cooldownTextColorLabel:SetPoint("TOPLEFT", 10, -390)
         controls.cooldownTextColorLabel:SetText("Color:")
         controls.cooldownTextColorLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.cooldownTextColorLabel:Hide()
@@ -6540,15 +6825,15 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.cooldownTextColorBtn:Hide()
         
         controls.cooldownTextOffsetXLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.cooldownTextOffsetXLabel:SetPoint("LEFT", controls.cooldownTextColorBtn, "RIGHT", 15, 0)
+        controls.cooldownTextOffsetXLabel:SetPoint("TOPLEFT", 10, -415)
         controls.cooldownTextOffsetXLabel:SetText("Offset X:")
         controls.cooldownTextOffsetXLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.cooldownTextOffsetXLabel:Hide()
         
         controls.cooldownTextOffsetXSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
         controls.cooldownTextOffsetXSlider:SetPoint("LEFT", controls.cooldownTextOffsetXLabel, "RIGHT", 5, 0)
-        controls.cooldownTextOffsetXSlider:SetSize(50, 16)
-        controls.cooldownTextOffsetXSlider:SetMinMaxValues(-50, 50)
+        controls.cooldownTextOffsetXSlider:SetSize(100, 16)
+        controls.cooldownTextOffsetXSlider:SetMinMaxValues(-100, 100)
         controls.cooldownTextOffsetXSlider:SetValueStep(1)
         controls.cooldownTextOffsetXSlider:SetObeyStepOnDrag(true)
         controls.cooldownTextOffsetXSlider.Low:SetText("")
@@ -6557,20 +6842,20 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.cooldownTextOffsetXSlider:Hide()
         
         controls.cooldownTextOffsetXValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.cooldownTextOffsetXValue:SetPoint("LEFT", controls.cooldownTextOffsetXSlider, "RIGHT", 3, 0)
+        controls.cooldownTextOffsetXValue:SetPoint("LEFT", controls.cooldownTextOffsetXSlider, "RIGHT", 5, 0)
         controls.cooldownTextOffsetXValue:SetTextColor(1, 1, 1)
         controls.cooldownTextOffsetXValue:Hide()
         
         controls.cooldownTextOffsetYLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.cooldownTextOffsetYLabel:SetPoint("LEFT", controls.cooldownTextOffsetXValue, "RIGHT", 8, 0)
-        controls.cooldownTextOffsetYLabel:SetText("Y:")
+        controls.cooldownTextOffsetYLabel:SetPoint("TOPLEFT", 10, -440)
+        controls.cooldownTextOffsetYLabel:SetText("Offset Y:")
         controls.cooldownTextOffsetYLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.cooldownTextOffsetYLabel:Hide()
         
         controls.cooldownTextOffsetYSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
         controls.cooldownTextOffsetYSlider:SetPoint("LEFT", controls.cooldownTextOffsetYLabel, "RIGHT", 5, 0)
-        controls.cooldownTextOffsetYSlider:SetSize(50, 16)
-        controls.cooldownTextOffsetYSlider:SetMinMaxValues(-50, 50)
+        controls.cooldownTextOffsetYSlider:SetSize(100, 16)
+        controls.cooldownTextOffsetYSlider:SetMinMaxValues(-100, 100)
         controls.cooldownTextOffsetYSlider:SetValueStep(1)
         controls.cooldownTextOffsetYSlider:SetObeyStepOnDrag(true)
         controls.cooldownTextOffsetYSlider.Low:SetText("")
@@ -6579,21 +6864,21 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.cooldownTextOffsetYSlider:Hide()
         
         controls.cooldownTextOffsetYValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.cooldownTextOffsetYValue:SetPoint("LEFT", controls.cooldownTextOffsetYSlider, "RIGHT", 3, 0)
+        controls.cooldownTextOffsetYValue:SetPoint("LEFT", controls.cooldownTextOffsetYSlider, "RIGHT", 5, 0)
         controls.cooldownTextOffsetYValue:SetTextColor(1, 1, 1)
         controls.cooldownTextOffsetYValue:Hide()
         
-        -- =====================================================================
-        -- COUNT TEXT SECTION
-        -- =====================================================================
+        -- =====================================================
+        -- Per-Icon Text Controls (Count/Charge Text)
+        -- =====================================================
         controls.countTextHeader = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        controls.countTextHeader:SetPoint("TOPLEFT", 10, -435)
+        controls.countTextHeader:SetPoint("TOPLEFT", 10, -470)
         controls.countTextHeader:SetText("Count/Charge Text")
         controls.countTextHeader:SetTextColor(1, 0.82, 0)
         controls.countTextHeader:Hide()
         
         controls.countTextScaleLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.countTextScaleLabel:SetPoint("TOPLEFT", 10, -455)
+        controls.countTextScaleLabel:SetPoint("TOPLEFT", 10, -490)
         controls.countTextScaleLabel:SetText("Scale:")
         controls.countTextScaleLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.countTextScaleLabel:Hide()
@@ -6614,19 +6899,8 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.countTextValue:SetTextColor(1, 1, 1)
         controls.countTextValue:Hide()
         
-        controls.countTextAnchorLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.countTextAnchorLabel:SetPoint("LEFT", controls.countTextValue, "RIGHT", 15, 0)
-        controls.countTextAnchorLabel:SetText("Anchor:")
-        controls.countTextAnchorLabel:SetTextColor(0.8, 0.8, 0.8)
-        controls.countTextAnchorLabel:Hide()
-        
-        controls.countTextAnchorDropdown = CreateFrame("Frame", nil, controlsPanel, "UIDropDownMenuTemplate")
-        controls.countTextAnchorDropdown:SetPoint("LEFT", controls.countTextAnchorLabel, "RIGHT", -10, 0)
-        UIDropDownMenu_SetWidth(controls.countTextAnchorDropdown, 80)
-        controls.countTextAnchorDropdown:Hide()
-        
         controls.countTextColorLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.countTextColorLabel:SetPoint("TOPLEFT", 10, -480)
+        controls.countTextColorLabel:SetPoint("TOPLEFT", 10, -515)
         controls.countTextColorLabel:SetText("Color:")
         controls.countTextColorLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.countTextColorLabel:Hide()
@@ -6640,15 +6914,15 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.countTextColorBtn:Hide()
         
         controls.countTextOffsetXLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.countTextOffsetXLabel:SetPoint("LEFT", controls.countTextColorBtn, "RIGHT", 15, 0)
+        controls.countTextOffsetXLabel:SetPoint("TOPLEFT", 10, -540)
         controls.countTextOffsetXLabel:SetText("Offset X:")
         controls.countTextOffsetXLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.countTextOffsetXLabel:Hide()
         
         controls.countTextOffsetXSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
         controls.countTextOffsetXSlider:SetPoint("LEFT", controls.countTextOffsetXLabel, "RIGHT", 5, 0)
-        controls.countTextOffsetXSlider:SetSize(50, 16)
-        controls.countTextOffsetXSlider:SetMinMaxValues(-50, 50)
+        controls.countTextOffsetXSlider:SetSize(100, 16)
+        controls.countTextOffsetXSlider:SetMinMaxValues(-100, 100)
         controls.countTextOffsetXSlider:SetValueStep(1)
         controls.countTextOffsetXSlider:SetObeyStepOnDrag(true)
         controls.countTextOffsetXSlider.Low:SetText("")
@@ -6657,20 +6931,20 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.countTextOffsetXSlider:Hide()
         
         controls.countTextOffsetXValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.countTextOffsetXValue:SetPoint("LEFT", controls.countTextOffsetXSlider, "RIGHT", 3, 0)
+        controls.countTextOffsetXValue:SetPoint("LEFT", controls.countTextOffsetXSlider, "RIGHT", 5, 0)
         controls.countTextOffsetXValue:SetTextColor(1, 1, 1)
         controls.countTextOffsetXValue:Hide()
         
         controls.countTextOffsetYLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.countTextOffsetYLabel:SetPoint("LEFT", controls.countTextOffsetXValue, "RIGHT", 8, 0)
-        controls.countTextOffsetYLabel:SetText("Y:")
+        controls.countTextOffsetYLabel:SetPoint("TOPLEFT", 10, -565)
+        controls.countTextOffsetYLabel:SetText("Offset Y:")
         controls.countTextOffsetYLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.countTextOffsetYLabel:Hide()
         
         controls.countTextOffsetYSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
         controls.countTextOffsetYSlider:SetPoint("LEFT", controls.countTextOffsetYLabel, "RIGHT", 5, 0)
-        controls.countTextOffsetYSlider:SetSize(50, 16)
-        controls.countTextOffsetYSlider:SetMinMaxValues(-50, 50)
+        controls.countTextOffsetYSlider:SetSize(100, 16)
+        controls.countTextOffsetYSlider:SetMinMaxValues(-100, 100)
         controls.countTextOffsetYSlider:SetValueStep(1)
         controls.countTextOffsetYSlider:SetObeyStepOnDrag(true)
         controls.countTextOffsetYSlider.Low:SetText("")
@@ -6679,53 +6953,52 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.countTextOffsetYSlider:Hide()
         
         controls.countTextOffsetYValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.countTextOffsetYValue:SetPoint("LEFT", controls.countTextOffsetYSlider, "RIGHT", 3, 0)
+        controls.countTextOffsetYValue:SetPoint("LEFT", controls.countTextOffsetYSlider, "RIGHT", 5, 0)
         controls.countTextOffsetYValue:SetTextColor(1, 1, 1)
         controls.countTextOffsetYValue:Hide()
         
-        -- =====================================================================
-        -- CUSTOM LABEL SECTION (Accessibility)
-        -- =====================================================================
+        -- =====================================================
+        -- Custom Label Controls (Accessibility feature)
+        -- =====================================================
         controls.labelHeader = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        controls.labelHeader:SetPoint("TOPLEFT", 10, -510)
+        controls.labelHeader:SetPoint("TOPLEFT", 10, -635)
         controls.labelHeader:SetText("Custom Label (Accessibility)")
         controls.labelHeader:SetTextColor(1, 0.82, 0)
         controls.labelHeader:Hide()
         
         controls.labelEnableCheck = CreateFrame("CheckButton", nil, controlsPanel, "UICheckButtonTemplate")
-        controls.labelEnableCheck:SetPoint("TOPLEFT", 10, -530)
+        controls.labelEnableCheck:SetPoint("TOPLEFT", 10, -655)
         controls.labelEnableCheck:SetSize(24, 24)
         controls.labelEnableCheck:Hide()
         
         controls.labelEnableLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         controls.labelEnableLabel:SetPoint("LEFT", controls.labelEnableCheck, "RIGHT", 2, 0)
         controls.labelEnableLabel:SetText("Show Custom Label")
-        controls.labelEnableLabel:SetTextColor(0.8, 0.8, 0.8)
+        controls.labelEnableLabel:SetTextColor(0.9, 0.9, 0.9)
         controls.labelEnableLabel:Hide()
         
         controls.labelTextLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.labelTextLabel:SetPoint("TOPLEFT", 10, -555)
+        controls.labelTextLabel:SetPoint("TOPLEFT", 10, -685)
         controls.labelTextLabel:SetText("Text:")
         controls.labelTextLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.labelTextLabel:Hide()
         
         controls.labelTextBox = CreateFrame("EditBox", nil, controlsPanel, "InputBoxTemplate")
-        controls.labelTextBox:SetPoint("LEFT", controls.labelTextLabel, "RIGHT", 10, 0)
-        controls.labelTextBox:SetSize(100, 18)
+        controls.labelTextBox:SetPoint("LEFT", controls.labelTextLabel, "RIGHT", 8, 0)
+        controls.labelTextBox:SetSize(120, 18)
         controls.labelTextBox:SetAutoFocus(false)
-        controls.labelTextBox:SetMaxLetters(10)
+        controls.labelTextBox:SetMaxLetters(20)
         controls.labelTextBox:Hide()
         
-        -- Font Size + Value (row 1)
         controls.labelSizeLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.labelSizeLabel:SetPoint("TOPLEFT", 10, -580)
-        controls.labelSizeLabel:SetText("Font Size:")
+        controls.labelSizeLabel:SetPoint("LEFT", controls.labelTextBox, "RIGHT", 15, 0)
+        controls.labelSizeLabel:SetText("Size:")
         controls.labelSizeLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.labelSizeLabel:Hide()
         
         controls.labelSizeSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
         controls.labelSizeSlider:SetPoint("LEFT", controls.labelSizeLabel, "RIGHT", 5, 0)
-        controls.labelSizeSlider:SetSize(50, 16)
+        controls.labelSizeSlider:SetSize(60, 16)
         controls.labelSizeSlider:SetMinMaxValues(8, 32)
         controls.labelSizeSlider:SetValueStep(1)
         controls.labelSizeSlider:SetObeyStepOnDrag(true)
@@ -6735,47 +7008,38 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.labelSizeSlider:Hide()
         
         controls.labelSizeValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.labelSizeValue:SetPoint("LEFT", controls.labelSizeSlider, "RIGHT", 3, 0)
+        controls.labelSizeValue:SetPoint("LEFT", controls.labelSizeSlider, "RIGHT", 5, 0)
         controls.labelSizeValue:SetTextColor(1, 1, 1)
         controls.labelSizeValue:Hide()
         
-        -- Color + Anchor (row 2)
         controls.labelColorLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.labelColorLabel:SetPoint("TOPLEFT", 10, -605)
+        controls.labelColorLabel:SetPoint("TOPLEFT", 10, -710)
         controls.labelColorLabel:SetText("Color:")
         controls.labelColorLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.labelColorLabel:Hide()
         
         controls.labelColorBtn = CreateFrame("Button", nil, controlsPanel, "BackdropTemplate")
-        controls.labelColorBtn:SetPoint("LEFT", controls.labelColorLabel, "RIGHT", 10, 0)
-        controls.labelColorBtn:SetSize(24, 16)
-        controls.labelColorBtn:SetBackdrop({bgFile = "Interface\\Buttons\\WHITE8x8", edgeFile = "Interface\\Buttons\\WHITE8x8", edgeSize = 1})
+        controls.labelColorBtn:SetPoint("LEFT", controls.labelColorLabel, "RIGHT", 8, 0)
+        controls.labelColorBtn:SetSize(20, 20)
+        controls.labelColorBtn:SetBackdrop({ 
+            bgFile = "Interface\\BUTTONS\\WHITE8X8", 
+            edgeFile = "Interface\\BUTTONS\\WHITE8X8", 
+            edgeSize = 1 
+        })
         controls.labelColorBtn:SetBackdropColor(1, 1, 1, 1)
         controls.labelColorBtn:SetBackdropBorderColor(0.3, 0.3, 0.3, 1)
         controls.labelColorBtn:Hide()
         
-        controls.labelAnchorLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.labelAnchorLabel:SetPoint("LEFT", controls.labelColorBtn, "RIGHT", 15, 0)
-        controls.labelAnchorLabel:SetText("Anchor:")
-        controls.labelAnchorLabel:SetTextColor(0.8, 0.8, 0.8)
-        controls.labelAnchorLabel:Hide()
-        
-        controls.labelAnchorDropdown = CreateFrame("Frame", nil, controlsPanel, "UIDropDownMenuTemplate")
-        controls.labelAnchorDropdown:SetPoint("LEFT", controls.labelAnchorLabel, "RIGHT", -10, 0)
-        UIDropDownMenu_SetWidth(controls.labelAnchorDropdown, 80)
-        controls.labelAnchorDropdown:Hide()
-        
-        -- Offset X + Y (row 3)
-        controls.labelOffsetXLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.labelOffsetXLabel:SetPoint("TOPLEFT", 10, -630)
-        controls.labelOffsetXLabel:SetText("Offset X:")
-        controls.labelOffsetXLabel:SetTextColor(0.8, 0.8, 0.8)
-        controls.labelOffsetXLabel:Hide()
+        controls.labelOffsetLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.labelOffsetLabel:SetPoint("LEFT", controls.labelColorBtn, "RIGHT", 15, 0)
+        controls.labelOffsetLabel:SetText("X:")
+        controls.labelOffsetLabel:SetTextColor(0.8, 0.8, 0.8)
+        controls.labelOffsetLabel:Hide()
         
         controls.labelOffsetXSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
-        controls.labelOffsetXSlider:SetPoint("LEFT", controls.labelOffsetXLabel, "RIGHT", 5, 0)
-        controls.labelOffsetXSlider:SetSize(50, 16)
-        controls.labelOffsetXSlider:SetMinMaxValues(-50, 50)
+        controls.labelOffsetXSlider:SetPoint("LEFT", controls.labelOffsetLabel, "RIGHT", 3, 0)
+        controls.labelOffsetXSlider:SetSize(100, 16)
+        controls.labelOffsetXSlider:SetMinMaxValues(-100, 100)
         controls.labelOffsetXSlider:SetValueStep(1)
         controls.labelOffsetXSlider:SetObeyStepOnDrag(true)
         controls.labelOffsetXSlider.Low:SetText("")
@@ -6795,9 +7059,9 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.labelOffsetYLabel:Hide()
         
         controls.labelOffsetYSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
-        controls.labelOffsetYSlider:SetPoint("LEFT", controls.labelOffsetYLabel, "RIGHT", 5, 0)
-        controls.labelOffsetYSlider:SetSize(50, 16)
-        controls.labelOffsetYSlider:SetMinMaxValues(-50, 50)
+        controls.labelOffsetYSlider:SetPoint("LEFT", controls.labelOffsetYLabel, "RIGHT", 3, 0)
+        controls.labelOffsetYSlider:SetSize(100, 16)
+        controls.labelOffsetYSlider:SetMinMaxValues(-100, 100)
         controls.labelOffsetYSlider:SetValueStep(1)
         controls.labelOffsetYSlider:SetObeyStepOnDrag(true)
         controls.labelOffsetYSlider.Low:SetText("")
@@ -6883,13 +7147,13 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
             -- Clear slider scripts BEFORE setting values to prevent old callbacks from firing
             controls.sizeSlider:SetScript("OnValueChanged", nil)
             controls.opacitySlider:SetScript("OnValueChanged", nil)
-            controls.cooldownTextSlider:SetScript("OnValueChanged", nil)
-            controls.countTextSlider:SetScript("OnValueChanged", nil)
             controls.labelSizeSlider:SetScript("OnValueChanged", nil)
             controls.labelOffsetXSlider:SetScript("OnValueChanged", nil)
             controls.labelOffsetYSlider:SetScript("OnValueChanged", nil)
+            controls.cooldownTextSlider:SetScript("OnValueChanged", nil)
             controls.cooldownTextOffsetXSlider:SetScript("OnValueChanged", nil)
             controls.cooldownTextOffsetYSlider:SetScript("OnValueChanged", nil)
+            controls.countTextSlider:SetScript("OnValueChanged", nil)
             controls.countTextOffsetXSlider:SetScript("OnValueChanged", nil)
             controls.countTextOffsetYSlider:SetScript("OnValueChanged", nil)
             
@@ -6902,40 +7166,37 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
             controls.opacitySlider:SetValue(opacity)
             controls.opacityValue:SetText(math.floor(opacity * 100) .. "%")
             controls.desatCheck:SetChecked(not saturated)
-            
-            -- Proc glow setting (default true if not set)
             local showProcGlow = BuffHighlights:GetShowProcGlow(slotIndex)
             controls.procGlowCheck:SetChecked(showProcGlow == nil or showProcGlow == true)
             controls.customW:SetText(tostring(customW))
             controls.customH:SetText(tostring(customH))
             
-            -- Text scale, color, and offset settings (state-independent)
-            local cooldownTextScale = BuffHighlights:GetCooldownTextScale(slotIndex)
-            local cooldownTextColor = BuffHighlights:GetCooldownTextColor(slotIndex)
-            local cooldownTextOffsetX = BuffHighlights:GetCooldownTextOffsetX(slotIndex)
-            local cooldownTextOffsetY = BuffHighlights:GetCooldownTextOffsetY(slotIndex)
-            local cooldownTextAnchor = BuffHighlights:GetCooldownTextAnchor(slotIndex)
-            local countTextScale = BuffHighlights:GetCountTextScale(slotIndex)
-            local countTextColor = BuffHighlights:GetCountTextColor(slotIndex)
-            local countTextOffsetX = BuffHighlights:GetCountTextOffsetX(slotIndex)
-            local countTextOffsetY = BuffHighlights:GetCountTextOffsetY(slotIndex)
-            local countTextAnchor = BuffHighlights:GetCountTextAnchor(slotIndex)
+            -- Per-icon text settings (state-independent)
+            local cdTextScale = BuffHighlights:GetCooldownTextScale(slotIndex)
+            local cdTextColor = BuffHighlights:GetCooldownTextColor(slotIndex)
+            local cdTextOffsetX = BuffHighlights:GetCooldownTextOffsetX(slotIndex)
+            local cdTextOffsetY = BuffHighlights:GetCooldownTextOffsetY(slotIndex)
             
-            controls.cooldownTextSlider:SetValue(cooldownTextScale)
-            controls.cooldownTextValue:SetText(string.format("%.1fx", cooldownTextScale))
-            controls.cooldownTextColorBtn:SetBackdropColor(cooldownTextColor[1] or 1, cooldownTextColor[2] or 1, cooldownTextColor[3] or 1, 1)
-            controls.cooldownTextOffsetXSlider:SetValue(cooldownTextOffsetX)
-            controls.cooldownTextOffsetXValue:SetText(tostring(cooldownTextOffsetX))
-            controls.cooldownTextOffsetYSlider:SetValue(cooldownTextOffsetY)
-            controls.cooldownTextOffsetYValue:SetText(tostring(cooldownTextOffsetY))
+            controls.cooldownTextSlider:SetValue(cdTextScale or 1.0)
+            controls.cooldownTextValue:SetText(string.format("%.1f", cdTextScale or 1.0))
+            controls.cooldownTextColorBtn:SetBackdropColor(cdTextColor[1] or 1, cdTextColor[2] or 1, cdTextColor[3] or 1, 1)
+            controls.cooldownTextOffsetXSlider:SetValue(cdTextOffsetX or 0)
+            controls.cooldownTextOffsetXValue:SetText(tostring(cdTextOffsetX or 0))
+            controls.cooldownTextOffsetYSlider:SetValue(cdTextOffsetY or 0)
+            controls.cooldownTextOffsetYValue:SetText(tostring(cdTextOffsetY or 0))
             
-            controls.countTextSlider:SetValue(countTextScale)
-            controls.countTextValue:SetText(string.format("%.1fx", countTextScale))
-            controls.countTextColorBtn:SetBackdropColor(countTextColor[1] or 1, countTextColor[2] or 1, countTextColor[3] or 1, 1)
-            controls.countTextOffsetXSlider:SetValue(countTextOffsetX)
-            controls.countTextOffsetXValue:SetText(tostring(countTextOffsetX))
-            controls.countTextOffsetYSlider:SetValue(countTextOffsetY)
-            controls.countTextOffsetYValue:SetText(tostring(countTextOffsetY))
+            local cntTextScale = BuffHighlights:GetCountTextScale(slotIndex)
+            local cntTextColor = BuffHighlights:GetCountTextColor(slotIndex)
+            local cntTextOffsetX = BuffHighlights:GetCountTextOffsetX(slotIndex)
+            local cntTextOffsetY = BuffHighlights:GetCountTextOffsetY(slotIndex)
+            
+            controls.countTextSlider:SetValue(cntTextScale or 1.0)
+            controls.countTextValue:SetText(string.format("%.1f", cntTextScale or 1.0))
+            controls.countTextColorBtn:SetBackdropColor(cntTextColor[1] or 1, cntTextColor[2] or 1, cntTextColor[3] or 1, 1)
+            controls.countTextOffsetXSlider:SetValue(cntTextOffsetX or 0)
+            controls.countTextOffsetXValue:SetText(tostring(cntTextOffsetX or 0))
+            controls.countTextOffsetYSlider:SetValue(cntTextOffsetY or 0)
+            controls.countTextOffsetYValue:SetText(tostring(cntTextOffsetY or 0))
             
             -- Label settings (state-independent)
             local labelEnabled = BuffHighlights:GetLabelEnabled(slotIndex)
@@ -6944,52 +7205,16 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
             local labelColor = BuffHighlights:GetLabelColor(slotIndex)
             local labelOffsetX = BuffHighlights:GetLabelOffsetX(slotIndex)
             local labelOffsetY = BuffHighlights:GetLabelOffsetY(slotIndex)
-            local labelAnchor = BuffHighlights:GetLabelAnchor(slotIndex)
             
             controls.labelEnableCheck:SetChecked(labelEnabled)
             controls.labelTextBox:SetText(labelText or "")
             controls.labelSizeSlider:SetValue(labelSize or 14)
             controls.labelSizeValue:SetText(tostring(labelSize or 14))
-            controls.labelColorBtn:SetBackdropColor(labelColor[1] or 1, labelColor[2] or 1, labelColor[3] or 1, 1)
+            controls.labelColorBtn:SetBackdropColor(labelColor[1] or 1, labelColor[2] or 1, labelColor[3] or 1, labelColor[4] or 1)
             controls.labelOffsetXSlider:SetValue(labelOffsetX or 0)
             controls.labelOffsetXValue:SetText(tostring(labelOffsetX or 0))
             controls.labelOffsetYSlider:SetValue(labelOffsetY or 0)
             controls.labelOffsetYValue:SetText(tostring(labelOffsetY or 0))
-            
-            -- Helper function to initialize anchor dropdowns
-            local function InitAnchorDropdown(dropdown, currentAnchor, setFunc)
-                UIDropDownMenu_Initialize(dropdown, function(self, level)
-                    for _, opt in ipairs(ANCHOR_OPTIONS) do
-                        local info = UIDropDownMenu_CreateInfo()
-                        info.text = opt.label
-                        info.value = opt.value
-                        info.func = function()
-                            setFunc(opt.value)
-                            UIDropDownMenu_SetText(dropdown, opt.label)
-                        end
-                        info.checked = (currentAnchor == opt.value)
-                        UIDropDownMenu_AddButton(info, level)
-                    end
-                end)
-                -- Set current text
-                for _, opt in ipairs(ANCHOR_OPTIONS) do
-                    if opt.value == currentAnchor then
-                        UIDropDownMenu_SetText(dropdown, opt.label)
-                        break
-                    end
-                end
-            end
-            
-            -- Initialize anchor dropdowns
-            InitAnchorDropdown(controls.cooldownTextAnchorDropdown, cooldownTextAnchor, function(anchor)
-                BuffHighlights:SetCooldownTextAnchor(slotIndex, anchor)
-            end)
-            InitAnchorDropdown(controls.countTextAnchorDropdown, countTextAnchor, function(anchor)
-                BuffHighlights:SetCountTextAnchor(slotIndex, anchor)
-            end)
-            InitAnchorDropdown(controls.labelAnchorDropdown, labelAnchor, function(anchor)
-                BuffHighlights:SetLabelAnchor(slotIndex, anchor)
-            end)
             
             -- Initialize aspect dropdown
             UIDropDownMenu_Initialize(controls.aspectDropdown, function(self, level)
@@ -7017,192 +7242,6 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
             
             UpdateCustomAspectVisibility(aspectRatio)
             
-            -- Wire up control callbacks
-            controls.enableCheck:SetScript("OnClick", function(self)
-                BuffHighlights:EnableHighlight(slotIndex, self:GetChecked())
-            end)
-            
-            controls.hideCheck:SetScript("OnClick", function(self)
-                BuffHighlights:SetIconHidden(slotIndex, self:GetChecked())
-            end)
-            
-            controls.activeBtn:SetScript("OnClick", function()
-                currentState = "active"
-                UpdateControlsForSlot(slotIndex)
-            end)
-            
-            controls.inactiveBtn:SetScript("OnClick", function()
-                currentState = "inactive"
-                UpdateControlsForSlot(slotIndex)
-            end)
-            
-            controls.showCheck:SetScript("OnClick", function(self)
-                BuffHighlights:SetShowState(slotIndex, currentState, self:GetChecked())
-            end)
-            
-            controls.sizeSlider:SetScript("OnValueChanged", function(self, value)
-                value = math.floor(value)
-                controls.sizeValue:SetText(tostring(value))
-                BuffHighlights:SetSize(slotIndex, currentState, value)
-            end)
-            
-            controls.opacitySlider:SetScript("OnValueChanged", function(self, value)
-                controls.opacityValue:SetText(math.floor(value * 100) .. "%")
-                BuffHighlights:SetOpacity(slotIndex, currentState, value)
-            end)
-            
-            controls.desatCheck:SetScript("OnClick", function(self)
-                BuffHighlights:SetSaturation(slotIndex, currentState, not self:GetChecked())
-            end)
-            
-            controls.procGlowCheck:SetScript("OnClick", function(self)
-                BuffHighlights:SetShowProcGlow(slotIndex, self:GetChecked())
-            end)
-            
-            local function ApplyCustomAspect()
-                local w = tonumber(controls.customW:GetText()) or 1
-                local h = tonumber(controls.customH:GetText()) or 1
-                if w < 1 then w = 1 end
-                if h < 1 then h = 1 end
-                BuffHighlights:SetCustomAspectRatio(slotIndex, currentState, w, h)
-            end
-            
-            controls.customW:SetScript("OnEnterPressed", function(self)
-                self:ClearFocus()
-                ApplyCustomAspect()
-            end)
-            controls.customW:SetScript("OnEditFocusLost", ApplyCustomAspect)
-            
-            controls.customH:SetScript("OnEnterPressed", function(self)
-                self:ClearFocus()
-                ApplyCustomAspect()
-            end)
-            controls.customH:SetScript("OnEditFocusLost", ApplyCustomAspect)
-            
-            controls.cooldownTextSlider:SetScript("OnValueChanged", function(self, value)
-                value = math.floor(value * 10) / 10  -- Round to 1 decimal place
-                controls.cooldownTextValue:SetText(string.format("%.1fx", value))
-                BuffHighlights:SetCooldownTextScale(slotIndex, value)
-            end)
-            
-            controls.cooldownTextColorBtn:SetScript("OnClick", function()
-                local r, g, b = controls.cooldownTextColorBtn:GetBackdropColor()
-                local info = {
-                    swatchFunc = function()
-                        local r, g, b = ColorPickerFrame:GetColorRGB()
-                        controls.cooldownTextColorBtn:SetBackdropColor(r, g, b, 1)
-                        BuffHighlights:SetCooldownTextColor(slotIndex, {r, g, b, 1})
-                    end,
-                    cancelFunc = function(prev)
-                        controls.cooldownTextColorBtn:SetBackdropColor(prev.r, prev.g, prev.b, 1)
-                        BuffHighlights:SetCooldownTextColor(slotIndex, {prev.r, prev.g, prev.b, 1})
-                    end,
-                    r = r,
-                    g = g,
-                    b = b,
-                }
-                ColorPickerFrame:SetupColorPickerAndShow(info)
-            end)
-            
-            controls.cooldownTextOffsetXSlider:SetScript("OnValueChanged", function(self, value)
-                value = math.floor(value)
-                controls.cooldownTextOffsetXValue:SetText(tostring(value))
-                BuffHighlights:SetCooldownTextOffsetX(slotIndex, value)
-            end)
-            
-            controls.cooldownTextOffsetYSlider:SetScript("OnValueChanged", function(self, value)
-                value = math.floor(value)
-                controls.cooldownTextOffsetYValue:SetText(tostring(value))
-                BuffHighlights:SetCooldownTextOffsetY(slotIndex, value)
-            end)
-            
-            controls.countTextSlider:SetScript("OnValueChanged", function(self, value)
-                value = math.floor(value * 10) / 10  -- Round to 1 decimal place
-                controls.countTextValue:SetText(string.format("%.1fx", value))
-                BuffHighlights:SetCountTextScale(slotIndex, value)
-            end)
-            
-            controls.countTextColorBtn:SetScript("OnClick", function()
-                local r, g, b = controls.countTextColorBtn:GetBackdropColor()
-                local info = {
-                    swatchFunc = function()
-                        local r, g, b = ColorPickerFrame:GetColorRGB()
-                        controls.countTextColorBtn:SetBackdropColor(r, g, b, 1)
-                        BuffHighlights:SetCountTextColor(slotIndex, {r, g, b, 1})
-                    end,
-                    cancelFunc = function(prev)
-                        controls.countTextColorBtn:SetBackdropColor(prev.r, prev.g, prev.b, 1)
-                        BuffHighlights:SetCountTextColor(slotIndex, {prev.r, prev.g, prev.b, 1})
-                    end,
-                    r = r,
-                    g = g,
-                    b = b,
-                }
-                ColorPickerFrame:SetupColorPickerAndShow(info)
-            end)
-            
-            controls.countTextOffsetXSlider:SetScript("OnValueChanged", function(self, value)
-                value = math.floor(value)
-                controls.countTextOffsetXValue:SetText(tostring(value))
-                BuffHighlights:SetCountTextOffsetX(slotIndex, value)
-            end)
-            
-            controls.countTextOffsetYSlider:SetScript("OnValueChanged", function(self, value)
-                value = math.floor(value)
-                controls.countTextOffsetYValue:SetText(tostring(value))
-                BuffHighlights:SetCountTextOffsetY(slotIndex, value)
-            end)
-            
-            -- Label callbacks
-            controls.labelEnableCheck:SetScript("OnClick", function(self)
-                BuffHighlights:SetLabelEnabled(slotIndex, self:GetChecked())
-            end)
-            
-            controls.labelTextBox:SetScript("OnEnterPressed", function(self)
-                self:ClearFocus()
-                BuffHighlights:SetLabelText(slotIndex, self:GetText())
-            end)
-            controls.labelTextBox:SetScript("OnEditFocusLost", function(self)
-                BuffHighlights:SetLabelText(slotIndex, self:GetText())
-            end)
-            
-            controls.labelSizeSlider:SetScript("OnValueChanged", function(self, value)
-                value = math.floor(value)
-                controls.labelSizeValue:SetText(tostring(value))
-                BuffHighlights:SetLabelFontSize(slotIndex, value)
-            end)
-            
-            controls.labelColorBtn:SetScript("OnClick", function()
-                local r, g, b = controls.labelColorBtn:GetBackdropColor()
-                local info = {
-                    swatchFunc = function()
-                        local r, g, b = ColorPickerFrame:GetColorRGB()
-                        controls.labelColorBtn:SetBackdropColor(r, g, b, 1)
-                        BuffHighlights:SetLabelColor(slotIndex, {r, g, b, 1})
-                    end,
-                    cancelFunc = function(prev)
-                        controls.labelColorBtn:SetBackdropColor(prev.r, prev.g, prev.b, 1)
-                        BuffHighlights:SetLabelColor(slotIndex, {prev.r, prev.g, prev.b, 1})
-                    end,
-                    r = r,
-                    g = g,
-                    b = b,
-                }
-                ColorPickerFrame:SetupColorPickerAndShow(info)
-            end)
-            
-            controls.labelOffsetXSlider:SetScript("OnValueChanged", function(self, value)
-                value = math.floor(value)
-                controls.labelOffsetXValue:SetText(tostring(value))
-                BuffHighlights:SetLabelOffsetX(slotIndex, value)
-            end)
-            
-            controls.labelOffsetYSlider:SetScript("OnValueChanged", function(self, value)
-                value = math.floor(value)
-                controls.labelOffsetYValue:SetText(tostring(value))
-                BuffHighlights:SetLabelOffsetY(slotIndex, value)
-            end)
-            
             -- Initialize dock dropdown
             local currentDock = BuffHighlights:GetDockAssignment(slotIndex) or 0
             UIDropDownMenu_Initialize(controls.dockDropdown, function(self, level)
@@ -7214,10 +7253,10 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
                     BuffHighlights:SetDockAssignment(slotIndex, nil)
                     UIDropDownMenu_SetText(controls.dockDropdown, "None")
                 end
-                info.checked = (currentDock == 0)
+                info.checked = (currentDock == 0 or currentDock == nil)
                 UIDropDownMenu_AddButton(info, level)
                 
-                -- Dock options
+                -- Dock options (1-4)
                 local numDocks = TUICD.Docks and TUICD.Docks:GetDockCount() or 4
                 for i = 1, numDocks do
                     local dockName = TUICD.Docks and TUICD.Docks:GetDockName(i) or ("Dock " .. i)
@@ -7246,6 +7285,242 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
             else
                 UIDropDownMenu_SetText(controls.dockDropdown, "None")
             end
+            
+            -- Wire up control callbacks
+            controls.enableCheck:SetScript("OnClick", function(self)
+                BuffHighlights:EnableHighlight(slotIndex, self:GetChecked())
+                Cooldowns:SaveSettings()
+            end)
+            
+            controls.activeBtn:SetScript("OnClick", function()
+                currentState = "active"
+                UpdateControlsForSlot(slotIndex)
+            end)
+            
+            controls.inactiveBtn:SetScript("OnClick", function()
+                currentState = "inactive"
+                UpdateControlsForSlot(slotIndex)
+            end)
+            
+            controls.showCheck:SetScript("OnClick", function(self)
+                BuffHighlights:SetShowState(slotIndex, currentState, self:GetChecked())
+                Cooldowns:SaveSettings()
+            end)
+            
+            controls.sizeSlider:SetScript("OnValueChanged", function(self, value)
+                value = math.floor(value)
+                controls.sizeValue:SetText(tostring(value))
+                BuffHighlights:SetSize(slotIndex, currentState, value)
+                Cooldowns:SaveSettings()
+            end)
+            
+            controls.opacitySlider:SetScript("OnValueChanged", function(self, value)
+                controls.opacityValue:SetText(math.floor(value * 100) .. "%")
+                BuffHighlights:SetOpacity(slotIndex, currentState, value)
+                Cooldowns:SaveSettings()
+            end)
+            
+            controls.desatCheck:SetScript("OnClick", function(self)
+                BuffHighlights:SetSaturation(slotIndex, currentState, not self:GetChecked())
+                Cooldowns:SaveSettings()
+            end)
+            
+            controls.procGlowCheck:SetScript("OnClick", function(self)
+                BuffHighlights:SetShowProcGlow(slotIndex, self:GetChecked())
+                Cooldowns:SaveSettings()
+            end)
+            
+            local function ApplyCustomAspect()
+                local w = tonumber(controls.customW:GetText()) or 1
+                local h = tonumber(controls.customH:GetText()) or 1
+                if w < 1 then w = 1 end
+                if h < 1 then h = 1 end
+                BuffHighlights:SetCustomAspectRatio(slotIndex, currentState, w, h)
+            end
+            
+            controls.customW:SetScript("OnEnterPressed", function(self)
+                self:ClearFocus()
+                ApplyCustomAspect()
+            end)
+            controls.customW:SetScript("OnEditFocusLost", ApplyCustomAspect)
+            
+            controls.customH:SetScript("OnEnterPressed", function(self)
+                self:ClearFocus()
+                ApplyCustomAspect()
+            end)
+            controls.customH:SetScript("OnEditFocusLost", ApplyCustomAspect)
+            
+            -- Label control event handlers
+            controls.labelEnableCheck:SetScript("OnClick", function(self)
+                BuffHighlights:SetLabelEnabled(slotIndex, self:GetChecked())
+                Cooldowns:SaveSettings()
+            end)
+            
+            controls.labelTextBox:SetScript("OnEnterPressed", function(self)
+                self:ClearFocus()
+                BuffHighlights:SetLabelText(slotIndex, self:GetText())
+                Cooldowns:SaveSettings()
+            end)
+            controls.labelTextBox:SetScript("OnEditFocusLost", function(self)
+                BuffHighlights:SetLabelText(slotIndex, self:GetText())
+                Cooldowns:SaveSettings()
+            end)
+            
+            controls.labelSizeSlider:SetScript("OnValueChanged", function(self, value)
+                value = math.floor(value)
+                controls.labelSizeValue:SetText(tostring(value))
+                BuffHighlights:SetLabelFontSize(slotIndex, value)
+                Cooldowns:SaveSettings()
+            end)
+            
+            controls.labelColorBtn:SetScript("OnClick", function()
+                local currentColor = BuffHighlights:GetLabelColor(slotIndex)
+                local r, g, b, a = currentColor[1] or 1, currentColor[2] or 1, currentColor[3] or 1, currentColor[4] or 1
+                
+                local info = {
+                    swatchFunc = function()
+                        local nr, ng, nb = ColorPickerFrame:GetColorRGB()
+                        local na = ColorPickerFrame:GetColorAlpha() or 1
+                        controls.labelColorBtn:SetBackdropColor(nr, ng, nb, na)
+                        BuffHighlights:SetLabelColor(slotIndex, {nr, ng, nb, na})
+                        Cooldowns:SaveSettings()
+                    end,
+                    opacityFunc = function()
+                        local nr, ng, nb = ColorPickerFrame:GetColorRGB()
+                        local na = ColorPickerFrame:GetColorAlpha() or 1
+                        controls.labelColorBtn:SetBackdropColor(nr, ng, nb, na)
+                        BuffHighlights:SetLabelColor(slotIndex, {nr, ng, nb, na})
+                        Cooldowns:SaveSettings()
+                    end,
+                    cancelFunc = function(prev)
+                        controls.labelColorBtn:SetBackdropColor(prev.r, prev.g, prev.b, prev.a or 1)
+                        BuffHighlights:SetLabelColor(slotIndex, {prev.r, prev.g, prev.b, prev.a or 1})
+                        Cooldowns:SaveSettings()
+                    end,
+                    hasOpacity = true,
+                    opacity = a,
+                    r = r,
+                    g = g,
+                    b = b,
+                }
+                ColorPickerFrame:SetupColorPickerAndShow(info)
+            end)
+            
+            controls.labelOffsetXSlider:SetScript("OnValueChanged", function(self, value)
+                value = math.floor(value)
+                controls.labelOffsetXValue:SetText(tostring(value))
+                BuffHighlights:SetLabelOffsetX(slotIndex, value)
+                Cooldowns:SaveSettings()
+            end)
+            
+            controls.labelOffsetYSlider:SetScript("OnValueChanged", function(self, value)
+                value = math.floor(value)
+                controls.labelOffsetYValue:SetText(tostring(value))
+                BuffHighlights:SetLabelOffsetY(slotIndex, value)
+                Cooldowns:SaveSettings()
+            end)
+            
+            -- Hide icon checkbox handler
+            controls.hideCheck:SetScript("OnClick", function(self)
+                BuffHighlights:SetIconHidden(slotIndex, self:GetChecked())
+                Cooldowns:SaveSettings()
+                -- Invalidate buff state cache to force re-apply of visual state
+                Cooldowns.InvalidateBuffStateCache(slotIndex)
+                -- Refresh the buff tracker layout to show/hide the icon
+                Cooldowns.RefreshTrackerLayout("buffs")
+            end)
+            
+            -- Cooldown text control handlers
+            controls.cooldownTextSlider:SetScript("OnValueChanged", function(self, value)
+                value = math.floor(value * 10) / 10  -- Round to 1 decimal
+                controls.cooldownTextValue:SetText(string.format("%.1f", value))
+                BuffHighlights:SetCooldownTextScale(slotIndex, value)
+                Cooldowns:SaveSettings()
+            end)
+            
+            controls.cooldownTextColorBtn:SetScript("OnClick", function()
+                local currentColor = BuffHighlights:GetCooldownTextColor(slotIndex)
+                local r, g, b = currentColor[1] or 1, currentColor[2] or 1, currentColor[3] or 1
+                
+                local info = {
+                    swatchFunc = function()
+                        local nr, ng, nb = ColorPickerFrame:GetColorRGB()
+                        controls.cooldownTextColorBtn:SetBackdropColor(nr, ng, nb, 1)
+                        BuffHighlights:SetCooldownTextColor(slotIndex, {nr, ng, nb})
+                        Cooldowns:SaveSettings()
+                    end,
+                    cancelFunc = function(prev)
+                        controls.cooldownTextColorBtn:SetBackdropColor(prev.r, prev.g, prev.b, 1)
+                        BuffHighlights:SetCooldownTextColor(slotIndex, {prev.r, prev.g, prev.b})
+                        Cooldowns:SaveSettings()
+                    end,
+                    hasOpacity = false,
+                    r = r,
+                    g = g,
+                    b = b,
+                }
+                ColorPickerFrame:SetupColorPickerAndShow(info)
+            end)
+            
+            controls.cooldownTextOffsetXSlider:SetScript("OnValueChanged", function(self, value)
+                value = math.floor(value)
+                controls.cooldownTextOffsetXValue:SetText(tostring(value))
+                BuffHighlights:SetCooldownTextOffsetX(slotIndex, value)
+                Cooldowns:SaveSettings()
+            end)
+            
+            controls.cooldownTextOffsetYSlider:SetScript("OnValueChanged", function(self, value)
+                value = math.floor(value)
+                controls.cooldownTextOffsetYValue:SetText(tostring(value))
+                BuffHighlights:SetCooldownTextOffsetY(slotIndex, value)
+                Cooldowns:SaveSettings()
+            end)
+            
+            -- Count text control handlers
+            controls.countTextSlider:SetScript("OnValueChanged", function(self, value)
+                value = math.floor(value * 10) / 10  -- Round to 1 decimal
+                controls.countTextValue:SetText(string.format("%.1f", value))
+                BuffHighlights:SetCountTextScale(slotIndex, value)
+                Cooldowns:SaveSettings()
+            end)
+            
+            controls.countTextColorBtn:SetScript("OnClick", function()
+                local currentColor = BuffHighlights:GetCountTextColor(slotIndex)
+                local r, g, b = currentColor[1] or 1, currentColor[2] or 1, currentColor[3] or 1
+                
+                local info = {
+                    swatchFunc = function()
+                        local nr, ng, nb = ColorPickerFrame:GetColorRGB()
+                        controls.countTextColorBtn:SetBackdropColor(nr, ng, nb, 1)
+                        BuffHighlights:SetCountTextColor(slotIndex, {nr, ng, nb})
+                        Cooldowns:SaveSettings()
+                    end,
+                    cancelFunc = function(prev)
+                        controls.countTextColorBtn:SetBackdropColor(prev.r, prev.g, prev.b, 1)
+                        BuffHighlights:SetCountTextColor(slotIndex, {prev.r, prev.g, prev.b})
+                        Cooldowns:SaveSettings()
+                    end,
+                    hasOpacity = false,
+                    r = r,
+                    g = g,
+                    b = b,
+                }
+                ColorPickerFrame:SetupColorPickerAndShow(info)
+            end)
+            
+            controls.countTextOffsetXSlider:SetScript("OnValueChanged", function(self, value)
+                value = math.floor(value)
+                controls.countTextOffsetXValue:SetText(tostring(value))
+                BuffHighlights:SetCountTextOffsetX(slotIndex, value)
+                Cooldowns:SaveSettings()
+            end)
+            
+            controls.countTextOffsetYSlider:SetScript("OnValueChanged", function(self, value)
+                value = math.floor(value)
+                controls.countTextOffsetYValue:SetText(tostring(value))
+                BuffHighlights:SetCountTextOffsetY(slotIndex, value)
+                Cooldowns:SaveSettings()
+            end)
         end
         
         -- Refresh slot list
@@ -7268,6 +7543,7 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
                 return
             end
             
+            -- Use same order as layout (GetOrderedIcons)
             local icons = GetOrderedIcons(viewer, "buffs")
             if #icons == 0 then
                 local noBuffs = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -7352,15 +7628,15 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
             end
         end
         
-        -- Set up refresh button script (button created at top of tab)
+        C_Timer.After(0.1, RefreshSlotList)
+        
+        -- Set the refresh button script (button created at top of tab)
         refreshBtn:SetScript("OnClick", function()
             selectedSlot = nil
             RefreshSlotList()
         end)
         
-        C_Timer.After(0.1, RefreshSlotList)
-        
-        parent:SetHeight(500)
+        parent:SetHeight(math.abs(y) + 370)
     end
     
     -- TAB: Individual Icons Settings for Cooldown Trackers (Essential, Utility)
@@ -7417,6 +7693,7 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         hideTrackerCheck:SetScript("OnClick", function(self)
             if CooldownHighlights then
                 CooldownHighlights:SetTrackerHidden(trackerKey, self:GetChecked())
+                Cooldowns:SaveSettings()
             end
         end)
         
@@ -7450,14 +7727,31 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         
         y = y - 100
         
-        -- Controls panel (no backdrop - content scrolls with parent)
-        local controlsPanel = CreateFrame("Frame", nil, parent)
-        controlsPanel:SetPoint("TOPLEFT", 5, y)
-        controlsPanel:SetSize(PANEL_WIDTH - 60, 750)
+        -- Controls container with backdrop (outer frame)
+        local controlsContainer = CreateFrame("Frame", nil, parent, "BackdropTemplate")
+        controlsContainer:SetPoint("TOPLEFT", 5, y)
+        controlsContainer:SetSize(PANEL_WIDTH - 60, 560)
+        controlsContainer:SetBackdrop({
+            bgFile = "Interface\\Buttons\\WHITE8x8",
+            edgeFile = "Interface\\Buttons\\WHITE8x8",
+            edgeSize = 1,
+        })
+        controlsContainer:SetBackdropColor(0.12, 0.12, 0.12, 0.9)
+        controlsContainer:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
         
-        -- "No Selection" label
-        local noSelectionLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        noSelectionLabel:SetPoint("CENTER", 0, 150)
+        -- Scroll frame inside container
+        local controlsScrollFrame = CreateFrame("ScrollFrame", nil, controlsContainer, "UIPanelScrollFrameTemplate")
+        controlsScrollFrame:SetPoint("TOPLEFT", 2, -2)
+        controlsScrollFrame:SetPoint("BOTTOMRIGHT", -22, 2)
+        
+        -- Controls panel as scroll child (content area)
+        local controlsPanel = CreateFrame("Frame", nil, controlsScrollFrame)
+        controlsPanel:SetSize(PANEL_WIDTH - 84, 860)  -- Height for full content
+        controlsScrollFrame:SetScrollChild(controlsPanel)
+        
+        -- "No Selection" label (on container, not scroll child, so it stays centered)
+        local noSelectionLabel = controlsContainer:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        noSelectionLabel:SetPoint("CENTER")
         noSelectionLabel:SetText("Select a cooldown slot above")
         noSelectionLabel:SetTextColor(0.5, 0.5, 0.5)
         
@@ -7488,7 +7782,7 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.enableLabel:SetTextColor(0.9, 0.9, 0.9)
         controls.enableLabel:Hide()
         
-        -- Hide icon checkbox (state-independent - hides icon completely)
+        -- Hide in tracker checkbox (hide main tracker icon, keep highlight visible)
         controls.hideCheck = CreateFrame("CheckButton", nil, controlsPanel, "UICheckButtonTemplate")
         controls.hideCheck:SetPoint("LEFT", controls.enableLabel, "RIGHT", 20, 0)
         controls.hideCheck:SetSize(24, 24)
@@ -7496,7 +7790,7 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         
         controls.hideLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         controls.hideLabel:SetPoint("LEFT", controls.hideCheck, "RIGHT", 2, 0)
-        controls.hideLabel:SetText("Hide Icon in Tracker")
+        controls.hideLabel:SetText("Hide in Tracker")
         controls.hideLabel:SetTextColor(0.9, 0.9, 0.9)
         controls.hideLabel:Hide()
         
@@ -7643,21 +7937,22 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.customH:Hide()
         
         -- =====================================================
-        -- DOCK ASSIGNMENT SECTION
+        -- Dock Assignment
         -- =====================================================
         controls.dockHeader = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        controls.dockHeader:SetPoint("TOPLEFT", 10, -305)
-        controls.dockHeader:SetText("|cff00ccffDock Assignment|r")
+        controls.dockHeader:SetPoint("TOPLEFT", 10, -265)
+        controls.dockHeader:SetText("Dock Assignment")
+        controls.dockHeader:SetTextColor(1, 0.82, 0)
         controls.dockHeader:Hide()
         
         controls.dockLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.dockLabel:SetPoint("TOPLEFT", 10, -325)
+        controls.dockLabel:SetPoint("TOPLEFT", 10, -285)
         controls.dockLabel:SetText("Assign to Dock:")
         controls.dockLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.dockLabel:Hide()
         
         controls.dockDropdown = CreateFrame("Frame", nil, controlsPanel, "UIDropDownMenuTemplate")
-        controls.dockDropdown:SetPoint("TOPLEFT", 80, -318)
+        controls.dockDropdown:SetPoint("TOPLEFT", 80, -278)
         UIDropDownMenu_SetWidth(controls.dockDropdown, 120)
         controls.dockDropdown:Hide()
         
@@ -7665,13 +7960,13 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         -- Custom Label Controls (Accessibility feature)
         -- =====================================================
         controls.labelHeader = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        controls.labelHeader:SetPoint("TOPLEFT", 10, -360)
+        controls.labelHeader:SetPoint("TOPLEFT", 10, -345)
         controls.labelHeader:SetText("Custom Label (Accessibility)")
         controls.labelHeader:SetTextColor(1, 0.82, 0)
         controls.labelHeader:Hide()
         
         controls.labelEnableCheck = CreateFrame("CheckButton", nil, controlsPanel, "UICheckButtonTemplate")
-        controls.labelEnableCheck:SetPoint("TOPLEFT", 10, -380)
+        controls.labelEnableCheck:SetPoint("TOPLEFT", 10, -365)
         controls.labelEnableCheck:SetSize(24, 24)
         controls.labelEnableCheck:Hide()
         
@@ -7682,7 +7977,7 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.labelEnableLabel:Hide()
         
         controls.labelTextLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.labelTextLabel:SetPoint("TOPLEFT", 10, -410)
+        controls.labelTextLabel:SetPoint("TOPLEFT", 10, -395)
         controls.labelTextLabel:SetText("Text:")
         controls.labelTextLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.labelTextLabel:Hide()
@@ -7695,7 +7990,7 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.labelTextBox:Hide()
         
         controls.labelSizeLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.labelSizeLabel:SetPoint("TOPLEFT", 10, -435)
+        controls.labelSizeLabel:SetPoint("TOPLEFT", 10, -420)
         controls.labelSizeLabel:SetText("Font Size:")
         controls.labelSizeLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.labelSizeLabel:Hide()
@@ -7717,7 +8012,7 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.labelSizeValue:Hide()
         
         controls.labelColorLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.labelColorLabel:SetPoint("TOPLEFT", 10, -460)
+        controls.labelColorLabel:SetPoint("TOPLEFT", 10, -445)
         controls.labelColorLabel:SetText("Color:")
         controls.labelColorLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.labelColorLabel:Hide()
@@ -7734,27 +8029,16 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.labelColorBtn:SetBackdropBorderColor(0.3, 0.3, 0.3, 1)
         controls.labelColorBtn:Hide()
         
-        controls.labelAnchorLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.labelAnchorLabel:SetPoint("LEFT", controls.labelColorBtn, "RIGHT", 15, 0)
-        controls.labelAnchorLabel:SetText("Anchor:")
-        controls.labelAnchorLabel:SetTextColor(0.8, 0.8, 0.8)
-        controls.labelAnchorLabel:Hide()
-        
-        controls.labelAnchorDropdown = CreateFrame("Frame", nil, controlsPanel, "UIDropDownMenuTemplate")
-        controls.labelAnchorDropdown:SetPoint("LEFT", controls.labelAnchorLabel, "RIGHT", -10, 0)
-        UIDropDownMenu_SetWidth(controls.labelAnchorDropdown, 80)
-        controls.labelAnchorDropdown:Hide()
-        
         controls.labelOffsetLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.labelOffsetLabel:SetPoint("TOPLEFT", 10, -485)
+        controls.labelOffsetLabel:SetPoint("TOPLEFT", 10, -470)
         controls.labelOffsetLabel:SetText("Offset X:")
         controls.labelOffsetLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.labelOffsetLabel:Hide()
         
         controls.labelOffsetXSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
         controls.labelOffsetXSlider:SetPoint("LEFT", controls.labelOffsetLabel, "RIGHT", 5, 0)
-        controls.labelOffsetXSlider:SetSize(70, 16)
-        controls.labelOffsetXSlider:SetMinMaxValues(-50, 50)
+        controls.labelOffsetXSlider:SetSize(100, 16)
+        controls.labelOffsetXSlider:SetMinMaxValues(-100, 100)
         controls.labelOffsetXSlider:SetValueStep(1)
         controls.labelOffsetXSlider:SetObeyStepOnDrag(true)
         controls.labelOffsetXSlider.Low:SetText("")
@@ -7768,15 +8052,15 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.labelOffsetXValue:Hide()
         
         controls.labelOffsetYLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.labelOffsetYLabel:SetPoint("LEFT", controls.labelOffsetXValue, "RIGHT", 15, 0)
-        controls.labelOffsetYLabel:SetText("Y:")
+        controls.labelOffsetYLabel:SetPoint("TOPLEFT", 10, -495)
+        controls.labelOffsetYLabel:SetText("Offset Y:")
         controls.labelOffsetYLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.labelOffsetYLabel:Hide()
         
         controls.labelOffsetYSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
         controls.labelOffsetYSlider:SetPoint("LEFT", controls.labelOffsetYLabel, "RIGHT", 5, 0)
-        controls.labelOffsetYSlider:SetSize(70, 16)
-        controls.labelOffsetYSlider:SetMinMaxValues(-50, 50)
+        controls.labelOffsetYSlider:SetSize(100, 16)
+        controls.labelOffsetYSlider:SetMinMaxValues(-100, 100)
         controls.labelOffsetYSlider:SetValueStep(1)
         controls.labelOffsetYSlider:SetObeyStepOnDrag(true)
         controls.labelOffsetYSlider.Low:SetText("")
@@ -7789,38 +8073,24 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.labelOffsetYValue:SetTextColor(1, 1, 1)
         controls.labelOffsetYValue:Hide()
         
-        -- =====================================================================
-        -- COOLDOWN TEXT SECTION
-        -- =====================================================================
-        
-        -- Anchor options for all text elements
-        local ANCHOR_OPTIONS = {
-            { label = "Center", value = "CENTER" },
-            { label = "Top Left", value = "TOPLEFT" },
-            { label = "Top", value = "TOP" },
-            { label = "Top Right", value = "TOPRIGHT" },
-            { label = "Left", value = "LEFT" },
-            { label = "Right", value = "RIGHT" },
-            { label = "Bottom Left", value = "BOTTOMLEFT" },
-            { label = "Bottom", value = "BOTTOM" },
-            { label = "Bottom Right", value = "BOTTOMRIGHT" },
-        }
-        
+        -- =====================================================
+        -- Per-Icon Text Controls (Cooldown Timer)
+        -- =====================================================
         controls.cooldownTextHeader = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        controls.cooldownTextHeader:SetPoint("TOPLEFT", 10, -515)
+        controls.cooldownTextHeader:SetPoint("TOPLEFT", 200, -345)
         controls.cooldownTextHeader:SetText("Cooldown Text")
         controls.cooldownTextHeader:SetTextColor(1, 0.82, 0)
         controls.cooldownTextHeader:Hide()
         
         controls.cooldownTextScaleLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.cooldownTextScaleLabel:SetPoint("TOPLEFT", 10, -535)
+        controls.cooldownTextScaleLabel:SetPoint("TOPLEFT", 200, -365)
         controls.cooldownTextScaleLabel:SetText("Scale:")
         controls.cooldownTextScaleLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.cooldownTextScaleLabel:Hide()
         
         controls.cooldownTextSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
         controls.cooldownTextSlider:SetPoint("LEFT", controls.cooldownTextScaleLabel, "RIGHT", 10, 0)
-        controls.cooldownTextSlider:SetSize(80, 16)
+        controls.cooldownTextSlider:SetSize(70, 16)
         controls.cooldownTextSlider:SetMinMaxValues(0.5, 2.0)
         controls.cooldownTextSlider:SetValueStep(0.1)
         controls.cooldownTextSlider:SetObeyStepOnDrag(true)
@@ -7834,19 +8104,8 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.cooldownTextValue:SetTextColor(1, 1, 1)
         controls.cooldownTextValue:Hide()
         
-        controls.cooldownTextAnchorLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.cooldownTextAnchorLabel:SetPoint("LEFT", controls.cooldownTextValue, "RIGHT", 15, 0)
-        controls.cooldownTextAnchorLabel:SetText("Anchor:")
-        controls.cooldownTextAnchorLabel:SetTextColor(0.8, 0.8, 0.8)
-        controls.cooldownTextAnchorLabel:Hide()
-        
-        controls.cooldownTextAnchorDropdown = CreateFrame("Frame", nil, controlsPanel, "UIDropDownMenuTemplate")
-        controls.cooldownTextAnchorDropdown:SetPoint("LEFT", controls.cooldownTextAnchorLabel, "RIGHT", -10, 0)
-        UIDropDownMenu_SetWidth(controls.cooldownTextAnchorDropdown, 80)
-        controls.cooldownTextAnchorDropdown:Hide()
-        
         controls.cooldownTextColorLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.cooldownTextColorLabel:SetPoint("TOPLEFT", 10, -560)
+        controls.cooldownTextColorLabel:SetPoint("TOPLEFT", 200, -390)
         controls.cooldownTextColorLabel:SetText("Color:")
         controls.cooldownTextColorLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.cooldownTextColorLabel:Hide()
@@ -7860,15 +8119,15 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.cooldownTextColorBtn:Hide()
         
         controls.cooldownTextOffsetXLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.cooldownTextOffsetXLabel:SetPoint("LEFT", controls.cooldownTextColorBtn, "RIGHT", 15, 0)
+        controls.cooldownTextOffsetXLabel:SetPoint("TOPLEFT", 200, -415)
         controls.cooldownTextOffsetXLabel:SetText("Offset X:")
         controls.cooldownTextOffsetXLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.cooldownTextOffsetXLabel:Hide()
         
         controls.cooldownTextOffsetXSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
         controls.cooldownTextOffsetXSlider:SetPoint("LEFT", controls.cooldownTextOffsetXLabel, "RIGHT", 5, 0)
-        controls.cooldownTextOffsetXSlider:SetSize(50, 16)
-        controls.cooldownTextOffsetXSlider:SetMinMaxValues(-50, 50)
+        controls.cooldownTextOffsetXSlider:SetSize(100, 16)
+        controls.cooldownTextOffsetXSlider:SetMinMaxValues(-100, 100)
         controls.cooldownTextOffsetXSlider:SetValueStep(1)
         controls.cooldownTextOffsetXSlider:SetObeyStepOnDrag(true)
         controls.cooldownTextOffsetXSlider.Low:SetText("")
@@ -7877,20 +8136,20 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.cooldownTextOffsetXSlider:Hide()
         
         controls.cooldownTextOffsetXValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.cooldownTextOffsetXValue:SetPoint("LEFT", controls.cooldownTextOffsetXSlider, "RIGHT", 3, 0)
+        controls.cooldownTextOffsetXValue:SetPoint("LEFT", controls.cooldownTextOffsetXSlider, "RIGHT", 5, 0)
         controls.cooldownTextOffsetXValue:SetTextColor(1, 1, 1)
         controls.cooldownTextOffsetXValue:Hide()
         
         controls.cooldownTextOffsetYLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.cooldownTextOffsetYLabel:SetPoint("LEFT", controls.cooldownTextOffsetXValue, "RIGHT", 8, 0)
-        controls.cooldownTextOffsetYLabel:SetText("Y:")
+        controls.cooldownTextOffsetYLabel:SetPoint("TOPLEFT", 200, -440)
+        controls.cooldownTextOffsetYLabel:SetText("Offset Y:")
         controls.cooldownTextOffsetYLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.cooldownTextOffsetYLabel:Hide()
         
         controls.cooldownTextOffsetYSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
         controls.cooldownTextOffsetYSlider:SetPoint("LEFT", controls.cooldownTextOffsetYLabel, "RIGHT", 5, 0)
-        controls.cooldownTextOffsetYSlider:SetSize(50, 16)
-        controls.cooldownTextOffsetYSlider:SetMinMaxValues(-50, 50)
+        controls.cooldownTextOffsetYSlider:SetSize(100, 16)
+        controls.cooldownTextOffsetYSlider:SetMinMaxValues(-100, 100)
         controls.cooldownTextOffsetYSlider:SetValueStep(1)
         controls.cooldownTextOffsetYSlider:SetObeyStepOnDrag(true)
         controls.cooldownTextOffsetYSlider.Low:SetText("")
@@ -7899,28 +8158,28 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.cooldownTextOffsetYSlider:Hide()
         
         controls.cooldownTextOffsetYValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.cooldownTextOffsetYValue:SetPoint("LEFT", controls.cooldownTextOffsetYSlider, "RIGHT", 3, 0)
+        controls.cooldownTextOffsetYValue:SetPoint("LEFT", controls.cooldownTextOffsetYSlider, "RIGHT", 5, 0)
         controls.cooldownTextOffsetYValue:SetTextColor(1, 1, 1)
         controls.cooldownTextOffsetYValue:Hide()
         
-        -- =====================================================================
-        -- COUNT TEXT SECTION
-        -- =====================================================================
+        -- =====================================================
+        -- Per-Icon Text Controls (Count/Charge Text)
+        -- =====================================================
         controls.countTextHeader = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        controls.countTextHeader:SetPoint("TOPLEFT", 10, -590)
+        controls.countTextHeader:SetPoint("TOPLEFT", 200, -470)
         controls.countTextHeader:SetText("Count/Charge Text")
         controls.countTextHeader:SetTextColor(1, 0.82, 0)
         controls.countTextHeader:Hide()
         
         controls.countTextScaleLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.countTextScaleLabel:SetPoint("TOPLEFT", 10, -610)
+        controls.countTextScaleLabel:SetPoint("TOPLEFT", 200, -490)
         controls.countTextScaleLabel:SetText("Scale:")
         controls.countTextScaleLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.countTextScaleLabel:Hide()
         
         controls.countTextSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
         controls.countTextSlider:SetPoint("LEFT", controls.countTextScaleLabel, "RIGHT", 10, 0)
-        controls.countTextSlider:SetSize(80, 16)
+        controls.countTextSlider:SetSize(70, 16)
         controls.countTextSlider:SetMinMaxValues(0.5, 2.0)
         controls.countTextSlider:SetValueStep(0.1)
         controls.countTextSlider:SetObeyStepOnDrag(true)
@@ -7934,19 +8193,8 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.countTextValue:SetTextColor(1, 1, 1)
         controls.countTextValue:Hide()
         
-        controls.countTextAnchorLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.countTextAnchorLabel:SetPoint("LEFT", controls.countTextValue, "RIGHT", 15, 0)
-        controls.countTextAnchorLabel:SetText("Anchor:")
-        controls.countTextAnchorLabel:SetTextColor(0.8, 0.8, 0.8)
-        controls.countTextAnchorLabel:Hide()
-        
-        controls.countTextAnchorDropdown = CreateFrame("Frame", nil, controlsPanel, "UIDropDownMenuTemplate")
-        controls.countTextAnchorDropdown:SetPoint("LEFT", controls.countTextAnchorLabel, "RIGHT", -10, 0)
-        UIDropDownMenu_SetWidth(controls.countTextAnchorDropdown, 80)
-        controls.countTextAnchorDropdown:Hide()
-        
         controls.countTextColorLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.countTextColorLabel:SetPoint("TOPLEFT", 10, -635)
+        controls.countTextColorLabel:SetPoint("TOPLEFT", 200, -515)
         controls.countTextColorLabel:SetText("Color:")
         controls.countTextColorLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.countTextColorLabel:Hide()
@@ -7960,15 +8208,15 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.countTextColorBtn:Hide()
         
         controls.countTextOffsetXLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.countTextOffsetXLabel:SetPoint("LEFT", controls.countTextColorBtn, "RIGHT", 15, 0)
+        controls.countTextOffsetXLabel:SetPoint("TOPLEFT", 200, -540)
         controls.countTextOffsetXLabel:SetText("Offset X:")
         controls.countTextOffsetXLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.countTextOffsetXLabel:Hide()
         
         controls.countTextOffsetXSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
         controls.countTextOffsetXSlider:SetPoint("LEFT", controls.countTextOffsetXLabel, "RIGHT", 5, 0)
-        controls.countTextOffsetXSlider:SetSize(50, 16)
-        controls.countTextOffsetXSlider:SetMinMaxValues(-50, 50)
+        controls.countTextOffsetXSlider:SetSize(100, 16)
+        controls.countTextOffsetXSlider:SetMinMaxValues(-100, 100)
         controls.countTextOffsetXSlider:SetValueStep(1)
         controls.countTextOffsetXSlider:SetObeyStepOnDrag(true)
         controls.countTextOffsetXSlider.Low:SetText("")
@@ -7977,20 +8225,20 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.countTextOffsetXSlider:Hide()
         
         controls.countTextOffsetXValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.countTextOffsetXValue:SetPoint("LEFT", controls.countTextOffsetXSlider, "RIGHT", 3, 0)
+        controls.countTextOffsetXValue:SetPoint("LEFT", controls.countTextOffsetXSlider, "RIGHT", 5, 0)
         controls.countTextOffsetXValue:SetTextColor(1, 1, 1)
         controls.countTextOffsetXValue:Hide()
         
         controls.countTextOffsetYLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.countTextOffsetYLabel:SetPoint("LEFT", controls.countTextOffsetXValue, "RIGHT", 8, 0)
-        controls.countTextOffsetYLabel:SetText("Y:")
+        controls.countTextOffsetYLabel:SetPoint("TOPLEFT", 200, -565)
+        controls.countTextOffsetYLabel:SetText("Offset Y:")
         controls.countTextOffsetYLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.countTextOffsetYLabel:Hide()
         
         controls.countTextOffsetYSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
         controls.countTextOffsetYSlider:SetPoint("LEFT", controls.countTextOffsetYLabel, "RIGHT", 5, 0)
-        controls.countTextOffsetYSlider:SetSize(50, 16)
-        controls.countTextOffsetYSlider:SetMinMaxValues(-50, 50)
+        controls.countTextOffsetYSlider:SetSize(100, 16)
+        controls.countTextOffsetYSlider:SetMinMaxValues(-100, 100)
         controls.countTextOffsetYSlider:SetValueStep(1)
         controls.countTextOffsetYSlider:SetObeyStepOnDrag(true)
         controls.countTextOffsetYSlider.Low:SetText("")
@@ -7999,7 +8247,7 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.countTextOffsetYSlider:Hide()
         
         controls.countTextOffsetYValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.countTextOffsetYValue:SetPoint("LEFT", controls.countTextOffsetYSlider, "RIGHT", 3, 0)
+        controls.countTextOffsetYValue:SetPoint("LEFT", controls.countTextOffsetYSlider, "RIGHT", 5, 0)
         controls.countTextOffsetYValue:SetTextColor(1, 1, 1)
         controls.countTextOffsetYValue:Hide()
         
@@ -8094,12 +8342,37 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
             controls.opacitySlider:SetValue(opacity)
             controls.opacityValue:SetText(math.floor(opacity * 100) .. "%")
             controls.desatCheck:SetChecked(not saturated)
-            
-            -- Proc glow setting (default true if not set)
             local showProcGlow = CooldownHighlights:GetShowProcGlow(trackerKey, slotIndex)
             controls.procGlowCheck:SetChecked(showProcGlow == nil or showProcGlow == true)
             controls.customW:SetText(tostring(customW))
             controls.customH:SetText(tostring(customH))
+            
+            -- Per-icon text settings (state-independent)
+            local cdTextScale = CooldownHighlights:GetCooldownTextScale(trackerKey, slotIndex)
+            local cdTextColor = CooldownHighlights:GetCooldownTextColor(trackerKey, slotIndex)
+            local cdTextOffsetX = CooldownHighlights:GetCooldownTextOffsetX(trackerKey, slotIndex)
+            local cdTextOffsetY = CooldownHighlights:GetCooldownTextOffsetY(trackerKey, slotIndex)
+            
+            controls.cooldownTextSlider:SetValue(cdTextScale or 1.0)
+            controls.cooldownTextValue:SetText(string.format("%.1f", cdTextScale or 1.0))
+            controls.cooldownTextColorBtn:SetBackdropColor(cdTextColor[1] or 1, cdTextColor[2] or 1, cdTextColor[3] or 1, 1)
+            controls.cooldownTextOffsetXSlider:SetValue(cdTextOffsetX or 0)
+            controls.cooldownTextOffsetXValue:SetText(tostring(cdTextOffsetX or 0))
+            controls.cooldownTextOffsetYSlider:SetValue(cdTextOffsetY or 0)
+            controls.cooldownTextOffsetYValue:SetText(tostring(cdTextOffsetY or 0))
+            
+            local cntTextScale = CooldownHighlights:GetCountTextScale(trackerKey, slotIndex)
+            local cntTextColor = CooldownHighlights:GetCountTextColor(trackerKey, slotIndex)
+            local cntTextOffsetX = CooldownHighlights:GetCountTextOffsetX(trackerKey, slotIndex)
+            local cntTextOffsetY = CooldownHighlights:GetCountTextOffsetY(trackerKey, slotIndex)
+            
+            controls.countTextSlider:SetValue(cntTextScale or 1.0)
+            controls.countTextValue:SetText(string.format("%.1f", cntTextScale or 1.0))
+            controls.countTextColorBtn:SetBackdropColor(cntTextColor[1] or 1, cntTextColor[2] or 1, cntTextColor[3] or 1, 1)
+            controls.countTextOffsetXSlider:SetValue(cntTextOffsetX or 0)
+            controls.countTextOffsetXValue:SetText(tostring(cntTextOffsetX or 0))
+            controls.countTextOffsetYSlider:SetValue(cntTextOffsetY or 0)
+            controls.countTextOffsetYValue:SetText(tostring(cntTextOffsetY or 0))
             
             -- Label settings (state-independent)
             local labelEnabled = CooldownHighlights:GetLabelEnabled(trackerKey, slotIndex)
@@ -8118,70 +8391,6 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
             controls.labelOffsetXValue:SetText(tostring(labelOffsetX or 0))
             controls.labelOffsetYSlider:SetValue(labelOffsetY or 0)
             controls.labelOffsetYValue:SetText(tostring(labelOffsetY or 0))
-            
-            -- Text scale, color, and offset settings (state-independent)
-            local cooldownTextScale = CooldownHighlights:GetCooldownTextScale(trackerKey, slotIndex)
-            local cooldownTextColor = CooldownHighlights:GetCooldownTextColor(trackerKey, slotIndex)
-            local cooldownTextOffsetX = CooldownHighlights:GetCooldownTextOffsetX(trackerKey, slotIndex)
-            local cooldownTextOffsetY = CooldownHighlights:GetCooldownTextOffsetY(trackerKey, slotIndex)
-            local cooldownTextAnchor = CooldownHighlights:GetCooldownTextAnchor(trackerKey, slotIndex)
-            local countTextScale = CooldownHighlights:GetCountTextScale(trackerKey, slotIndex)
-            local countTextColor = CooldownHighlights:GetCountTextColor(trackerKey, slotIndex)
-            local countTextOffsetX = CooldownHighlights:GetCountTextOffsetX(trackerKey, slotIndex)
-            local countTextOffsetY = CooldownHighlights:GetCountTextOffsetY(trackerKey, slotIndex)
-            local countTextAnchor = CooldownHighlights:GetCountTextAnchor(trackerKey, slotIndex)
-            local labelAnchor = CooldownHighlights:GetLabelAnchor(trackerKey, slotIndex)
-            
-            controls.cooldownTextSlider:SetValue(cooldownTextScale)
-            controls.cooldownTextValue:SetText(string.format("%.1fx", cooldownTextScale))
-            controls.cooldownTextColorBtn:SetBackdropColor(cooldownTextColor[1] or 1, cooldownTextColor[2] or 1, cooldownTextColor[3] or 1, 1)
-            controls.cooldownTextOffsetXSlider:SetValue(cooldownTextOffsetX)
-            controls.cooldownTextOffsetXValue:SetText(tostring(cooldownTextOffsetX))
-            controls.cooldownTextOffsetYSlider:SetValue(cooldownTextOffsetY)
-            controls.cooldownTextOffsetYValue:SetText(tostring(cooldownTextOffsetY))
-            
-            controls.countTextSlider:SetValue(countTextScale)
-            controls.countTextValue:SetText(string.format("%.1fx", countTextScale))
-            controls.countTextColorBtn:SetBackdropColor(countTextColor[1] or 1, countTextColor[2] or 1, countTextColor[3] or 1, 1)
-            controls.countTextOffsetXSlider:SetValue(countTextOffsetX)
-            controls.countTextOffsetXValue:SetText(tostring(countTextOffsetX))
-            controls.countTextOffsetYSlider:SetValue(countTextOffsetY)
-            controls.countTextOffsetYValue:SetText(tostring(countTextOffsetY))
-            
-            -- Initialize anchor dropdowns
-            local function InitAnchorDropdown(dropdown, currentAnchor, onSelect)
-                UIDropDownMenu_Initialize(dropdown, function(self, level)
-                    for _, opt in ipairs(ANCHOR_OPTIONS) do
-                        local info = UIDropDownMenu_CreateInfo()
-                        info.text = opt.label
-                        info.value = opt.value
-                        info.func = function(btn)
-                            onSelect(btn.value)
-                            UIDropDownMenu_SetText(dropdown, btn:GetText())
-                        end
-                        info.checked = (currentAnchor == opt.value)
-                        UIDropDownMenu_AddButton(info, level)
-                    end
-                end)
-                for _, opt in ipairs(ANCHOR_OPTIONS) do
-                    if opt.value == currentAnchor then
-                        UIDropDownMenu_SetText(dropdown, opt.label)
-                        break
-                    end
-                end
-            end
-            
-            InitAnchorDropdown(controls.cooldownTextAnchorDropdown, cooldownTextAnchor, function(anchor)
-                CooldownHighlights:SetCooldownTextAnchor(trackerKey, slotIndex, anchor)
-            end)
-            
-            InitAnchorDropdown(controls.countTextAnchorDropdown, countTextAnchor, function(anchor)
-                CooldownHighlights:SetCountTextAnchor(trackerKey, slotIndex, anchor)
-            end)
-            
-            InitAnchorDropdown(controls.labelAnchorDropdown, labelAnchor, function(anchor)
-                CooldownHighlights:SetLabelAnchor(trackerKey, slotIndex, anchor)
-            end)
             
             -- Initialize aspect dropdown
             UIDropDownMenu_Initialize(controls.aspectDropdown, function(self, level)
@@ -8209,68 +8418,6 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
             
             UpdateCustomAspectVisibility(aspectRatio)
             
-            -- Wire up control callbacks
-            controls.enableCheck:SetScript("OnClick", function(self)
-                CooldownHighlights:EnableHighlight(trackerKey, slotIndex, self:GetChecked())
-            end)
-            
-            controls.hideCheck:SetScript("OnClick", function(self)
-                CooldownHighlights:SetIconHidden(trackerKey, slotIndex, self:GetChecked())
-            end)
-            
-            controls.activeBtn:SetScript("OnClick", function()
-                currentState = "active"
-                UpdateControlsForSlot(slotIndex)
-            end)
-            
-            controls.inactiveBtn:SetScript("OnClick", function()
-                currentState = "inactive"
-                UpdateControlsForSlot(slotIndex)
-            end)
-            
-            controls.showCheck:SetScript("OnClick", function(self)
-                CooldownHighlights:SetShowState(trackerKey, slotIndex, currentState, self:GetChecked())
-            end)
-            
-            controls.sizeSlider:SetScript("OnValueChanged", function(self, value)
-                value = math.floor(value)
-                controls.sizeValue:SetText(tostring(value))
-                CooldownHighlights:SetSize(trackerKey, slotIndex, currentState, value)
-            end)
-            
-            controls.opacitySlider:SetScript("OnValueChanged", function(self, value)
-                controls.opacityValue:SetText(math.floor(value * 100) .. "%")
-                CooldownHighlights:SetOpacity(trackerKey, slotIndex, currentState, value)
-            end)
-            
-            controls.desatCheck:SetScript("OnClick", function(self)
-                CooldownHighlights:SetSaturation(trackerKey, slotIndex, currentState, not self:GetChecked())
-            end)
-            
-            controls.procGlowCheck:SetScript("OnClick", function(self)
-                CooldownHighlights:SetShowProcGlow(trackerKey, slotIndex, self:GetChecked())
-            end)
-            
-            local function ApplyCustomAspect()
-                local w = tonumber(controls.customW:GetText()) or 1
-                local h = tonumber(controls.customH:GetText()) or 1
-                if w < 1 then w = 1 end
-                if h < 1 then h = 1 end
-                CooldownHighlights:SetCustomAspectRatio(trackerKey, slotIndex, currentState, w, h)
-            end
-            
-            controls.customW:SetScript("OnEnterPressed", function(self)
-                self:ClearFocus()
-                ApplyCustomAspect()
-            end)
-            controls.customW:SetScript("OnEditFocusLost", ApplyCustomAspect)
-            
-            controls.customH:SetScript("OnEnterPressed", function(self)
-                self:ClearFocus()
-                ApplyCustomAspect()
-            end)
-            controls.customH:SetScript("OnEditFocusLost", ApplyCustomAspect)
-            
             -- Initialize dock dropdown
             local currentDock = CooldownHighlights:GetDockAssignment(trackerKey, slotIndex) or 0
             UIDropDownMenu_Initialize(controls.dockDropdown, function(self, level)
@@ -8282,10 +8429,10 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
                     CooldownHighlights:SetDockAssignment(trackerKey, slotIndex, nil)
                     UIDropDownMenu_SetText(controls.dockDropdown, "None")
                 end
-                info.checked = (currentDock == 0)
+                info.checked = (currentDock == 0 or currentDock == nil)
                 UIDropDownMenu_AddButton(info, level)
                 
-                -- Dock options
+                -- Dock options (1-4)
                 local numDocks = TUICD.Docks and TUICD.Docks:GetDockCount() or 4
                 for i = 1, numDocks do
                     local dockName = TUICD.Docks and TUICD.Docks:GetDockName(i) or ("Dock " .. i)
@@ -8315,23 +8462,91 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
                 UIDropDownMenu_SetText(controls.dockDropdown, "None")
             end
             
+            -- Wire up control callbacks
+            controls.enableCheck:SetScript("OnClick", function(self)
+                CooldownHighlights:EnableHighlight(trackerKey, slotIndex, self:GetChecked())
+                Cooldowns:SaveSettings()
+            end)
+            
+            controls.activeBtn:SetScript("OnClick", function()
+                currentState = "active"
+                UpdateControlsForSlot(slotIndex)
+            end)
+            
+            controls.inactiveBtn:SetScript("OnClick", function()
+                currentState = "inactive"
+                UpdateControlsForSlot(slotIndex)
+            end)
+            
+            controls.showCheck:SetScript("OnClick", function(self)
+                CooldownHighlights:SetShowState(trackerKey, slotIndex, currentState, self:GetChecked())
+                Cooldowns:SaveSettings()
+            end)
+            
+            controls.sizeSlider:SetScript("OnValueChanged", function(self, value)
+                value = math.floor(value)
+                controls.sizeValue:SetText(tostring(value))
+                CooldownHighlights:SetSize(trackerKey, slotIndex, currentState, value)
+                Cooldowns:SaveSettings()
+            end)
+            
+            controls.opacitySlider:SetScript("OnValueChanged", function(self, value)
+                controls.opacityValue:SetText(math.floor(value * 100) .. "%")
+                CooldownHighlights:SetOpacity(trackerKey, slotIndex, currentState, value)
+                Cooldowns:SaveSettings()
+            end)
+            
+            controls.desatCheck:SetScript("OnClick", function(self)
+                CooldownHighlights:SetSaturation(trackerKey, slotIndex, currentState, not self:GetChecked())
+                Cooldowns:SaveSettings()
+            end)
+            
+            controls.procGlowCheck:SetScript("OnClick", function(self)
+                CooldownHighlights:SetShowProcGlow(trackerKey, slotIndex, self:GetChecked())
+                Cooldowns:SaveSettings()
+            end)
+            
+            local function ApplyCustomAspect()
+                local w = tonumber(controls.customW:GetText()) or 1
+                local h = tonumber(controls.customH:GetText()) or 1
+                if w < 1 then w = 1 end
+                if h < 1 then h = 1 end
+                CooldownHighlights:SetCustomAspectRatio(trackerKey, slotIndex, currentState, w, h)
+            end
+            
+            controls.customW:SetScript("OnEnterPressed", function(self)
+                self:ClearFocus()
+                ApplyCustomAspect()
+            end)
+            controls.customW:SetScript("OnEditFocusLost", ApplyCustomAspect)
+            
+            controls.customH:SetScript("OnEnterPressed", function(self)
+                self:ClearFocus()
+                ApplyCustomAspect()
+            end)
+            controls.customH:SetScript("OnEditFocusLost", ApplyCustomAspect)
+            
             -- Label control event handlers
             controls.labelEnableCheck:SetScript("OnClick", function(self)
                 CooldownHighlights:SetLabelEnabled(trackerKey, slotIndex, self:GetChecked())
+                Cooldowns:SaveSettings()
             end)
             
             controls.labelTextBox:SetScript("OnEnterPressed", function(self)
                 self:ClearFocus()
                 CooldownHighlights:SetLabelText(trackerKey, slotIndex, self:GetText())
+                Cooldowns:SaveSettings()
             end)
             controls.labelTextBox:SetScript("OnEditFocusLost", function(self)
                 CooldownHighlights:SetLabelText(trackerKey, slotIndex, self:GetText())
+                Cooldowns:SaveSettings()
             end)
             
             controls.labelSizeSlider:SetScript("OnValueChanged", function(self, value)
                 value = math.floor(value)
                 controls.labelSizeValue:SetText(tostring(value))
                 CooldownHighlights:SetLabelFontSize(trackerKey, slotIndex, value)
+                Cooldowns:SaveSettings()
             end)
             
             controls.labelColorBtn:SetScript("OnClick", function()
@@ -8344,16 +8559,19 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
                         local na = ColorPickerFrame:GetColorAlpha() or 1
                         controls.labelColorBtn:SetBackdropColor(nr, ng, nb, na)
                         CooldownHighlights:SetLabelColor(trackerKey, slotIndex, {nr, ng, nb, na})
+                        Cooldowns:SaveSettings()
                     end,
                     opacityFunc = function()
                         local nr, ng, nb = ColorPickerFrame:GetColorRGB()
                         local na = ColorPickerFrame:GetColorAlpha() or 1
                         controls.labelColorBtn:SetBackdropColor(nr, ng, nb, na)
                         CooldownHighlights:SetLabelColor(trackerKey, slotIndex, {nr, ng, nb, na})
+                        Cooldowns:SaveSettings()
                     end,
                     cancelFunc = function(prev)
                         controls.labelColorBtn:SetBackdropColor(prev.r, prev.g, prev.b, prev.a or 1)
                         CooldownHighlights:SetLabelColor(trackerKey, slotIndex, {prev.r, prev.g, prev.b, prev.a or 1})
+                        Cooldowns:SaveSettings()
                     end,
                     hasOpacity = true,
                     opacity = a,
@@ -8368,32 +8586,49 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
                 value = math.floor(value)
                 controls.labelOffsetXValue:SetText(tostring(value))
                 CooldownHighlights:SetLabelOffsetX(trackerKey, slotIndex, value)
+                Cooldowns:SaveSettings()
             end)
             
             controls.labelOffsetYSlider:SetScript("OnValueChanged", function(self, value)
                 value = math.floor(value)
                 controls.labelOffsetYValue:SetText(tostring(value))
                 CooldownHighlights:SetLabelOffsetY(trackerKey, slotIndex, value)
+                Cooldowns:SaveSettings()
             end)
             
+            -- Hide icon checkbox handler
+            controls.hideCheck:SetScript("OnClick", function(self)
+                CooldownHighlights:SetIconHidden(trackerKey, slotIndex, self:GetChecked())
+                Cooldowns:SaveSettings()
+                -- Refresh the tracker layout
+                Cooldowns.RefreshTrackerLayout(trackerKey)
+            end)
+            
+            -- Cooldown text control handlers
             controls.cooldownTextSlider:SetScript("OnValueChanged", function(self, value)
-                value = math.floor(value * 10) / 10  -- Round to 1 decimal place
-                controls.cooldownTextValue:SetText(string.format("%.1fx", value))
+                value = math.floor(value * 10) / 10  -- Round to 1 decimal
+                controls.cooldownTextValue:SetText(string.format("%.1f", value))
                 CooldownHighlights:SetCooldownTextScale(trackerKey, slotIndex, value)
+                Cooldowns:SaveSettings()
             end)
             
             controls.cooldownTextColorBtn:SetScript("OnClick", function()
-                local r, g, b = controls.cooldownTextColorBtn:GetBackdropColor()
+                local currentColor = CooldownHighlights:GetCooldownTextColor(trackerKey, slotIndex)
+                local r, g, b = currentColor[1] or 1, currentColor[2] or 1, currentColor[3] or 1
+                
                 local info = {
                     swatchFunc = function()
-                        local r, g, b = ColorPickerFrame:GetColorRGB()
-                        controls.cooldownTextColorBtn:SetBackdropColor(r, g, b, 1)
-                        CooldownHighlights:SetCooldownTextColor(trackerKey, slotIndex, {r, g, b, 1})
+                        local nr, ng, nb = ColorPickerFrame:GetColorRGB()
+                        controls.cooldownTextColorBtn:SetBackdropColor(nr, ng, nb, 1)
+                        CooldownHighlights:SetCooldownTextColor(trackerKey, slotIndex, {nr, ng, nb})
+                        Cooldowns:SaveSettings()
                     end,
                     cancelFunc = function(prev)
                         controls.cooldownTextColorBtn:SetBackdropColor(prev.r, prev.g, prev.b, 1)
-                        CooldownHighlights:SetCooldownTextColor(trackerKey, slotIndex, {prev.r, prev.g, prev.b, 1})
+                        CooldownHighlights:SetCooldownTextColor(trackerKey, slotIndex, {prev.r, prev.g, prev.b})
+                        Cooldowns:SaveSettings()
                     end,
+                    hasOpacity = false,
                     r = r,
                     g = g,
                     b = b,
@@ -8405,32 +8640,41 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
                 value = math.floor(value)
                 controls.cooldownTextOffsetXValue:SetText(tostring(value))
                 CooldownHighlights:SetCooldownTextOffsetX(trackerKey, slotIndex, value)
+                Cooldowns:SaveSettings()
             end)
             
             controls.cooldownTextOffsetYSlider:SetScript("OnValueChanged", function(self, value)
                 value = math.floor(value)
                 controls.cooldownTextOffsetYValue:SetText(tostring(value))
                 CooldownHighlights:SetCooldownTextOffsetY(trackerKey, slotIndex, value)
+                Cooldowns:SaveSettings()
             end)
             
+            -- Count text control handlers
             controls.countTextSlider:SetScript("OnValueChanged", function(self, value)
-                value = math.floor(value * 10) / 10  -- Round to 1 decimal place
-                controls.countTextValue:SetText(string.format("%.1fx", value))
+                value = math.floor(value * 10) / 10  -- Round to 1 decimal
+                controls.countTextValue:SetText(string.format("%.1f", value))
                 CooldownHighlights:SetCountTextScale(trackerKey, slotIndex, value)
+                Cooldowns:SaveSettings()
             end)
             
             controls.countTextColorBtn:SetScript("OnClick", function()
-                local r, g, b = controls.countTextColorBtn:GetBackdropColor()
+                local currentColor = CooldownHighlights:GetCountTextColor(trackerKey, slotIndex)
+                local r, g, b = currentColor[1] or 1, currentColor[2] or 1, currentColor[3] or 1
+                
                 local info = {
                     swatchFunc = function()
-                        local r, g, b = ColorPickerFrame:GetColorRGB()
-                        controls.countTextColorBtn:SetBackdropColor(r, g, b, 1)
-                        CooldownHighlights:SetCountTextColor(trackerKey, slotIndex, {r, g, b, 1})
+                        local nr, ng, nb = ColorPickerFrame:GetColorRGB()
+                        controls.countTextColorBtn:SetBackdropColor(nr, ng, nb, 1)
+                        CooldownHighlights:SetCountTextColor(trackerKey, slotIndex, {nr, ng, nb})
+                        Cooldowns:SaveSettings()
                     end,
                     cancelFunc = function(prev)
                         controls.countTextColorBtn:SetBackdropColor(prev.r, prev.g, prev.b, 1)
-                        CooldownHighlights:SetCountTextColor(trackerKey, slotIndex, {prev.r, prev.g, prev.b, 1})
+                        CooldownHighlights:SetCountTextColor(trackerKey, slotIndex, {prev.r, prev.g, prev.b})
+                        Cooldowns:SaveSettings()
                     end,
+                    hasOpacity = false,
                     r = r,
                     g = g,
                     b = b,
@@ -8442,12 +8686,14 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
                 value = math.floor(value)
                 controls.countTextOffsetXValue:SetText(tostring(value))
                 CooldownHighlights:SetCountTextOffsetX(trackerKey, slotIndex, value)
+                Cooldowns:SaveSettings()
             end)
             
             controls.countTextOffsetYSlider:SetScript("OnValueChanged", function(self, value)
                 value = math.floor(value)
                 controls.countTextOffsetYValue:SetText(tostring(value))
                 CooldownHighlights:SetCountTextOffsetY(trackerKey, slotIndex, value)
+                Cooldowns:SaveSettings()
             end)
         end
         
@@ -8471,6 +8717,7 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
                 return
             end
             
+            -- Use same order as layout (GetOrderedIcons)
             local icons = GetOrderedIcons(viewer, trackerKey)
             if #icons == 0 then
                 local noItems = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -8651,27 +8898,19 @@ end
 function Cooldowns:CreateCustomTrackersPanel()
     local panel = CreateFrame("Frame", "TweaksUI_Cooldowns_customTrackers_Panel", UIParent, "BackdropTemplate")
     panel:SetSize(PANEL_WIDTH, PANEL_HEIGHT + 50)
+    panel:SetPoint("TOPLEFT", cooldownHub, "TOPRIGHT", 0, 0)
     panel:SetBackdrop(darkBackdrop)
     panel:SetBackdropColor(0.08, 0.08, 0.08, 0.95)
     panel:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
     panel:SetFrameStrata("DIALOG")
-    panel:SetMovable(true)
-    panel:EnableMouse(true)
-    panel:RegisterForDrag("LeftButton")
-    panel:SetScript("OnDragStart", panel.StartMoving)
-    panel:SetScript("OnDragStop", panel.StopMovingOrSizing)
-    panel:SetClampedToScreen(true)
-    
-    -- Anchor to Settings hub if it exists, otherwise center
-    local settingsHub = _G["TUICD_SettingsHub"]
-    if settingsHub then
-        panel:SetPoint("TOPLEFT", settingsHub, "TOPRIGHT", 5, 0)
-    else
-        panel:SetPoint("CENTER", UIParent, "CENTER", 100, 0)
-    end
     
     settingsPanels["customTrackers"] = panel
     local trackerKey = "customTrackers"
+    
+    -- Register with GlobalScale for settings scaling
+    if TUICD.GlobalScale then
+        TUICD.GlobalScale:RegisterSettingsPanel(panel, 1.0)
+    end
     
     -- Title
     local title = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
@@ -9157,6 +9396,7 @@ function Cooldowns:CreateCustomTrackersPanel()
                 enableCB:SetChecked(isEnabled)
                 enableCB:SetScript("OnClick", function(self)
                     SetCustomEntryEnabled(i, self:GetChecked())
+                    Cooldowns:SaveSettings()
                     RebuildCustomTrackerIcons()
                 end)
                 enableCB:SetScript("OnEnter", function(self)
@@ -9387,19 +9627,6 @@ function Cooldowns:CreateCustomTrackersPanel()
         
         y = CreateHeader(parent, y, "Growth Direction")
         
-        -- Note: Standard direction/alignment options
-        local standardNote = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        standardNote:SetPoint("TOPLEFT", 10, y)
-        standardNote:SetText("(These options are ignored when Custom Grid is enabled)")
-        standardNote:SetTextColor(0.6, 0.6, 0.6)
-        -- Only show note if custom grid is enabled
-        if GetSetting(trackerKey, "useCustomGrid") then
-            standardNote:Show()
-            y = y - 14
-        else
-            standardNote:Hide()
-        end
-        
         local growOptions = {
             { label = "Right", value = "RIGHT" },
             { label = "Left", value = "LEFT" },
@@ -9437,7 +9664,7 @@ function Cooldowns:CreateCustomTrackersPanel()
             function(v) 
                 SetSetting(trackerKey, "useCustomGrid", v)
                 -- Both enabling and disabling benefit from a reload for clean state
-                StaticPopupDialogs["TUICD_RELOAD_CUSTOM_GRID"] = {
+                StaticPopupDialogs["TUI_RELOAD_CUSTOM_GRID"] = {
                     text = "Custom Grid changes require a UI reload to fully apply. Reload now?",
                     button1 = "Reload",
                     button2 = "Later",
@@ -9448,7 +9675,7 @@ function Cooldowns:CreateCustomTrackersPanel()
                     whileDead = true,
                     hideOnEscape = true,
                 }
-                StaticPopup_Show("TUICD_RELOAD_CUSTOM_GRID")
+                StaticPopup_Show("TUI_RELOAD_CUSTOM_GRID")
             end)
         
         -- Mode dropdown (Row vs Column)
@@ -9464,12 +9691,12 @@ function Cooldowns:CreateCustomTrackersPanel()
             end)
         
         -- Alignment dropdown - uses START/CENTER/END internally
-        local alignOptsCustomGrid = {
+        local alignOptsCustom = {
             { label = "Start (Left/Top)", value = "START" },
             { label = "Center (Middle)", value = "CENTER" },
             { label = "End (Right/Bottom)", value = "END" },
         }
-        y = CreateDropdown(parent, y, "Alignment", alignOptsCustomGrid,
+        y = CreateDropdown(parent, y, "Alignment", alignOptsCustom,
             function() return GetSetting(trackerKey, "customGridAlign") or "START" end,
             function(v) 
                 SetSetting(trackerKey, "customGridAlign", v)
@@ -9535,9 +9762,10 @@ function Cooldowns:CreateCustomTrackersPanel()
             SetSetting(trackerKey, "customLayout", "")
             SetSetting(trackerKey, "customGridMode", "ROW")
             SetSetting(trackerKey, "customGridAlign", "START")
+            SetSetting(trackerKey, "customLayoutMode", nil)
             RebuildCustomTrackerIcons()
             patternBox:SetText("")
-            TweaksUI_Cooldowns:Print("Layout settings reset for " .. trackerKey)
+            TUICD:Print("Layout settings reset for " .. trackerKey)
         end)
         y = y - 30
         
@@ -9554,7 +9782,10 @@ function Cooldowns:CreateCustomTrackersPanel()
         
         y = CreateSlider(parent, y, "Zoom (texture crop)", 0, 0.15, 0.01,
             function() return GetSetting(trackerKey, "zoom") or 0.08 end,
-            function(v) SetSetting(trackerKey, "zoom", v) end)
+            function(v) 
+                SetSetting(trackerKey, "zoom", v)
+                ApplyCustomTrackerEdgeStyles()
+            end)
         
         y = CreateSlider(parent, y, "Out of Combat Opacity", 0.1, 1.0, 0.05,
             function() return GetSetting(trackerKey, "iconOpacity") or 1.0 end,
@@ -9563,6 +9794,10 @@ function Cooldowns:CreateCustomTrackersPanel()
         y = CreateSlider(parent, y, "In Combat Opacity", 0.1, 1.0, 0.05,
             function() return GetSetting(trackerKey, "iconOpacityCombat") or 1.0 end,
             function(v) SetSetting(trackerKey, "iconOpacityCombat", v) end)
+        
+        y = CreateSlider(parent, y, "Border Opacity", 0, 1.0, 0.05,
+            function() return GetSetting(trackerKey, "borderAlpha") or 1.0 end,
+            function(v) SetSetting(trackerKey, "borderAlpha", v) end)
         
         y = y - 10  -- Add spacing before cooldown visibility options
         
@@ -9582,24 +9817,59 @@ function Cooldowns:CreateCustomTrackersPanel()
                 end
             end)
         
-        -- Masque support (only show if Masque is installed)
+        -- Icon Edge Style dropdown
+        local edgeStyleLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        edgeStyleLabel:SetPoint("TOPLEFT", 10, y - 5)
+        edgeStyleLabel:SetText("Icon Edge Style")
+        y = y - 20
+        
+        local edgeStyles = {
+            {value = "sharp", label = "Sharp (Zoomed)"},
+            {value = "rounded", label = "Rounded Corners"},
+            {value = "square", label = "Square (Full)"},
+        }
+        
+        local edgeDropdown = CreateFrame("Frame", "TweaksUI_CustomTracker_EdgeStyle", parent, "UIDropDownMenuTemplate")
+        edgeDropdown:SetPoint("TOPLEFT", 0, y)
+        UIDropDownMenu_SetWidth(edgeDropdown, 150)
+        
+        local currentEdge = GetSetting(trackerKey, "iconEdgeStyle") or "sharp"
+        for _, opt in ipairs(edgeStyles) do
+            if opt.value == currentEdge then
+                UIDropDownMenu_SetText(edgeDropdown, opt.label)
+                break
+            end
+        end
+        
+        UIDropDownMenu_Initialize(edgeDropdown, function(self, level)
+            for _, opt in ipairs(edgeStyles) do
+                local info = UIDropDownMenu_CreateInfo()
+                info.text = opt.label
+                info.value = opt.value
+                info.func = function(self)
+                    SetSetting(trackerKey, "iconEdgeStyle", self.value)
+                    UIDropDownMenu_SetText(edgeDropdown, self:GetText())
+                    ApplyCustomTrackerEdgeStyles()
+                end
+                info.checked = (GetSetting(trackerKey, "iconEdgeStyle") or "sharp") == opt.value
+                UIDropDownMenu_AddButton(info, level)
+            end
+        end)
+        y = y - 35
+        
+        -- Masque checkbox (only show if Masque is available)
         if Masque then
-            y = y - 15  -- Add some spacing
             y = CreateCheckbox(parent, y, "Use Masque Skinning",
                 function() return GetSetting(trackerKey, "useMasque") or false end,
                 function(v) 
-                    SetSetting(trackerKey, "useMasque", v)
-                    -- Force layout update to apply/remove Masque skinning
-                    LayoutCustomTrackerIcons()
-                    ReskinMasqueGroup(trackerKey)
+                    SetSetting(trackerKey, "useMasque", v) 
+                    -- Rebuild custom tracker icons with new style
+                    RebuildCustomTrackerIcons()
+                    -- Reskin group if enabling
+                    if v then
+                        ReskinMasqueGroup(trackerKey)
+                    end
                 end)
-            
-            -- Add info label
-            local masqueInfo = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-            masqueInfo:SetPoint("TOPLEFT", parent, "TOPLEFT", 30, y - 3)
-            masqueInfo:SetText("|cff888888Configure skin via /masque|r")
-            masqueInfo:SetJustifyH("LEFT")
-            y = y - 20
         end
         
         parent:SetHeight(math.abs(y) + 20)
@@ -9611,31 +9881,13 @@ function Cooldowns:CreateCustomTrackersPanel()
     local function BuildTextTab(parent)
         local y = -10
         
-        -- Helper to trigger layout update
+        -- Local RefreshLayout helper
         local function RefreshLayout()
-            if customTrackerFrame then
-                RebuildCustomTrackerIcons()
-            end
-        end
-        
-        -- Get available fonts from LibSharedMedia
-        local function GetFontList()
-            local fonts = {"Default"}
-            local LSM = LibStub and LibStub("LibSharedMedia-3.0", true)
-            if LSM then
-                local mediaFonts = LSM:HashTable("font")
-                if mediaFonts then
-                    for name in pairs(mediaFonts) do
-                        table.insert(fonts, name)
-                    end
-                    table.sort(fonts)
-                end
-            end
-            return fonts
+            UpdateCustomTrackerLayout()
         end
         
         -- Helper to create a font dropdown
-        local function CreateFontDropdown(parent, yPos, labelText, settingKey)
+        local function CreateFontDropdown(yPos, labelText, settingKey)
             local label = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
             label:SetPoint("TOPLEFT", 10, yPos)
             label:SetText(labelText)
@@ -9650,7 +9902,7 @@ function Cooldowns:CreateCustomTrackersPanel()
             end
             
             UIDropDownMenu_Initialize(dropdown, function(self, level)
-                local fonts = GetFontList()
+                local fonts = TUICD.Media and TUICD.Media:GetFontList() or {"Default"}
                 for _, fontName in ipairs(fonts) do
                     local info = UIDropDownMenu_CreateInfo()
                     info.text = fontName
@@ -9670,7 +9922,7 @@ function Cooldowns:CreateCustomTrackersPanel()
         end
         
         -- Helper to create a color picker button
-        local function CreateColorButton(parent, yPos, labelText, rKey, gKey, bKey)
+        local function CreateColorButton(yPos, labelText, rKey, gKey, bKey)
             local label = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
             label:SetPoint("TOPLEFT", 10, yPos)
             label:SetText(labelText)
@@ -9687,7 +9939,7 @@ function Cooldowns:CreateCustomTrackersPanel()
                 GetSetting(trackerKey, gKey) or 1,
                 GetSetting(trackerKey, bKey) or 1
             )
-            colorBtn.colorTex = colorTex  -- Store reference
+            colorBtn.colorTex = colorTex
             
             local border = colorBtn:CreateTexture(nil, "BACKGROUND")
             border:SetAllPoints()
@@ -9732,22 +9984,7 @@ function Cooldowns:CreateCustomTrackersPanel()
         -- ========== COOLDOWN TEXT ==========
         y = CreateHeader(parent, y, "Cooldown Text")
         
-        -- Show countdown text toggle
-        y = CreateCheckbox(parent, y, "Show Countdown Text",
-            function() 
-                local val = GetSetting(trackerKey, "showCountdownText")
-                return val == nil or val == true  -- Default to true
-            end,
-            function(v) 
-                SetSetting(trackerKey, "showCountdownText", v)
-                RefreshLayout()
-                -- Also refresh highlight frames
-                if TUICD.CooldownHighlights and TUICD.CooldownHighlights.RefreshAllHighlights then
-                    TUICD.CooldownHighlights:RefreshAllHighlights(trackerKey)
-                end
-            end)
-        
-        y = CreateFontDropdown(parent, y, "Font:", "cooldownTextFont")
+        y = CreateFontDropdown(y, "Font:", "cooldownTextFont")
         
         y = CreateSlider(parent, y, "Scale", 0.5, 2.0, 0.1,
             function() return GetSetting(trackerKey, "cooldownTextScale") or 1.0 end,
@@ -9759,23 +9996,23 @@ function Cooldowns:CreateCustomTrackersPanel()
         y = CreateSlider(parent, y, "Offset X", -20, 20, 1,
             function() return GetSetting(trackerKey, "cooldownTextOffsetX") or 0 end,
             function(v) 
-                SetSetting(trackerKey, "cooldownTextOffsetX", v) 
+                SetSetting(trackerKey, "cooldownTextOffsetX", v)
                 RefreshLayout()
             end)
         
         y = CreateSlider(parent, y, "Offset Y", -20, 20, 1,
             function() return GetSetting(trackerKey, "cooldownTextOffsetY") or 0 end,
             function(v) 
-                SetSetting(trackerKey, "cooldownTextOffsetY", v) 
+                SetSetting(trackerKey, "cooldownTextOffsetY", v)
                 RefreshLayout()
             end)
         
-        y = CreateColorButton(parent, y, "Color:", "cooldownTextColorR", "cooldownTextColorG", "cooldownTextColorB")
+        y = CreateColorButton(y, "Color:", "cooldownTextColorR", "cooldownTextColorG", "cooldownTextColorB")
         
         -- ========== COUNT/CHARGE TEXT ==========
-        y = CreateHeader(parent, y - 10, "Stack Count Text")
+        y = CreateHeader(parent, y - 10, "Count/Charge Text")
         
-        y = CreateFontDropdown(parent, y, "Font:", "countTextFont")
+        y = CreateFontDropdown(y, "Font:", "countTextFont")
         
         y = CreateSlider(parent, y, "Scale", 0.5, 2.0, 0.1,
             function() return GetSetting(trackerKey, "countTextScale") or 1.0 end,
@@ -9798,7 +10035,7 @@ function Cooldowns:CreateCustomTrackersPanel()
                 RefreshLayout()
             end)
         
-        y = CreateColorButton(parent, y, "Color:", "countTextColorR", "countTextColorG", "countTextColorB")
+        y = CreateColorButton(y, "Color:", "countTextColorR", "countTextColorG", "countTextColorB")
         
         parent:SetHeight(math.abs(y) + 20)
     end
@@ -9815,7 +10052,7 @@ function Cooldowns:CreateCustomTrackersPanel()
             function() return GetSetting(trackerKey, "showTooltip") ~= false end,
             function(v) 
                 SetSetting(trackerKey, "showTooltip", v)
-                -- Custom tracker icons check this dynamically, no rebuild needed
+                -- Custom trackers check this in OnEnter, no rebuild needed
             end)
         
         y = CreateHeader(parent, y, "Visibility Conditions")
@@ -9880,7 +10117,7 @@ function Cooldowns:CreateCustomTrackersPanel()
             function() return GetSetting(trackerKey, "clickthrough") or false end,
             function(v) 
                 SetSetting(trackerKey, "clickthrough", v)
-                -- Apply immediately to the custom tracker frame
+                -- Apply immediately to the viewer
                 ApplyClickthrough(trackerKey)
             end)
         
@@ -9916,7 +10153,7 @@ function Cooldowns:CreateCustomTrackersPanel()
         header:SetText("Individual Icons")
         header:SetTextColor(1, 0.82, 0)
         
-        -- Refresh button at top right (script set later after RefreshSlotList is defined)
+        -- Refresh button (at top right, script set later after RefreshSlotList is defined)
         local refreshBtn = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
         refreshBtn:SetPoint("TOPRIGHT", -5, y)
         refreshBtn:SetSize(100, 20)
@@ -9939,6 +10176,7 @@ function Cooldowns:CreateCustomTrackersPanel()
         hideTrackerCheck:SetScript("OnClick", function(self)
             if CooldownHighlights then
                 CooldownHighlights:SetTrackerHidden(customTrackerKey, self:GetChecked())
+                Cooldowns:SaveSettings()
             end
         end)
         
@@ -9972,14 +10210,31 @@ function Cooldowns:CreateCustomTrackersPanel()
         
         y = y - 100
         
-        -- Controls panel (no backdrop - content scrolls with parent)
-        local controlsPanel = CreateFrame("Frame", nil, parent)
-        controlsPanel:SetPoint("TOPLEFT", 5, y)
-        controlsPanel:SetSize(PANEL_WIDTH - 60, 700)  -- Taller to accommodate all controls
+        -- Controls container with backdrop (outer frame)
+        local controlsContainer = CreateFrame("Frame", nil, parent, "BackdropTemplate")
+        controlsContainer:SetPoint("TOPLEFT", 5, y)
+        controlsContainer:SetSize(PANEL_WIDTH - 60, 560)
+        controlsContainer:SetBackdrop({
+            bgFile = "Interface\\Buttons\\WHITE8x8",
+            edgeFile = "Interface\\Buttons\\WHITE8x8",
+            edgeSize = 1,
+        })
+        controlsContainer:SetBackdropColor(0.12, 0.12, 0.12, 0.9)
+        controlsContainer:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
         
-        -- "No Selection" label
-        local noSelectionLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        noSelectionLabel:SetPoint("CENTER", 0, 200)
+        -- Scroll frame inside container
+        local controlsScrollFrame = CreateFrame("ScrollFrame", nil, controlsContainer, "UIPanelScrollFrameTemplate")
+        controlsScrollFrame:SetPoint("TOPLEFT", 2, -2)
+        controlsScrollFrame:SetPoint("BOTTOMRIGHT", -22, 2)
+        
+        -- Controls panel as scroll child (content area)
+        local controlsPanel = CreateFrame("Frame", nil, controlsScrollFrame)
+        controlsPanel:SetSize(PANEL_WIDTH - 84, 820)  -- Height for full content
+        controlsScrollFrame:SetScrollChild(controlsPanel)
+        
+        -- "No Selection" label (on container, not scroll child, so it stays centered)
+        local noSelectionLabel = controlsContainer:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        noSelectionLabel:SetPoint("CENTER")
         noSelectionLabel:SetText("Select a custom tracker slot above")
         noSelectionLabel:SetTextColor(0.5, 0.5, 0.5)
         
@@ -10008,7 +10263,7 @@ function Cooldowns:CreateCustomTrackersPanel()
         controls.enableLabel:SetTextColor(0.9, 0.9, 0.9)
         controls.enableLabel:Hide()
         
-        -- Hide icon checkbox (state-independent - hides icon completely)
+        -- Hide in tracker checkbox
         controls.hideCheck = CreateFrame("CheckButton", nil, controlsPanel, "UICheckButtonTemplate")
         controls.hideCheck:SetPoint("LEFT", controls.enableLabel, "RIGHT", 20, 0)
         controls.hideCheck:SetSize(24, 24)
@@ -10016,7 +10271,7 @@ function Cooldowns:CreateCustomTrackersPanel()
         
         controls.hideLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         controls.hideLabel:SetPoint("LEFT", controls.hideCheck, "RIGHT", 2, 0)
-        controls.hideLabel:SetText("Hide Icon in Tracker")
+        controls.hideLabel:SetText("Hide in Tracker")
         controls.hideLabel:SetTextColor(0.9, 0.9, 0.9)
         controls.hideLabel:Hide()
         
@@ -10104,18 +10359,6 @@ function Cooldowns:CreateCustomTrackersPanel()
         controls.desatLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.desatLabel:Hide()
         
-        -- Proc glow checkbox
-        controls.procGlowCheck = CreateFrame("CheckButton", nil, controlsPanel, "UICheckButtonTemplate")
-        controls.procGlowCheck:SetPoint("LEFT", controls.desatLabel, "RIGHT", 20, 0)
-        controls.procGlowCheck:SetSize(24, 24)
-        controls.procGlowCheck:Hide()
-        
-        controls.procGlowLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.procGlowLabel:SetPoint("LEFT", controls.procGlowCheck, "RIGHT", 2, 0)
-        controls.procGlowLabel:SetText("Show Proc Glow")
-        controls.procGlowLabel:SetTextColor(0.8, 0.8, 0.8)
-        controls.procGlowLabel:Hide()
-        
         controls.aspectLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         controls.aspectLabel:SetPoint("TOPLEFT", 10, -205)
         controls.aspectLabel:SetText("Aspect Ratio:")
@@ -10155,12 +10398,12 @@ function Cooldowns:CreateCustomTrackersPanel()
         controls.customH:SetMaxLetters(3)
         controls.customH:Hide()
         
-        -- =====================================================================
-        -- DOCK ASSIGNMENT SECTION
-        -- =====================================================================
+        -- Dock Assignment
+        
         controls.dockHeader = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
         controls.dockHeader:SetPoint("TOPLEFT", 10, -265)
-        controls.dockHeader:SetText("|cff00ccffDock Assignment|r")
+        controls.dockHeader:SetText("Dock Assignment")
+        controls.dockHeader:SetTextColor(1, 0.82, 0)
         controls.dockHeader:Hide()
         
         controls.dockLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -10174,38 +10417,141 @@ function Cooldowns:CreateCustomTrackersPanel()
         UIDropDownMenu_SetWidth(controls.dockDropdown, 120)
         controls.dockDropdown:Hide()
         
-        -- =====================================================================
-        -- COOLDOWN TEXT SECTION
-        -- =====================================================================
+        -- =====================================================
+        -- Custom Label Controls (Accessibility feature)
+        -- =====================================================
+        controls.labelHeader = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        controls.labelHeader:SetPoint("TOPLEFT", 10, -305)
+        controls.labelHeader:SetText("Custom Label (Accessibility)")
+        controls.labelHeader:SetTextColor(1, 0.82, 0)
+        controls.labelHeader:Hide()
         
-        -- Anchor options for text elements
-        local ANCHOR_OPTIONS = {
-            { label = "Center", value = "CENTER" },
-            { label = "Top Left", value = "TOPLEFT" },
-            { label = "Top", value = "TOP" },
-            { label = "Top Right", value = "TOPRIGHT" },
-            { label = "Left", value = "LEFT" },
-            { label = "Right", value = "RIGHT" },
-            { label = "Bottom Left", value = "BOTTOMLEFT" },
-            { label = "Bottom", value = "BOTTOM" },
-            { label = "Bottom Right", value = "BOTTOMRIGHT" },
-        }
+        controls.labelEnableCheck = CreateFrame("CheckButton", nil, controlsPanel, "UICheckButtonTemplate")
+        controls.labelEnableCheck:SetPoint("TOPLEFT", 10, -325)
+        controls.labelEnableCheck:SetSize(24, 24)
+        controls.labelEnableCheck:Hide()
         
+        controls.labelEnableLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.labelEnableLabel:SetPoint("LEFT", controls.labelEnableCheck, "RIGHT", 2, 0)
+        controls.labelEnableLabel:SetText("Show Custom Label")
+        controls.labelEnableLabel:SetTextColor(0.9, 0.9, 0.9)
+        controls.labelEnableLabel:Hide()
+        
+        controls.labelTextLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.labelTextLabel:SetPoint("TOPLEFT", 10, -355)
+        controls.labelTextLabel:SetText("Text:")
+        controls.labelTextLabel:SetTextColor(0.8, 0.8, 0.8)
+        controls.labelTextLabel:Hide()
+        
+        controls.labelTextBox = CreateFrame("EditBox", nil, controlsPanel, "InputBoxTemplate")
+        controls.labelTextBox:SetPoint("LEFT", controls.labelTextLabel, "RIGHT", 8, 0)
+        controls.labelTextBox:SetSize(120, 18)
+        controls.labelTextBox:SetAutoFocus(false)
+        controls.labelTextBox:SetMaxLetters(20)
+        controls.labelTextBox:Hide()
+        
+        controls.labelSizeLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.labelSizeLabel:SetPoint("TOPLEFT", 10, -380)
+        controls.labelSizeLabel:SetText("Font Size:")
+        controls.labelSizeLabel:SetTextColor(0.8, 0.8, 0.8)
+        controls.labelSizeLabel:Hide()
+        
+        controls.labelSizeSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
+        controls.labelSizeSlider:SetPoint("LEFT", controls.labelSizeLabel, "RIGHT", 5, 0)
+        controls.labelSizeSlider:SetSize(80, 16)
+        controls.labelSizeSlider:SetMinMaxValues(8, 32)
+        controls.labelSizeSlider:SetValueStep(1)
+        controls.labelSizeSlider:SetObeyStepOnDrag(true)
+        controls.labelSizeSlider.Low:SetText("")
+        controls.labelSizeSlider.High:SetText("")
+        controls.labelSizeSlider.Text:SetText("")
+        controls.labelSizeSlider:Hide()
+        
+        controls.labelSizeValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.labelSizeValue:SetPoint("LEFT", controls.labelSizeSlider, "RIGHT", 8, 0)
+        controls.labelSizeValue:SetTextColor(1, 1, 1)
+        controls.labelSizeValue:Hide()
+        
+        controls.labelColorLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.labelColorLabel:SetPoint("TOPLEFT", 10, -405)
+        controls.labelColorLabel:SetText("Color:")
+        controls.labelColorLabel:SetTextColor(0.8, 0.8, 0.8)
+        controls.labelColorLabel:Hide()
+        
+        controls.labelColorBtn = CreateFrame("Button", nil, controlsPanel, "BackdropTemplate")
+        controls.labelColorBtn:SetPoint("LEFT", controls.labelColorLabel, "RIGHT", 8, 0)
+        controls.labelColorBtn:SetSize(20, 20)
+        controls.labelColorBtn:SetBackdrop({ 
+            bgFile = "Interface\\BUTTONS\\WHITE8X8", 
+            edgeFile = "Interface\\BUTTONS\\WHITE8X8", 
+            edgeSize = 1 
+        })
+        controls.labelColorBtn:SetBackdropColor(1, 1, 1, 1)
+        controls.labelColorBtn:SetBackdropBorderColor(0.3, 0.3, 0.3, 1)
+        controls.labelColorBtn:Hide()
+        
+        controls.labelOffsetLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.labelOffsetLabel:SetPoint("TOPLEFT", 10, -430)
+        controls.labelOffsetLabel:SetText("Offset X:")
+        controls.labelOffsetLabel:SetTextColor(0.8, 0.8, 0.8)
+        controls.labelOffsetLabel:Hide()
+        
+        controls.labelOffsetXSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
+        controls.labelOffsetXSlider:SetPoint("LEFT", controls.labelOffsetLabel, "RIGHT", 5, 0)
+        controls.labelOffsetXSlider:SetSize(100, 16)
+        controls.labelOffsetXSlider:SetMinMaxValues(-100, 100)
+        controls.labelOffsetXSlider:SetValueStep(1)
+        controls.labelOffsetXSlider:SetObeyStepOnDrag(true)
+        controls.labelOffsetXSlider.Low:SetText("")
+        controls.labelOffsetXSlider.High:SetText("")
+        controls.labelOffsetXSlider.Text:SetText("")
+        controls.labelOffsetXSlider:Hide()
+        
+        controls.labelOffsetXValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.labelOffsetXValue:SetPoint("LEFT", controls.labelOffsetXSlider, "RIGHT", 5, 0)
+        controls.labelOffsetXValue:SetTextColor(1, 1, 1)
+        controls.labelOffsetXValue:Hide()
+        
+        controls.labelOffsetYLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.labelOffsetYLabel:SetPoint("TOPLEFT", 10, -455)
+        controls.labelOffsetYLabel:SetText("Offset Y:")
+        controls.labelOffsetYLabel:SetTextColor(0.8, 0.8, 0.8)
+        controls.labelOffsetYLabel:Hide()
+        
+        controls.labelOffsetYSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
+        controls.labelOffsetYSlider:SetPoint("LEFT", controls.labelOffsetYLabel, "RIGHT", 5, 0)
+        controls.labelOffsetYSlider:SetSize(100, 16)
+        controls.labelOffsetYSlider:SetMinMaxValues(-100, 100)
+        controls.labelOffsetYSlider:SetValueStep(1)
+        controls.labelOffsetYSlider:SetObeyStepOnDrag(true)
+        controls.labelOffsetYSlider.Low:SetText("")
+        controls.labelOffsetYSlider.High:SetText("")
+        controls.labelOffsetYSlider.Text:SetText("")
+        controls.labelOffsetYSlider:Hide()
+        
+        controls.labelOffsetYValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.labelOffsetYValue:SetPoint("LEFT", controls.labelOffsetYSlider, "RIGHT", 5, 0)
+        controls.labelOffsetYValue:SetTextColor(1, 1, 1)
+        controls.labelOffsetYValue:Hide()
+        
+        -- =====================================================
+        -- Per-Icon Text Controls (Cooldown Timer)
+        -- =====================================================
         controls.cooldownTextHeader = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        controls.cooldownTextHeader:SetPoint("TOPLEFT", 10, -315)
+        controls.cooldownTextHeader:SetPoint("TOPLEFT", 200, -305)
         controls.cooldownTextHeader:SetText("Cooldown Text")
         controls.cooldownTextHeader:SetTextColor(1, 0.82, 0)
         controls.cooldownTextHeader:Hide()
         
         controls.cooldownTextScaleLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.cooldownTextScaleLabel:SetPoint("TOPLEFT", 10, -335)
+        controls.cooldownTextScaleLabel:SetPoint("TOPLEFT", 200, -325)
         controls.cooldownTextScaleLabel:SetText("Scale:")
         controls.cooldownTextScaleLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.cooldownTextScaleLabel:Hide()
         
         controls.cooldownTextSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
         controls.cooldownTextSlider:SetPoint("LEFT", controls.cooldownTextScaleLabel, "RIGHT", 10, 0)
-        controls.cooldownTextSlider:SetSize(80, 16)
+        controls.cooldownTextSlider:SetSize(70, 16)
         controls.cooldownTextSlider:SetMinMaxValues(0.5, 2.0)
         controls.cooldownTextSlider:SetValueStep(0.1)
         controls.cooldownTextSlider:SetObeyStepOnDrag(true)
@@ -10219,19 +10565,8 @@ function Cooldowns:CreateCustomTrackersPanel()
         controls.cooldownTextValue:SetTextColor(1, 1, 1)
         controls.cooldownTextValue:Hide()
         
-        controls.cooldownTextAnchorLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.cooldownTextAnchorLabel:SetPoint("LEFT", controls.cooldownTextValue, "RIGHT", 15, 0)
-        controls.cooldownTextAnchorLabel:SetText("Anchor:")
-        controls.cooldownTextAnchorLabel:SetTextColor(0.8, 0.8, 0.8)
-        controls.cooldownTextAnchorLabel:Hide()
-        
-        controls.cooldownTextAnchorDropdown = CreateFrame("Frame", nil, controlsPanel, "UIDropDownMenuTemplate")
-        controls.cooldownTextAnchorDropdown:SetPoint("LEFT", controls.cooldownTextAnchorLabel, "RIGHT", -10, 0)
-        UIDropDownMenu_SetWidth(controls.cooldownTextAnchorDropdown, 80)
-        controls.cooldownTextAnchorDropdown:Hide()
-        
         controls.cooldownTextColorLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.cooldownTextColorLabel:SetPoint("TOPLEFT", 10, -360)
+        controls.cooldownTextColorLabel:SetPoint("TOPLEFT", 200, -350)
         controls.cooldownTextColorLabel:SetText("Color:")
         controls.cooldownTextColorLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.cooldownTextColorLabel:Hide()
@@ -10245,15 +10580,15 @@ function Cooldowns:CreateCustomTrackersPanel()
         controls.cooldownTextColorBtn:Hide()
         
         controls.cooldownTextOffsetXLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.cooldownTextOffsetXLabel:SetPoint("LEFT", controls.cooldownTextColorBtn, "RIGHT", 15, 0)
+        controls.cooldownTextOffsetXLabel:SetPoint("TOPLEFT", 200, -375)
         controls.cooldownTextOffsetXLabel:SetText("Offset X:")
         controls.cooldownTextOffsetXLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.cooldownTextOffsetXLabel:Hide()
         
         controls.cooldownTextOffsetXSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
         controls.cooldownTextOffsetXSlider:SetPoint("LEFT", controls.cooldownTextOffsetXLabel, "RIGHT", 5, 0)
-        controls.cooldownTextOffsetXSlider:SetSize(50, 16)
-        controls.cooldownTextOffsetXSlider:SetMinMaxValues(-50, 50)
+        controls.cooldownTextOffsetXSlider:SetSize(100, 16)
+        controls.cooldownTextOffsetXSlider:SetMinMaxValues(-100, 100)
         controls.cooldownTextOffsetXSlider:SetValueStep(1)
         controls.cooldownTextOffsetXSlider:SetObeyStepOnDrag(true)
         controls.cooldownTextOffsetXSlider.Low:SetText("")
@@ -10262,20 +10597,20 @@ function Cooldowns:CreateCustomTrackersPanel()
         controls.cooldownTextOffsetXSlider:Hide()
         
         controls.cooldownTextOffsetXValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.cooldownTextOffsetXValue:SetPoint("LEFT", controls.cooldownTextOffsetXSlider, "RIGHT", 3, 0)
+        controls.cooldownTextOffsetXValue:SetPoint("LEFT", controls.cooldownTextOffsetXSlider, "RIGHT", 5, 0)
         controls.cooldownTextOffsetXValue:SetTextColor(1, 1, 1)
         controls.cooldownTextOffsetXValue:Hide()
         
         controls.cooldownTextOffsetYLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.cooldownTextOffsetYLabel:SetPoint("LEFT", controls.cooldownTextOffsetXValue, "RIGHT", 8, 0)
-        controls.cooldownTextOffsetYLabel:SetText("Y:")
+        controls.cooldownTextOffsetYLabel:SetPoint("TOPLEFT", 200, -400)
+        controls.cooldownTextOffsetYLabel:SetText("Offset Y:")
         controls.cooldownTextOffsetYLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.cooldownTextOffsetYLabel:Hide()
         
         controls.cooldownTextOffsetYSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
         controls.cooldownTextOffsetYSlider:SetPoint("LEFT", controls.cooldownTextOffsetYLabel, "RIGHT", 5, 0)
-        controls.cooldownTextOffsetYSlider:SetSize(50, 16)
-        controls.cooldownTextOffsetYSlider:SetMinMaxValues(-50, 50)
+        controls.cooldownTextOffsetYSlider:SetSize(100, 16)
+        controls.cooldownTextOffsetYSlider:SetMinMaxValues(-100, 100)
         controls.cooldownTextOffsetYSlider:SetValueStep(1)
         controls.cooldownTextOffsetYSlider:SetObeyStepOnDrag(true)
         controls.cooldownTextOffsetYSlider.Low:SetText("")
@@ -10284,28 +10619,28 @@ function Cooldowns:CreateCustomTrackersPanel()
         controls.cooldownTextOffsetYSlider:Hide()
         
         controls.cooldownTextOffsetYValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.cooldownTextOffsetYValue:SetPoint("LEFT", controls.cooldownTextOffsetYSlider, "RIGHT", 3, 0)
+        controls.cooldownTextOffsetYValue:SetPoint("LEFT", controls.cooldownTextOffsetYSlider, "RIGHT", 5, 0)
         controls.cooldownTextOffsetYValue:SetTextColor(1, 1, 1)
         controls.cooldownTextOffsetYValue:Hide()
         
-        -- =====================================================================
-        -- COUNT TEXT SECTION
-        -- =====================================================================
+        -- =====================================================
+        -- Per-Icon Text Controls (Count/Charge Text)
+        -- =====================================================
         controls.countTextHeader = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        controls.countTextHeader:SetPoint("TOPLEFT", 10, -390)
+        controls.countTextHeader:SetPoint("TOPLEFT", 200, -430)
         controls.countTextHeader:SetText("Count/Charge Text")
         controls.countTextHeader:SetTextColor(1, 0.82, 0)
         controls.countTextHeader:Hide()
         
         controls.countTextScaleLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.countTextScaleLabel:SetPoint("TOPLEFT", 10, -410)
+        controls.countTextScaleLabel:SetPoint("TOPLEFT", 200, -450)
         controls.countTextScaleLabel:SetText("Scale:")
         controls.countTextScaleLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.countTextScaleLabel:Hide()
         
         controls.countTextSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
         controls.countTextSlider:SetPoint("LEFT", controls.countTextScaleLabel, "RIGHT", 10, 0)
-        controls.countTextSlider:SetSize(80, 16)
+        controls.countTextSlider:SetSize(70, 16)
         controls.countTextSlider:SetMinMaxValues(0.5, 2.0)
         controls.countTextSlider:SetValueStep(0.1)
         controls.countTextSlider:SetObeyStepOnDrag(true)
@@ -10319,19 +10654,8 @@ function Cooldowns:CreateCustomTrackersPanel()
         controls.countTextValue:SetTextColor(1, 1, 1)
         controls.countTextValue:Hide()
         
-        controls.countTextAnchorLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.countTextAnchorLabel:SetPoint("LEFT", controls.countTextValue, "RIGHT", 15, 0)
-        controls.countTextAnchorLabel:SetText("Anchor:")
-        controls.countTextAnchorLabel:SetTextColor(0.8, 0.8, 0.8)
-        controls.countTextAnchorLabel:Hide()
-        
-        controls.countTextAnchorDropdown = CreateFrame("Frame", nil, controlsPanel, "UIDropDownMenuTemplate")
-        controls.countTextAnchorDropdown:SetPoint("LEFT", controls.countTextAnchorLabel, "RIGHT", -10, 0)
-        UIDropDownMenu_SetWidth(controls.countTextAnchorDropdown, 80)
-        controls.countTextAnchorDropdown:Hide()
-        
         controls.countTextColorLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.countTextColorLabel:SetPoint("TOPLEFT", 10, -435)
+        controls.countTextColorLabel:SetPoint("TOPLEFT", 200, -475)
         controls.countTextColorLabel:SetText("Color:")
         controls.countTextColorLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.countTextColorLabel:Hide()
@@ -10345,15 +10669,15 @@ function Cooldowns:CreateCustomTrackersPanel()
         controls.countTextColorBtn:Hide()
         
         controls.countTextOffsetXLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.countTextOffsetXLabel:SetPoint("LEFT", controls.countTextColorBtn, "RIGHT", 15, 0)
+        controls.countTextOffsetXLabel:SetPoint("TOPLEFT", 200, -500)
         controls.countTextOffsetXLabel:SetText("Offset X:")
         controls.countTextOffsetXLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.countTextOffsetXLabel:Hide()
         
         controls.countTextOffsetXSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
         controls.countTextOffsetXSlider:SetPoint("LEFT", controls.countTextOffsetXLabel, "RIGHT", 5, 0)
-        controls.countTextOffsetXSlider:SetSize(50, 16)
-        controls.countTextOffsetXSlider:SetMinMaxValues(-50, 50)
+        controls.countTextOffsetXSlider:SetSize(100, 16)
+        controls.countTextOffsetXSlider:SetMinMaxValues(-100, 100)
         controls.countTextOffsetXSlider:SetValueStep(1)
         controls.countTextOffsetXSlider:SetObeyStepOnDrag(true)
         controls.countTextOffsetXSlider.Low:SetText("")
@@ -10362,20 +10686,20 @@ function Cooldowns:CreateCustomTrackersPanel()
         controls.countTextOffsetXSlider:Hide()
         
         controls.countTextOffsetXValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.countTextOffsetXValue:SetPoint("LEFT", controls.countTextOffsetXSlider, "RIGHT", 3, 0)
+        controls.countTextOffsetXValue:SetPoint("LEFT", controls.countTextOffsetXSlider, "RIGHT", 5, 0)
         controls.countTextOffsetXValue:SetTextColor(1, 1, 1)
         controls.countTextOffsetXValue:Hide()
         
         controls.countTextOffsetYLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.countTextOffsetYLabel:SetPoint("LEFT", controls.countTextOffsetXValue, "RIGHT", 8, 0)
-        controls.countTextOffsetYLabel:SetText("Y:")
+        controls.countTextOffsetYLabel:SetPoint("TOPLEFT", 200, -525)
+        controls.countTextOffsetYLabel:SetText("Offset Y:")
         controls.countTextOffsetYLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.countTextOffsetYLabel:Hide()
         
         controls.countTextOffsetYSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
         controls.countTextOffsetYSlider:SetPoint("LEFT", controls.countTextOffsetYLabel, "RIGHT", 5, 0)
-        controls.countTextOffsetYSlider:SetSize(50, 16)
-        controls.countTextOffsetYSlider:SetMinMaxValues(-50, 50)
+        controls.countTextOffsetYSlider:SetSize(100, 16)
+        controls.countTextOffsetYSlider:SetMinMaxValues(-100, 100)
         controls.countTextOffsetYSlider:SetValueStep(1)
         controls.countTextOffsetYSlider:SetObeyStepOnDrag(true)
         controls.countTextOffsetYSlider.Low:SetText("")
@@ -10384,135 +10708,10 @@ function Cooldowns:CreateCustomTrackersPanel()
         controls.countTextOffsetYSlider:Hide()
         
         controls.countTextOffsetYValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.countTextOffsetYValue:SetPoint("LEFT", controls.countTextOffsetYSlider, "RIGHT", 3, 0)
+        controls.countTextOffsetYValue:SetPoint("LEFT", controls.countTextOffsetYSlider, "RIGHT", 5, 0)
         controls.countTextOffsetYValue:SetTextColor(1, 1, 1)
         controls.countTextOffsetYValue:Hide()
         
-        -- =====================================================================
-        -- CUSTOM LABEL SECTION (Accessibility)
-        -- =====================================================================
-        controls.labelHeader = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        controls.labelHeader:SetPoint("TOPLEFT", 10, -465)
-        controls.labelHeader:SetText("Custom Label (Accessibility)")
-        controls.labelHeader:SetTextColor(1, 0.82, 0)
-        controls.labelHeader:Hide()
-        
-        controls.labelEnableCheck = CreateFrame("CheckButton", nil, controlsPanel, "UICheckButtonTemplate")
-        controls.labelEnableCheck:SetPoint("TOPLEFT", 10, -485)
-        controls.labelEnableCheck:SetSize(24, 24)
-        controls.labelEnableCheck:Hide()
-        
-        controls.labelEnableLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.labelEnableLabel:SetPoint("LEFT", controls.labelEnableCheck, "RIGHT", 2, 0)
-        controls.labelEnableLabel:SetText("Show Custom Label")
-        controls.labelEnableLabel:SetTextColor(0.8, 0.8, 0.8)
-        controls.labelEnableLabel:Hide()
-        
-        controls.labelTextLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.labelTextLabel:SetPoint("TOPLEFT", 10, -510)
-        controls.labelTextLabel:SetText("Text:")
-        controls.labelTextLabel:SetTextColor(0.8, 0.8, 0.8)
-        controls.labelTextLabel:Hide()
-        
-        controls.labelTextBox = CreateFrame("EditBox", nil, controlsPanel, "InputBoxTemplate")
-        controls.labelTextBox:SetPoint("LEFT", controls.labelTextLabel, "RIGHT", 10, 0)
-        controls.labelTextBox:SetSize(100, 18)
-        controls.labelTextBox:SetAutoFocus(false)
-        controls.labelTextBox:SetMaxLetters(10)
-        controls.labelTextBox:Hide()
-        
-        controls.labelSizeLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.labelSizeLabel:SetPoint("TOPLEFT", 10, -535)
-        controls.labelSizeLabel:SetText("Font Size:")
-        controls.labelSizeLabel:SetTextColor(0.8, 0.8, 0.8)
-        controls.labelSizeLabel:Hide()
-        
-        controls.labelSizeSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
-        controls.labelSizeSlider:SetPoint("LEFT", controls.labelSizeLabel, "RIGHT", 5, 0)
-        controls.labelSizeSlider:SetSize(50, 16)
-        controls.labelSizeSlider:SetMinMaxValues(8, 32)
-        controls.labelSizeSlider:SetValueStep(1)
-        controls.labelSizeSlider:SetObeyStepOnDrag(true)
-        controls.labelSizeSlider.Low:SetText("")
-        controls.labelSizeSlider.High:SetText("")
-        controls.labelSizeSlider.Text:SetText("")
-        controls.labelSizeSlider:Hide()
-        
-        controls.labelSizeValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.labelSizeValue:SetPoint("LEFT", controls.labelSizeSlider, "RIGHT", 3, 0)
-        controls.labelSizeValue:SetTextColor(1, 1, 1)
-        controls.labelSizeValue:Hide()
-        
-        controls.labelColorLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.labelColorLabel:SetPoint("TOPLEFT", 10, -560)
-        controls.labelColorLabel:SetText("Color:")
-        controls.labelColorLabel:SetTextColor(0.8, 0.8, 0.8)
-        controls.labelColorLabel:Hide()
-        
-        controls.labelColorBtn = CreateFrame("Button", nil, controlsPanel, "BackdropTemplate")
-        controls.labelColorBtn:SetPoint("LEFT", controls.labelColorLabel, "RIGHT", 10, 0)
-        controls.labelColorBtn:SetSize(24, 16)
-        controls.labelColorBtn:SetBackdrop({bgFile = "Interface\\Buttons\\WHITE8x8", edgeFile = "Interface\\Buttons\\WHITE8x8", edgeSize = 1})
-        controls.labelColorBtn:SetBackdropColor(1, 1, 1, 1)
-        controls.labelColorBtn:SetBackdropBorderColor(0.3, 0.3, 0.3, 1)
-        controls.labelColorBtn:Hide()
-        
-        controls.labelAnchorLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.labelAnchorLabel:SetPoint("LEFT", controls.labelColorBtn, "RIGHT", 15, 0)
-        controls.labelAnchorLabel:SetText("Anchor:")
-        controls.labelAnchorLabel:SetTextColor(0.8, 0.8, 0.8)
-        controls.labelAnchorLabel:Hide()
-        
-        controls.labelAnchorDropdown = CreateFrame("Frame", nil, controlsPanel, "UIDropDownMenuTemplate")
-        controls.labelAnchorDropdown:SetPoint("LEFT", controls.labelAnchorLabel, "RIGHT", -10, 0)
-        UIDropDownMenu_SetWidth(controls.labelAnchorDropdown, 80)
-        controls.labelAnchorDropdown:Hide()
-        
-        controls.labelOffsetXLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.labelOffsetXLabel:SetPoint("TOPLEFT", 10, -585)
-        controls.labelOffsetXLabel:SetText("Offset X:")
-        controls.labelOffsetXLabel:SetTextColor(0.8, 0.8, 0.8)
-        controls.labelOffsetXLabel:Hide()
-        
-        controls.labelOffsetXSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
-        controls.labelOffsetXSlider:SetPoint("LEFT", controls.labelOffsetXLabel, "RIGHT", 5, 0)
-        controls.labelOffsetXSlider:SetSize(50, 16)
-        controls.labelOffsetXSlider:SetMinMaxValues(-50, 50)
-        controls.labelOffsetXSlider:SetValueStep(1)
-        controls.labelOffsetXSlider:SetObeyStepOnDrag(true)
-        controls.labelOffsetXSlider.Low:SetText("")
-        controls.labelOffsetXSlider.High:SetText("")
-        controls.labelOffsetXSlider.Text:SetText("")
-        controls.labelOffsetXSlider:Hide()
-        
-        controls.labelOffsetXValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.labelOffsetXValue:SetPoint("LEFT", controls.labelOffsetXSlider, "RIGHT", 3, 0)
-        controls.labelOffsetXValue:SetTextColor(1, 1, 1)
-        controls.labelOffsetXValue:Hide()
-        
-        controls.labelOffsetYLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.labelOffsetYLabel:SetPoint("LEFT", controls.labelOffsetXValue, "RIGHT", 8, 0)
-        controls.labelOffsetYLabel:SetText("Y:")
-        controls.labelOffsetYLabel:SetTextColor(0.8, 0.8, 0.8)
-        controls.labelOffsetYLabel:Hide()
-        
-        controls.labelOffsetYSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
-        controls.labelOffsetYSlider:SetPoint("LEFT", controls.labelOffsetYLabel, "RIGHT", 5, 0)
-        controls.labelOffsetYSlider:SetSize(50, 16)
-        controls.labelOffsetYSlider:SetMinMaxValues(-50, 50)
-        controls.labelOffsetYSlider:SetValueStep(1)
-        controls.labelOffsetYSlider:SetObeyStepOnDrag(true)
-        controls.labelOffsetYSlider.Low:SetText("")
-        controls.labelOffsetYSlider.High:SetText("")
-        controls.labelOffsetYSlider.Text:SetText("")
-        controls.labelOffsetYSlider:Hide()
-        
-        controls.labelOffsetYValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.labelOffsetYValue:SetPoint("LEFT", controls.labelOffsetYSlider, "RIGHT", 3, 0)
-        controls.labelOffsetYValue:SetTextColor(1, 1, 1)
-        controls.labelOffsetYValue:Hide()
-        
-        -- Helper to show/hide all controls
         local function ShowControls(show)
             noSelectionLabel:SetShown(not show)
             for _, ctrl in pairs(controls) do
@@ -10556,7 +10755,7 @@ function Cooldowns:CreateCustomTrackersPanel()
             local icons = {}
             if customTrackerIcons then
                 for _, iconFrame in pairs(customTrackerIcons) do
-                    if iconFrame then
+                    if iconFrame and iconFrame:IsShown() then
                         icons[#icons + 1] = iconFrame
                     end
                 end
@@ -10585,13 +10784,13 @@ function Cooldowns:CreateCustomTrackersPanel()
             -- Clear slider scripts BEFORE setting values to prevent old callbacks from firing
             controls.sizeSlider:SetScript("OnValueChanged", nil)
             controls.opacitySlider:SetScript("OnValueChanged", nil)
-            controls.cooldownTextSlider:SetScript("OnValueChanged", nil)
-            controls.countTextSlider:SetScript("OnValueChanged", nil)
             controls.labelSizeSlider:SetScript("OnValueChanged", nil)
             controls.labelOffsetXSlider:SetScript("OnValueChanged", nil)
             controls.labelOffsetYSlider:SetScript("OnValueChanged", nil)
+            controls.cooldownTextSlider:SetScript("OnValueChanged", nil)
             controls.cooldownTextOffsetXSlider:SetScript("OnValueChanged", nil)
             controls.cooldownTextOffsetYSlider:SetScript("OnValueChanged", nil)
+            controls.countTextSlider:SetScript("OnValueChanged", nil)
             controls.countTextOffsetXSlider:SetScript("OnValueChanged", nil)
             controls.countTextOffsetYSlider:SetScript("OnValueChanged", nil)
             
@@ -10603,40 +10802,35 @@ function Cooldowns:CreateCustomTrackersPanel()
             controls.opacitySlider:SetValue(opacity)
             controls.opacityValue:SetText(math.floor(opacity * 100) .. "%")
             controls.desatCheck:SetChecked(not saturated)
-            
-            -- Proc glow setting (default true if not set)
-            local showProcGlow = CooldownHighlights:GetShowProcGlow(customTrackerKey, slotIndex)
-            controls.procGlowCheck:SetChecked(showProcGlow == nil or showProcGlow == true)
             controls.customW:SetText(tostring(customW))
             controls.customH:SetText(tostring(customH))
             
-            -- Text scale, color, and offset settings (state-independent)
-            local cooldownTextScale = CooldownHighlights:GetCooldownTextScale(customTrackerKey, slotIndex)
-            local cooldownTextColor = CooldownHighlights:GetCooldownTextColor(customTrackerKey, slotIndex)
-            local cooldownTextOffsetX = CooldownHighlights:GetCooldownTextOffsetX(customTrackerKey, slotIndex)
-            local cooldownTextOffsetY = CooldownHighlights:GetCooldownTextOffsetY(customTrackerKey, slotIndex)
-            local cooldownTextAnchor = CooldownHighlights:GetCooldownTextAnchor(customTrackerKey, slotIndex)
-            local countTextScale = CooldownHighlights:GetCountTextScale(customTrackerKey, slotIndex)
-            local countTextColor = CooldownHighlights:GetCountTextColor(customTrackerKey, slotIndex)
-            local countTextOffsetX = CooldownHighlights:GetCountTextOffsetX(customTrackerKey, slotIndex)
-            local countTextOffsetY = CooldownHighlights:GetCountTextOffsetY(customTrackerKey, slotIndex)
-            local countTextAnchor = CooldownHighlights:GetCountTextAnchor(customTrackerKey, slotIndex)
+            -- Per-icon text settings (state-independent)
+            local cdTextScale = CooldownHighlights:GetCooldownTextScale(customTrackerKey, slotIndex)
+            local cdTextColor = CooldownHighlights:GetCooldownTextColor(customTrackerKey, slotIndex)
+            local cdTextOffsetX = CooldownHighlights:GetCooldownTextOffsetX(customTrackerKey, slotIndex)
+            local cdTextOffsetY = CooldownHighlights:GetCooldownTextOffsetY(customTrackerKey, slotIndex)
             
-            controls.cooldownTextSlider:SetValue(cooldownTextScale)
-            controls.cooldownTextValue:SetText(string.format("%.1fx", cooldownTextScale))
-            controls.cooldownTextColorBtn:SetBackdropColor(cooldownTextColor[1] or 1, cooldownTextColor[2] or 1, cooldownTextColor[3] or 1, 1)
-            controls.cooldownTextOffsetXSlider:SetValue(cooldownTextOffsetX)
-            controls.cooldownTextOffsetXValue:SetText(tostring(cooldownTextOffsetX))
-            controls.cooldownTextOffsetYSlider:SetValue(cooldownTextOffsetY)
-            controls.cooldownTextOffsetYValue:SetText(tostring(cooldownTextOffsetY))
+            controls.cooldownTextSlider:SetValue(cdTextScale or 1.0)
+            controls.cooldownTextValue:SetText(string.format("%.1f", cdTextScale or 1.0))
+            controls.cooldownTextColorBtn:SetBackdropColor(cdTextColor[1] or 1, cdTextColor[2] or 1, cdTextColor[3] or 1, 1)
+            controls.cooldownTextOffsetXSlider:SetValue(cdTextOffsetX or 0)
+            controls.cooldownTextOffsetXValue:SetText(tostring(cdTextOffsetX or 0))
+            controls.cooldownTextOffsetYSlider:SetValue(cdTextOffsetY or 0)
+            controls.cooldownTextOffsetYValue:SetText(tostring(cdTextOffsetY or 0))
             
-            controls.countTextSlider:SetValue(countTextScale)
-            controls.countTextValue:SetText(string.format("%.1fx", countTextScale))
-            controls.countTextColorBtn:SetBackdropColor(countTextColor[1] or 1, countTextColor[2] or 1, countTextColor[3] or 1, 1)
-            controls.countTextOffsetXSlider:SetValue(countTextOffsetX)
-            controls.countTextOffsetXValue:SetText(tostring(countTextOffsetX))
-            controls.countTextOffsetYSlider:SetValue(countTextOffsetY)
-            controls.countTextOffsetYValue:SetText(tostring(countTextOffsetY))
+            local cntTextScale = CooldownHighlights:GetCountTextScale(customTrackerKey, slotIndex)
+            local cntTextColor = CooldownHighlights:GetCountTextColor(customTrackerKey, slotIndex)
+            local cntTextOffsetX = CooldownHighlights:GetCountTextOffsetX(customTrackerKey, slotIndex)
+            local cntTextOffsetY = CooldownHighlights:GetCountTextOffsetY(customTrackerKey, slotIndex)
+            
+            controls.countTextSlider:SetValue(cntTextScale or 1.0)
+            controls.countTextValue:SetText(string.format("%.1f", cntTextScale or 1.0))
+            controls.countTextColorBtn:SetBackdropColor(cntTextColor[1] or 1, cntTextColor[2] or 1, cntTextColor[3] or 1, 1)
+            controls.countTextOffsetXSlider:SetValue(cntTextOffsetX or 0)
+            controls.countTextOffsetXValue:SetText(tostring(cntTextOffsetX or 0))
+            controls.countTextOffsetYSlider:SetValue(cntTextOffsetY or 0)
+            controls.countTextOffsetYValue:SetText(tostring(cntTextOffsetY or 0))
             
             -- Label settings (state-independent)
             local labelEnabled = CooldownHighlights:GetLabelEnabled(customTrackerKey, slotIndex)
@@ -10645,57 +10839,43 @@ function Cooldowns:CreateCustomTrackersPanel()
             local labelColor = CooldownHighlights:GetLabelColor(customTrackerKey, slotIndex)
             local labelOffsetX = CooldownHighlights:GetLabelOffsetX(customTrackerKey, slotIndex)
             local labelOffsetY = CooldownHighlights:GetLabelOffsetY(customTrackerKey, slotIndex)
-            local labelAnchor = CooldownHighlights:GetLabelAnchor(customTrackerKey, slotIndex)
             
             controls.labelEnableCheck:SetChecked(labelEnabled)
             controls.labelTextBox:SetText(labelText or "")
             controls.labelSizeSlider:SetValue(labelSize or 14)
             controls.labelSizeValue:SetText(tostring(labelSize or 14))
-            controls.labelColorBtn:SetBackdropColor(labelColor[1] or 1, labelColor[2] or 1, labelColor[3] or 1, 1)
+            controls.labelColorBtn:SetBackdropColor(labelColor[1] or 1, labelColor[2] or 1, labelColor[3] or 1, labelColor[4] or 1)
             controls.labelOffsetXSlider:SetValue(labelOffsetX or 0)
             controls.labelOffsetXValue:SetText(tostring(labelOffsetX or 0))
             controls.labelOffsetYSlider:SetValue(labelOffsetY or 0)
             controls.labelOffsetYValue:SetText(tostring(labelOffsetY or 0))
             
-            -- Get current dock assignment
-            local currentDock = CooldownHighlights:GetDockAssignment(customTrackerKey, slotIndex) or 0
+            UIDropDownMenu_Initialize(controls.aspectDropdown, function(self, level)
+                for _, opt in ipairs(ASPECT_OPTIONS) do
+                    local info = UIDropDownMenu_CreateInfo()
+                    info.text = opt.label
+                    info.value = opt.value
+                    info.func = function(self)
+                        CooldownHighlights:SetAspectRatio(customTrackerKey, slotIndex, currentState, self.value)
+                        UIDropDownMenu_SetText(controls.aspectDropdown, self:GetText())
+                        UpdateCustomAspectVisibility(self.value)
+                    end
+                    info.checked = (aspectRatio == opt.value)
+                    UIDropDownMenu_AddButton(info, level)
+                end
+            end)
             
-            -- Helper function to initialize anchor dropdowns
-            local function InitAnchorDropdown(dropdown, currentAnchor, setFunc)
-                UIDropDownMenu_Initialize(dropdown, function(self, level)
-                    for _, opt in ipairs(ANCHOR_OPTIONS) do
-                        local info = UIDropDownMenu_CreateInfo()
-                        info.text = opt.label
-                        info.value = opt.value
-                        info.func = function()
-                            setFunc(opt.value)
-                            UIDropDownMenu_SetText(dropdown, opt.label)
-                        end
-                        info.checked = (currentAnchor == opt.value)
-                        UIDropDownMenu_AddButton(info, level)
-                    end
-                end)
-                -- Set current text
-                for _, opt in ipairs(ANCHOR_OPTIONS) do
-                    if opt.value == currentAnchor then
-                        UIDropDownMenu_SetText(dropdown, opt.label)
-                        break
-                    end
+            for _, opt in ipairs(ASPECT_OPTIONS) do
+                if opt.value == aspectRatio then
+                    UIDropDownMenu_SetText(controls.aspectDropdown, opt.label)
+                    break
                 end
             end
             
-            -- Initialize anchor dropdowns
-            InitAnchorDropdown(controls.cooldownTextAnchorDropdown, cooldownTextAnchor, function(anchor)
-                CooldownHighlights:SetCooldownTextAnchor(customTrackerKey, slotIndex, anchor)
-            end)
-            InitAnchorDropdown(controls.countTextAnchorDropdown, countTextAnchor, function(anchor)
-                CooldownHighlights:SetCountTextAnchor(customTrackerKey, slotIndex, anchor)
-            end)
-            InitAnchorDropdown(controls.labelAnchorDropdown, labelAnchor, function(anchor)
-                CooldownHighlights:SetLabelAnchor(customTrackerKey, slotIndex, anchor)
-            end)
+            UpdateCustomAspectVisibility(aspectRatio)
             
             -- Initialize dock dropdown
+            local currentDock = CooldownHighlights:GetDockAssignment(customTrackerKey, slotIndex) or 0
             UIDropDownMenu_Initialize(controls.dockDropdown, function(self, level)
                 -- None option
                 local info = UIDropDownMenu_CreateInfo()
@@ -10705,10 +10885,10 @@ function Cooldowns:CreateCustomTrackersPanel()
                     CooldownHighlights:SetDockAssignment(customTrackerKey, slotIndex, nil)
                     UIDropDownMenu_SetText(controls.dockDropdown, "None")
                 end
-                info.checked = (currentDock == 0)
+                info.checked = (currentDock == 0 or currentDock == nil)
                 UIDropDownMenu_AddButton(info, level)
                 
-                -- Dock options
+                -- Dock options (1-4)
                 local numDocks = TUICD.Docks and TUICD.Docks:GetDockCount() or 4
                 for i = 1, numDocks do
                     local dockName = TUICD.Docks and TUICD.Docks:GetDockName(i) or ("Dock " .. i)
@@ -10738,36 +10918,9 @@ function Cooldowns:CreateCustomTrackersPanel()
                 UIDropDownMenu_SetText(controls.dockDropdown, "None")
             end
             
-            UIDropDownMenu_Initialize(controls.aspectDropdown, function(self, level)
-                for _, opt in ipairs(ASPECT_OPTIONS) do
-                    local info = UIDropDownMenu_CreateInfo()
-                    info.text = opt.label
-                    info.value = opt.value
-                    info.func = function(self)
-                        CooldownHighlights:SetAspectRatio(customTrackerKey, slotIndex, currentState, self.value)
-                        UIDropDownMenu_SetText(controls.aspectDropdown, self:GetText())
-                        UpdateCustomAspectVisibility(self.value)
-                    end
-                    info.checked = (aspectRatio == opt.value)
-                    UIDropDownMenu_AddButton(info, level)
-                end
-            end)
-            
-            for _, opt in ipairs(ASPECT_OPTIONS) do
-                if opt.value == aspectRatio then
-                    UIDropDownMenu_SetText(controls.aspectDropdown, opt.label)
-                    break
-                end
-            end
-            
-            UpdateCustomAspectVisibility(aspectRatio)
-            
             controls.enableCheck:SetScript("OnClick", function(self)
                 CooldownHighlights:EnableHighlight(customTrackerKey, slotIndex, self:GetChecked())
-            end)
-            
-            controls.hideCheck:SetScript("OnClick", function(self)
-                CooldownHighlights:SetIconHidden(customTrackerKey, slotIndex, self:GetChecked())
+                Cooldowns:SaveSettings()
             end)
             
             controls.activeBtn:SetScript("OnClick", function()
@@ -10782,25 +10935,25 @@ function Cooldowns:CreateCustomTrackersPanel()
             
             controls.showCheck:SetScript("OnClick", function(self)
                 CooldownHighlights:SetShowState(customTrackerKey, slotIndex, currentState, self:GetChecked())
+                Cooldowns:SaveSettings()
             end)
             
             controls.sizeSlider:SetScript("OnValueChanged", function(self, value)
                 value = math.floor(value)
                 controls.sizeValue:SetText(tostring(value))
                 CooldownHighlights:SetSize(customTrackerKey, slotIndex, currentState, value)
+                Cooldowns:SaveSettings()
             end)
             
             controls.opacitySlider:SetScript("OnValueChanged", function(self, value)
                 controls.opacityValue:SetText(math.floor(value * 100) .. "%")
                 CooldownHighlights:SetOpacity(customTrackerKey, slotIndex, currentState, value)
+                Cooldowns:SaveSettings()
             end)
             
             controls.desatCheck:SetScript("OnClick", function(self)
                 CooldownHighlights:SetSaturation(customTrackerKey, slotIndex, currentState, not self:GetChecked())
-            end)
-            
-            controls.procGlowCheck:SetScript("OnClick", function(self)
-                CooldownHighlights:SetShowProcGlow(customTrackerKey, slotIndex, self:GetChecked())
+                Cooldowns:SaveSettings()
             end)
             
             local function ApplyCustomAspect()
@@ -10823,111 +10976,55 @@ function Cooldowns:CreateCustomTrackersPanel()
             end)
             controls.customH:SetScript("OnEditFocusLost", ApplyCustomAspect)
             
-            controls.cooldownTextSlider:SetScript("OnValueChanged", function(self, value)
-                value = math.floor(value * 10) / 10  -- Round to 1 decimal place
-                controls.cooldownTextValue:SetText(string.format("%.1fx", value))
-                CooldownHighlights:SetCooldownTextScale(customTrackerKey, slotIndex, value)
-            end)
-            
-            controls.cooldownTextColorBtn:SetScript("OnClick", function()
-                local r, g, b = controls.cooldownTextColorBtn:GetBackdropColor()
-                local info = {
-                    swatchFunc = function()
-                        local r, g, b = ColorPickerFrame:GetColorRGB()
-                        controls.cooldownTextColorBtn:SetBackdropColor(r, g, b, 1)
-                        CooldownHighlights:SetCooldownTextColor(customTrackerKey, slotIndex, {r, g, b, 1})
-                    end,
-                    cancelFunc = function(prev)
-                        controls.cooldownTextColorBtn:SetBackdropColor(prev.r, prev.g, prev.b, 1)
-                        CooldownHighlights:SetCooldownTextColor(customTrackerKey, slotIndex, {prev.r, prev.g, prev.b, 1})
-                    end,
-                    r = r,
-                    g = g,
-                    b = b,
-                }
-                ColorPickerFrame:SetupColorPickerAndShow(info)
-            end)
-            
-            controls.cooldownTextOffsetXSlider:SetScript("OnValueChanged", function(self, value)
-                value = math.floor(value)
-                controls.cooldownTextOffsetXValue:SetText(tostring(value))
-                CooldownHighlights:SetCooldownTextOffsetX(customTrackerKey, slotIndex, value)
-            end)
-            
-            controls.cooldownTextOffsetYSlider:SetScript("OnValueChanged", function(self, value)
-                value = math.floor(value)
-                controls.cooldownTextOffsetYValue:SetText(tostring(value))
-                CooldownHighlights:SetCooldownTextOffsetY(customTrackerKey, slotIndex, value)
-            end)
-            
-            controls.countTextSlider:SetScript("OnValueChanged", function(self, value)
-                value = math.floor(value * 10) / 10  -- Round to 1 decimal place
-                controls.countTextValue:SetText(string.format("%.1fx", value))
-                CooldownHighlights:SetCountTextScale(customTrackerKey, slotIndex, value)
-            end)
-            
-            controls.countTextColorBtn:SetScript("OnClick", function()
-                local r, g, b = controls.countTextColorBtn:GetBackdropColor()
-                local info = {
-                    swatchFunc = function()
-                        local r, g, b = ColorPickerFrame:GetColorRGB()
-                        controls.countTextColorBtn:SetBackdropColor(r, g, b, 1)
-                        CooldownHighlights:SetCountTextColor(customTrackerKey, slotIndex, {r, g, b, 1})
-                    end,
-                    cancelFunc = function(prev)
-                        controls.countTextColorBtn:SetBackdropColor(prev.r, prev.g, prev.b, 1)
-                        CooldownHighlights:SetCountTextColor(customTrackerKey, slotIndex, {prev.r, prev.g, prev.b, 1})
-                    end,
-                    r = r,
-                    g = g,
-                    b = b,
-                }
-                ColorPickerFrame:SetupColorPickerAndShow(info)
-            end)
-            
-            controls.countTextOffsetXSlider:SetScript("OnValueChanged", function(self, value)
-                value = math.floor(value)
-                controls.countTextOffsetXValue:SetText(tostring(value))
-                CooldownHighlights:SetCountTextOffsetX(customTrackerKey, slotIndex, value)
-            end)
-            
-            controls.countTextOffsetYSlider:SetScript("OnValueChanged", function(self, value)
-                value = math.floor(value)
-                controls.countTextOffsetYValue:SetText(tostring(value))
-                CooldownHighlights:SetCountTextOffsetY(customTrackerKey, slotIndex, value)
-            end)
-            
-            -- Label handlers
+            -- Label control event handlers
             controls.labelEnableCheck:SetScript("OnClick", function(self)
                 CooldownHighlights:SetLabelEnabled(customTrackerKey, slotIndex, self:GetChecked())
+                Cooldowns:SaveSettings()
             end)
             
             controls.labelTextBox:SetScript("OnEnterPressed", function(self)
                 self:ClearFocus()
                 CooldownHighlights:SetLabelText(customTrackerKey, slotIndex, self:GetText())
+                Cooldowns:SaveSettings()
             end)
             controls.labelTextBox:SetScript("OnEditFocusLost", function(self)
                 CooldownHighlights:SetLabelText(customTrackerKey, slotIndex, self:GetText())
+                Cooldowns:SaveSettings()
             end)
             
             controls.labelSizeSlider:SetScript("OnValueChanged", function(self, value)
                 value = math.floor(value)
                 controls.labelSizeValue:SetText(tostring(value))
                 CooldownHighlights:SetLabelFontSize(customTrackerKey, slotIndex, value)
+                Cooldowns:SaveSettings()
             end)
             
             controls.labelColorBtn:SetScript("OnClick", function()
-                local r, g, b = controls.labelColorBtn:GetBackdropColor()
+                local currentColor = CooldownHighlights:GetLabelColor(customTrackerKey, slotIndex)
+                local r, g, b, a = currentColor[1] or 1, currentColor[2] or 1, currentColor[3] or 1, currentColor[4] or 1
+                
                 local info = {
                     swatchFunc = function()
-                        local r, g, b = ColorPickerFrame:GetColorRGB()
-                        controls.labelColorBtn:SetBackdropColor(r, g, b, 1)
-                        CooldownHighlights:SetLabelColor(customTrackerKey, slotIndex, {r, g, b, 1})
+                        local nr, ng, nb = ColorPickerFrame:GetColorRGB()
+                        local na = ColorPickerFrame:GetColorAlpha() or 1
+                        controls.labelColorBtn:SetBackdropColor(nr, ng, nb, na)
+                        CooldownHighlights:SetLabelColor(customTrackerKey, slotIndex, {nr, ng, nb, na})
+                        Cooldowns:SaveSettings()
+                    end,
+                    opacityFunc = function()
+                        local nr, ng, nb = ColorPickerFrame:GetColorRGB()
+                        local na = ColorPickerFrame:GetColorAlpha() or 1
+                        controls.labelColorBtn:SetBackdropColor(nr, ng, nb, na)
+                        CooldownHighlights:SetLabelColor(customTrackerKey, slotIndex, {nr, ng, nb, na})
+                        Cooldowns:SaveSettings()
                     end,
                     cancelFunc = function(prev)
-                        controls.labelColorBtn:SetBackdropColor(prev.r, prev.g, prev.b, 1)
-                        CooldownHighlights:SetLabelColor(customTrackerKey, slotIndex, {prev.r, prev.g, prev.b, 1})
+                        controls.labelColorBtn:SetBackdropColor(prev.r, prev.g, prev.b, prev.a or 1)
+                        CooldownHighlights:SetLabelColor(customTrackerKey, slotIndex, {prev.r, prev.g, prev.b, prev.a or 1})
+                        Cooldowns:SaveSettings()
                     end,
+                    hasOpacity = true,
+                    opacity = a,
                     r = r,
                     g = g,
                     b = b,
@@ -10939,12 +11036,116 @@ function Cooldowns:CreateCustomTrackersPanel()
                 value = math.floor(value)
                 controls.labelOffsetXValue:SetText(tostring(value))
                 CooldownHighlights:SetLabelOffsetX(customTrackerKey, slotIndex, value)
+                Cooldowns:SaveSettings()
             end)
             
             controls.labelOffsetYSlider:SetScript("OnValueChanged", function(self, value)
                 value = math.floor(value)
                 controls.labelOffsetYValue:SetText(tostring(value))
                 CooldownHighlights:SetLabelOffsetY(customTrackerKey, slotIndex, value)
+                Cooldowns:SaveSettings()
+            end)
+            
+            -- Hide icon checkbox handler
+            controls.hideCheck:SetScript("OnClick", function(self)
+                CooldownHighlights:SetIconHidden(customTrackerKey, slotIndex, self:GetChecked())
+                Cooldowns:SaveSettings()
+                -- Refresh the custom tracker layout
+                if LayoutCustomTrackerIcons then
+                    LayoutCustomTrackerIcons()
+                end
+            end)
+            
+            -- Cooldown text control handlers
+            controls.cooldownTextSlider:SetScript("OnValueChanged", function(self, value)
+                value = math.floor(value * 10) / 10
+                controls.cooldownTextValue:SetText(string.format("%.1f", value))
+                CooldownHighlights:SetCooldownTextScale(customTrackerKey, slotIndex, value)
+                Cooldowns:SaveSettings()
+            end)
+            
+            controls.cooldownTextColorBtn:SetScript("OnClick", function()
+                local currentColor = CooldownHighlights:GetCooldownTextColor(customTrackerKey, slotIndex)
+                local r, g, b = currentColor[1] or 1, currentColor[2] or 1, currentColor[3] or 1
+                
+                local info = {
+                    swatchFunc = function()
+                        local nr, ng, nb = ColorPickerFrame:GetColorRGB()
+                        controls.cooldownTextColorBtn:SetBackdropColor(nr, ng, nb, 1)
+                        CooldownHighlights:SetCooldownTextColor(customTrackerKey, slotIndex, {nr, ng, nb})
+                        Cooldowns:SaveSettings()
+                    end,
+                    cancelFunc = function(prev)
+                        controls.cooldownTextColorBtn:SetBackdropColor(prev.r, prev.g, prev.b, 1)
+                        CooldownHighlights:SetCooldownTextColor(customTrackerKey, slotIndex, {prev.r, prev.g, prev.b})
+                        Cooldowns:SaveSettings()
+                    end,
+                    hasOpacity = false,
+                    r = r,
+                    g = g,
+                    b = b,
+                }
+                ColorPickerFrame:SetupColorPickerAndShow(info)
+            end)
+            
+            controls.cooldownTextOffsetXSlider:SetScript("OnValueChanged", function(self, value)
+                value = math.floor(value)
+                controls.cooldownTextOffsetXValue:SetText(tostring(value))
+                CooldownHighlights:SetCooldownTextOffsetX(customTrackerKey, slotIndex, value)
+                Cooldowns:SaveSettings()
+            end)
+            
+            controls.cooldownTextOffsetYSlider:SetScript("OnValueChanged", function(self, value)
+                value = math.floor(value)
+                controls.cooldownTextOffsetYValue:SetText(tostring(value))
+                CooldownHighlights:SetCooldownTextOffsetY(customTrackerKey, slotIndex, value)
+                Cooldowns:SaveSettings()
+            end)
+            
+            -- Count text control handlers
+            controls.countTextSlider:SetScript("OnValueChanged", function(self, value)
+                value = math.floor(value * 10) / 10
+                controls.countTextValue:SetText(string.format("%.1f", value))
+                CooldownHighlights:SetCountTextScale(customTrackerKey, slotIndex, value)
+                Cooldowns:SaveSettings()
+            end)
+            
+            controls.countTextColorBtn:SetScript("OnClick", function()
+                local currentColor = CooldownHighlights:GetCountTextColor(customTrackerKey, slotIndex)
+                local r, g, b = currentColor[1] or 1, currentColor[2] or 1, currentColor[3] or 1
+                
+                local info = {
+                    swatchFunc = function()
+                        local nr, ng, nb = ColorPickerFrame:GetColorRGB()
+                        controls.countTextColorBtn:SetBackdropColor(nr, ng, nb, 1)
+                        CooldownHighlights:SetCountTextColor(customTrackerKey, slotIndex, {nr, ng, nb})
+                        Cooldowns:SaveSettings()
+                    end,
+                    cancelFunc = function(prev)
+                        controls.countTextColorBtn:SetBackdropColor(prev.r, prev.g, prev.b, 1)
+                        CooldownHighlights:SetCountTextColor(customTrackerKey, slotIndex, {prev.r, prev.g, prev.b})
+                        Cooldowns:SaveSettings()
+                    end,
+                    hasOpacity = false,
+                    r = r,
+                    g = g,
+                    b = b,
+                }
+                ColorPickerFrame:SetupColorPickerAndShow(info)
+            end)
+            
+            controls.countTextOffsetXSlider:SetScript("OnValueChanged", function(self, value)
+                value = math.floor(value)
+                controls.countTextOffsetXValue:SetText(tostring(value))
+                CooldownHighlights:SetCountTextOffsetX(customTrackerKey, slotIndex, value)
+                Cooldowns:SaveSettings()
+            end)
+            
+            controls.countTextOffsetYSlider:SetScript("OnValueChanged", function(self, value)
+                value = math.floor(value)
+                controls.countTextOffsetYValue:SetText(tostring(value))
+                CooldownHighlights:SetCountTextOffsetY(customTrackerKey, slotIndex, value)
+                Cooldowns:SaveSettings()
             end)
         end
         
@@ -11063,15 +11264,15 @@ function Cooldowns:CreateCustomTrackersPanel()
             end
         end
         
-        -- Set up refresh button script (button created at top of tab)
+        C_Timer.After(0.1, RefreshSlotList)
+        
+        -- Set the refresh button script (button created at top of tab)
         refreshBtn:SetScript("OnClick", function()
             selectedSlot = nil
             RefreshSlotList()
         end)
         
-        C_Timer.After(0.1, RefreshSlotList)
-        
-        parent:SetHeight(800)  -- Taller to accommodate all controls
+        parent:SetHeight(math.abs(y) + 370)
     end
     
     -- Build tab content builders
@@ -11169,6 +11370,40 @@ end
 -- ============================================================================
 
 function Cooldowns:OnInitialize()
+    -- Load settings from database
+    local dbSettings = TUICD.Database:GetModuleSettings(TUICD.MODULE_IDS.COOLDOWNS)
+    
+    -- Start with defaults
+    settings = DeepCopy(DEFAULTS)
+    
+    -- Merge saved settings (deep copy nested tables to avoid reference sharing)
+    if dbSettings then
+        for key, trackerSettings in pairs(dbSettings) do
+            if settings[key] and type(trackerSettings) == "table" then
+                for k, v in pairs(trackerSettings) do
+                    -- Migration: old "spacing" -> "spacingH" and "spacingV"
+                    if k == "spacing" then
+                        settings[key]["spacingH"] = v
+                        settings[key]["spacingV"] = v
+                    elseif type(v) == "table" then
+                        -- Deep copy nested tables to avoid reference sharing between profiles
+                        settings[key][k] = DeepCopy(v)
+                    else
+                        settings[key][k] = v
+                    end
+                end
+            elseif key == "global" and type(trackerSettings) == "table" then
+                for k, v in pairs(trackerSettings) do
+                    if type(v) == "table" then
+                        settings.global[k] = DeepCopy(v)
+                    else
+                        settings.global[k] = v
+                    end
+                end
+            end
+        end
+    end
+    
     -- Initialize layout update flags
     for _, tracker in ipairs(TRACKERS) do
         needsLayoutUpdate[tracker.key] = false
@@ -11179,18 +11414,49 @@ function Cooldowns:OnInitialize()
     InitializeMasque()
     
     dprint("Cooldowns module initialized")
-end
-
--- Public Initialize function called by Main.lua
-function Cooldowns:Initialize()
-    self:OnInitialize()
-    self:OnEnable()
-    self.loaded = true
-    self.enabled = true
+    if dbSettings then
+        dprint("Loaded saved settings")
+        -- Debug: show loaded custom tracker position
+        if settings.customTrackers then
+            dprint(string.format("Custom tracker position loaded: %s, %.1f, %.1f", 
+                settings.customTrackers.point or "nil",
+                settings.customTrackers.x or 0,
+                settings.customTrackers.y or 0))
+        end
+    else
+        dprint("No saved settings found, using defaults")
+    end
 end
 
 
 function Cooldowns:OnEnable()
+    -- AGGRESSIVE EARLY HIDING: Use OnUpdate for frame-by-frame hiding
+    -- This is more aggressive than a ticker and catches the very first frame
+    local hideFrame = CreateFrame("Frame")
+    hideFrame.elapsed = 0
+    hideFrame:SetScript("OnUpdate", function(self, elapsed)
+        local TUIFrame = TUICD.TUIFrame
+        if TUIFrame and TUIFrame.IsInitializationComplete and TUIFrame.IsInitializationComplete() then
+            -- Init complete, stop hiding
+            self:SetScript("OnUpdate", nil)
+            return
+        end
+        
+        -- Hide all Blizzard viewers every single frame
+        for _, tracker in ipairs(TRACKERS) do
+            local viewer = _G[tracker.name]
+            if viewer and viewer:GetAlpha() > 0 then
+                viewer:SetAlpha(0)
+            end
+        end
+        
+        -- Safety timeout after 5 seconds
+        self.elapsed = self.elapsed + elapsed
+        if self.elapsed > 5.0 then
+            self:SetScript("OnUpdate", nil)
+        end
+    end)
+    
     -- Register events
     eventFrame:RegisterEvent("ADDON_LOADED")
     eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
@@ -11202,78 +11468,107 @@ function Cooldowns:OnEnable()
     eventFrame:RegisterEvent("ZONE_CHANGED_NEW_AREA")   -- Instance changes
     eventFrame:RegisterEvent("UNIT_AURA")               -- Buff changes (for activity)
     eventFrame:RegisterEvent("PLAYER_TARGET_CHANGED")   -- Target changes
-    eventFrame:RegisterEvent("PLAYER_MOUNT_DISPLAY_CHANGED")  -- Mount state changes
+    eventFrame:RegisterEvent("PLAYER_MOUNT_DISPLAY_CHANGED")  -- Mount changes
     eventFrame:RegisterEvent("EDIT_MODE_LAYOUTS_UPDATED")  -- Edit Mode positions applied
     eventFrame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")  -- Gear changes for equipped items tracker
     eventFrame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")  -- Spec changes for per-spec entries
-    eventFrame:RegisterEvent("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW")  -- Proc glow started
-    eventFrame:RegisterEvent("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE")  -- Proc glow ended
     
     eventFrame:SetScript("OnEvent", OnEvent)
     eventFrame:SetScript("OnUpdate", OnUpdate)
     
-    -- Hook Edit Mode for tracker visibility (fallback for Blizzard Edit Mode)
-    if EditModeManagerFrame then
-        EditModeManagerFrame:HookScript("OnShow", function()
-            dprint("Blizzard Edit Mode opened")
+    -- NOTE: We intentionally do NOT hook Blizzard's EditModeManagerFrame
+    -- TUICD elements should be positioned via TUI's Layout Mode (/tui layout), not Blizzard Edit Mode
+    -- Hooking EditModeManagerFrame causes taint issues with Blizzard's protected frames
+    
+    -- Hook TUI Layout mode for tracker visibility
+    if TUICD.Layout then
+        TUICD.Layout:RegisterCallback("OnLayoutModeEnter", function()
+            dprint("TUI Layout Mode opened")
             
-            -- Force show all Blizzard trackers for Edit Mode positioning
+            -- Force show all trackers for Layout positioning
             for _, tracker in ipairs(TRACKERS) do
                 local viewer = _G[tracker.name]
                 if viewer then
-                    viewer:Show()
-                    viewer:SetAlpha(1.0)
+                    -- Fix potential duplicate layoutIndex before showing (Blizzard CDM stale icon bug)
+                    pcall(function()
+                        local children = {viewer:GetChildren()}
+                        local seenIndices = {}
+                        local hasDuplicates = false
+                        
+                        for _, child in ipairs(children) do
+                            if child.layoutIndex then
+                                if seenIndices[child.layoutIndex] then
+                                    hasDuplicates = true
+                                    break
+                                end
+                                seenIndices[child.layoutIndex] = true
+                            end
+                        end
+                        
+                        if hasDuplicates then
+                            local iconsWithIndex = {}
+                            for _, child in ipairs(children) do
+                                if child.layoutIndex then
+                                    table.insert(iconsWithIndex, child)
+                                end
+                            end
+                            table.sort(iconsWithIndex, function(a, b)
+                                return (a.layoutIndex or 0) < (b.layoutIndex or 0)
+                            end)
+                            for i, icon in ipairs(iconsWithIndex) do
+                                icon.layoutIndex = i
+                            end
+                            dprint("Fixed duplicate layoutIndex for " .. tracker.key .. " in Layout Mode")
+                        end
+                    end)
+                    
+                    -- Wrap in pcall to handle Midnight secret value errors
+                    pcall(function()
+                        viewer:Show()
+                        viewer:SetAlpha(1.0)
+                    end)
                     ApplyGridLayout(viewer, tracker.key)
+                end
+                
+                -- Also ensure the container and wrapper are shown
+                local container = _G["TweaksUI_CDContainer_" .. tracker.key]
+                if container then
+                    container:Show()
+                    local parent = container:GetParent()
+                    if parent then
+                        parent:Show()
+                    end
                 end
             end
             
-            -- Force show custom tracker for Edit Mode (unless hidden by Individual Icons settings)
+            -- Force show custom tracker
             if customTrackerFrame then
-                -- Don't show if hidden by Individual Icons settings
-                local isHiddenByPerIcon = TUICD.CooldownHighlights and TUICD.CooldownHighlights.IsTrackerHidden and TUICD.CooldownHighlights:IsTrackerHidden("custom")
-                if not isHiddenByPerIcon then
-                    customTrackerFrame:Show()
-                    
-                    -- Disable mouse on icons so selection can be clicked
-                    for _, iconFrame in pairs(customTrackerIcons) do
-                        iconFrame:EnableMouse(false)
-                    end
-                    
-                    LayoutCustomTrackerIcons()
+                customTrackerFrame:Show()
+                for _, iconFrame in pairs(customTrackerIcons) do
+                    iconFrame:EnableMouse(false)
+                end
+                LayoutCustomTrackerIcons()
+                
+                -- Also ensure wrapper is shown
+                local parent = customTrackerFrame:GetParent()
+                if parent then
+                    parent:Show()
                 end
             end
         end)
         
-        -- Hook Edit Mode exit to restore visibility rules
-        EditModeManagerFrame:HookScript("OnHide", function()
-            dprint("Blizzard Edit Mode closed")
+        TUICD.Layout:RegisterCallback("OnLayoutModeExit", function()
+            dprint("TUI Layout Mode closed")
             
-            -- Re-apply visibility rules for all Blizzard trackers
+            -- Re-apply visibility rules
             for _, tracker in ipairs(TRACKERS) do
                 UpdateTrackerVisibility(tracker.key)
             end
             
-            -- Handle custom tracker
             if customTrackerFrame then
-                -- Re-enable mouse on icons for tooltips
                 for _, iconFrame in pairs(customTrackerIcons) do
                     iconFrame:EnableMouse(true)
                 end
-                
-                -- Only restore position if NOT managed by CooldownContainers/Layout
-                local containerManaged = TUICD.CooldownContainers and TUICD.CooldownContainers:IsEnabled()
-                if not containerManaged then
-                    local savedPoint = GetSetting("customTrackers", "point") or "CENTER"
-                    local savedX = GetSetting("customTrackers", "x") or 0
-                    local savedY = GetSetting("customTrackers", "y") or -200
-                    
-                    dprint(string.format("Restoring custom tracker pos: %s, %.1f, %.1f", savedPoint, savedX, savedY))
-                    
-                    customTrackerFrame:ClearAllPoints()
-                    customTrackerFrame:SetPoint(savedPoint, savedX, savedY)
-                end
-                
-                -- Re-apply visibility rules now that Edit Mode is closed
                 UpdateCustomTrackerVisibility()
             end
         end)
@@ -11282,9 +11577,21 @@ function Cooldowns:OnEnable()
     -- Hook viewers immediately (they might already exist)
     HookAllViewers()
     
-    -- Schedule additional hook attempt
+    -- Schedule additional hook attempts
     C_Timer.After(1.0, HookAllViewers)
     C_Timer.After(3.0, HookAllViewers)
+    
+    -- CRITICAL: Apply initial layout to all viewers (mimics PLAYER_ENTERING_WORLD handler)
+    -- This is needed because that event has already fired before OnEnable runs
+    C_Timer.After(0.5, function()
+        for _, tracker in ipairs(TRACKERS) do
+            local viewer = _G[tracker.name]
+            if viewer then
+                ApplyGridLayout(viewer, tracker.key)
+                dprint(string.format("Initial layout applied to [%s]", tracker.key))
+            end
+        end
+    end)
     
     -- Apply clickthrough settings after viewers are hooked
     C_Timer.After(1.5, ApplyAllClickthrough)
@@ -11302,6 +11609,17 @@ function Cooldowns:OnEnable()
     
     -- Delay custom tracker rebuild to ensure data is loaded
     C_Timer.After(1.0, RebuildCustomTrackerIcons)
+    
+    -- Initialize Dynamic Docks system
+    if TUICD.Docks and TUICD.Docks.Initialize then
+        TUICD.Docks:Initialize()
+        dprint("Dynamic Docks initialized")
+    end
+    
+    -- Initialize Docks UI
+    if TUICD.DocksUI and TUICD.DocksUI.Initialize then
+        TUICD.DocksUI:Initialize()
+    end
     
     dprint("Cooldowns module enabled")
 end
@@ -11377,8 +11695,14 @@ function Cooldowns:OnProfileChanged(profileName)
     end
 end
 
--- Note: Settings are saved automatically by the Database system
--- No need for manual PLAYER_LOGOUT handler
+-- Save settings on logout
+local saveFrame = CreateFrame("Frame")
+saveFrame:RegisterEvent("PLAYER_LOGOUT")
+saveFrame:SetScript("OnEvent", function()
+    if settings then
+        TUICD.Database:SetModuleSettings(TUICD.MODULE_IDS.COOLDOWNS, settings)
+    end
+end)
 
 -- ============================================================================
 -- LAYOUT INTEGRATION
@@ -11408,27 +11732,38 @@ end
 -- Register with Layout after CooldownContainers is fully initialized and enabled
 -- CooldownContainers: initializes at 3s, enables at 4s, registers Layout at 4.3s
 -- We wait until 5s to ensure everything is ready
+-- Only register if Cooldowns module is enabled
 C_Timer.After(5, function()
-    -- Always register in standalone addon (no module enable check needed)
-    RegisterCooldownsWithLayout()
+    if TUICD.Database and TUICD.Database:IsModuleEnabled(TUICD.MODULE_IDS.COOLDOWNS) then
+        RegisterCooldownsWithLayout()
+    end
 end)
 
--- Debug slash commands (supplements main /tuicd command)
--- Main /tuicd is in Main.lua, these are additional debug commands
-SLASH_TUICDDEBUG1 = "/tuicddebug"
-SlashCmdList["TUICDDEBUG"] = function(msg)
+-- Debug slash command
+-- SLASH_TUICD1 = "/tuicd" -- Removed: handled by Main.lua
+-- SlashCmdList["TUICD"] = function -- Removed: handled by Main.lua
+local function OldSlashHandler(msg)
     msg = msg:lower():trim()
     
-    if msg == "custom" then
+    if msg == "debug" then
+        -- Toggle debug mode
+        if settings and settings.global then
+            settings.global.debugMode = not settings.global.debugMode
+            print("|cff00ff00[TUICD CD]|r Debug mode:", settings.global.debugMode and "ON" or "OFF")
+        end
+    
+    elseif msg == "custom" then
         -- Debug custom tracker position specifically
-        print("|cff00ff00[TUI:CD]|r Custom Tracker Debug:")
-        local ctSettings = TUICD.Database:GetTrackerSettings("customTrackers")
-        print("  Settings exists:", ctSettings and "YES" or "NO")
-        if ctSettings then
-            print("  Enabled:", ctSettings.enabled and "YES" or "NO")
-            print("  Saved point:", tostring(ctSettings.point))
-            print("  Saved x:", tostring(ctSettings.x))
-            print("  Saved y:", tostring(ctSettings.y))
+        print("|cff00ff00[TUICD CD]|r Custom Tracker Debug:")
+        print("  Settings exists:", settings and "YES" or "NO")
+        if settings then
+            print("  customTrackers table:", settings.customTrackers and "YES" or "NO")
+            if settings.customTrackers then
+                print("  Enabled:", settings.customTrackers.enabled and "YES" or "NO")
+                print("  Saved point:", tostring(settings.customTrackers.point))
+                print("  Saved x:", tostring(settings.customTrackers.x))
+                print("  Saved y:", tostring(settings.customTrackers.y))
+            end
         end
         print("  Frame exists:", customTrackerFrame and "YES" or "NO")
         if customTrackerFrame then
@@ -11436,19 +11771,83 @@ SlashCmdList["TUICDDEBUG"] = function(msg)
             print("  Current position:", point, x, y)
             print("  Frame shown:", customTrackerFrame:IsShown() and "YES" or "NO")
         end
+        print("  TUICD.EditMode:", TUICD.EditMode and "YES" or "NO")
         
     elseif msg == "dump" then
         -- Dump icon structure
-        print("|cff00ff00[TUI:CD]|r Dumping icon structures...")
+        print("|cff00ff00[TUICD CD]|r Dumping icon structures...")
         for _, tracker in ipairs(TRACKERS) do
             local viewer = _G[tracker.name]
             if viewer and viewer:IsShown() then
                 print("  " .. tracker.key .. ":")
                 local icons = CollectIcons(viewer)
                 for i, icon in ipairs(icons) do
-                    if i <= 2 and icon:IsShown() then
+                    if i <= 2 and icon:IsShown() then  -- Only first 2 shown icons
                         local name = icon:GetName() or "unnamed"
                         print("    Icon " .. i .. ": " .. name)
+                        -- Check for fields
+                        local fields = {}
+                        if icon.Border then table.insert(fields, "Border") end
+                        if icon.border then table.insert(fields, "border") end
+                        if icon.IconBorder then table.insert(fields, "IconBorder") end
+                        if icon.Icon then table.insert(fields, "Icon") end
+                        if icon.icon then table.insert(fields, "icon") end
+                        if icon.Cooldown then table.insert(fields, "Cooldown") end
+                        if icon.cooldown then table.insert(fields, "cooldown") end
+                        if icon.Count then table.insert(fields, "Count") end
+                        if icon.count then table.insert(fields, "count") end
+                        if icon.GetNormalTexture and icon:GetNormalTexture() then table.insert(fields, "NormalTexture") end
+                        print("      Fields: " .. table.concat(fields, ", "))
+                        
+                        -- Check regions for FontStrings
+                        if icon.GetRegions then
+                            local fontStrings = {}
+                            for _, region in ipairs({icon:GetRegions()}) do
+                                if region:GetObjectType() == "FontString" then
+                                    local fsName = region:GetName() or "unnamed"
+                                    local fsText = region:GetText() or ""
+                                    table.insert(fontStrings, fsName .. "='" .. fsText .. "'")
+                                end
+                            end
+                            if #fontStrings > 0 then
+                                print("      FontStrings: " .. table.concat(fontStrings, ", "))
+                            end
+                        end
+                        
+                        -- Check children
+                        if icon.GetChildren then
+                            for _, child in ipairs({icon:GetChildren()}) do
+                                local childName = child:GetName() or child:GetObjectType()
+                                print("      Child: " .. childName)
+                                
+                                -- Check child for FontStrings
+                                if child.GetRegions then
+                                    for _, region in ipairs({child:GetRegions()}) do
+                                        if region:GetObjectType() == "FontString" then
+                                            local fsName = region:GetName() or "unnamed"
+                                            local fsText = region:GetText() or ""
+                                            print("        FontString: " .. fsName .. " = '" .. fsText .. "'")
+                                        end
+                                    end
+                                end
+                                
+                                -- Check grandchildren
+                                if child.GetChildren then
+                                    for _, grandchild in ipairs({child:GetChildren()}) do
+                                        local gcName = grandchild:GetName() or grandchild:GetObjectType()
+                                        if grandchild.GetRegions then
+                                            for _, region in ipairs({grandchild:GetRegions()}) do
+                                                if region:GetObjectType() == "FontString" then
+                                                    local fsName = region:GetName() or "unnamed"
+                                                    local fsText = region:GetText() or ""
+                                                    print("          " .. gcName .. " FontString: " .. fsName .. " = '" .. fsText .. "'")
+                                                end
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
                     end
                 end
             end
@@ -11456,53 +11855,95 @@ SlashCmdList["TUICDDEBUG"] = function(msg)
         
     elseif msg == "test" then
         -- Test settings persistence
-        print("|cff00ff00[TUI:CD]|r Testing settings...")
-        local essSettings = TUICD.Database:GetTrackerSettings("essential")
-        print("  essential settings exists:", essSettings ~= nil)
-        if essSettings then
-            print("    iconSize:", essSettings.iconSize)
-            print("    columns:", essSettings.columns)
+        print("|cff00ff00[TUICD CD]|r Testing settings...")
+        print("  settings table exists:", settings ~= nil)
+        if settings then
+            print("  settings.essential:", settings.essential ~= nil)
+            if settings.essential then
+                print("    iconSize:", settings.essential.iconSize)
+                print("    columns:", settings.essential.columns)
+            end
+        end
+        -- Check database
+        local dbSettings = TUICD.Database:GetModuleSettings(TUICD.MODULE_IDS.COOLDOWNS)
+        print("  DB settings exists:", dbSettings ~= nil)
+        if dbSettings and dbSettings.essential then
+            print("    DB iconSize:", dbSettings.essential.iconSize)
         end
         
     elseif msg == "reset" then
         -- Clear saved order and recapture all trackers
-        print("|cff00ff00[TUI:CD]|r Clearing saved icon order and recapturing...")
-        ClearIconOrderCache(nil, true)
+        print("|cff00ff00[TUICD CD]|r Clearing saved icon order and recapturing...")
+        ClearIconOrderCache(nil, true)  -- Clear all including persistent
         for _, tracker in ipairs(TRACKERS) do
             local viewer = _G[tracker.name]
             if viewer and viewer:IsShown() then
                 ApplyGridLayout(viewer, tracker.key)
             end
         end
-        print("|cff00ff00[TUI:CD]|r Reset complete.")
+        print("|cff00ff00[TUICD CD]|r Reset complete. Icon order saved from current positions.")
     
     elseif msg == "resetbuffs" then
-        print("|cff00ff00[TUI:CD]|r Clearing buffs icon order...")
-        ClearIconOrderCache("buffs", true)
+        -- Clear saved order for just buffs tracker
+        print("|cff00ff00[TUICD CD]|r Clearing buffs icon order and recapturing...")
+        ClearIconOrderCache("buffs", true)  -- Clear including persistent
         local viewer = _G["BuffIconCooldownViewer"]
         if viewer and viewer:IsShown() then
             ApplyGridLayout(viewer, "buffs")
-            print("|cff00ff00[TUI:CD]|r Buffs tracker reset complete.")
+            print("|cff00ff00[TUICD CD]|r Buffs tracker reset complete.")
+        else
+            print("|cff00ff00[TUICD CD]|r Buffs tracker not visible - show it first.")
         end
     
     elseif msg == "order" then
-        print("|cff00ff00[TUI:CD]|r Saved icon order:")
+        -- Show current saved order for all trackers
+        print("|cff00ff00[TUICD CD]|r Saved icon order:")
         for _, tracker in ipairs(TRACKERS) do
             local savedOrder = GetSetting(tracker.key, "savedIconOrder")
             if savedOrder and #savedOrder > 0 then
-                print(string.format("  [%s]: %d icons", tracker.key, #savedOrder))
+                print(string.format("  [%s]: %d icons - %s", tracker.key, #savedOrder, table.concat(savedOrder, ", ")))
             else
                 print(string.format("  [%s]: (no saved order)", tracker.key))
             end
         end
         
-    elseif msg == "rebuild" then
-        print("|cff00ff00[TUI:CD]|r Rebuilding custom trackers...")
+    elseif msg == "cache" then
+        -- Show current session cache order for all trackers
+        print("|cff00ff00[TUICD CD]|r Session cache order:")
+        for _, tracker in ipairs(TRACKERS) do
+            local cached = iconOrderCache[tracker.key]
+            if cached and #cached > 0 then
+                local ids = {}
+                for i, icon in ipairs(cached) do
+                    ids[i] = GetIconTextureID(icon)
+                end
+                print(string.format("  [%s]: %d icons - %s", tracker.key, #cached, table.concat(ids, ", ")))
+            else
+                print(string.format("  [%s]: (no cache)", tracker.key))
+            end
+        end
+        
+    elseif msg == "resete" or msg == "resetessential" then
+        -- Clear saved order for essential tracker and recapture
+        print("|cff00ff00[TUICD CD]|r Clearing essential icon order and recapturing...")
+        ClearIconOrderCache("essential", true)
+        local viewer = _G["EssentialCooldownViewer"]
+        if viewer and viewer:IsShown() then
+            ApplyGridLayout(viewer, "essential")
+            print("|cff00ff00[TUICD CD]|r Essential tracker reset complete.")
+        else
+            print("|cff00ff00[TUICD CD]|r Essential tracker not visible - show it first.")
+        end
+        
+    elseif msg == "custom" then
+        -- Rebuild custom trackers
+        print("|cff00ff00[TUICD CD]|r Rebuilding custom trackers...")
         RebuildCustomTrackerIcons()
-        print("|cff00ff00[TUI:CD]|r Custom trackers rebuilt.")
+        print("|cff00ff00[TUICD CD]|r Custom trackers rebuilt.")
         
     elseif msg == "equipped" then
-        print("|cff00ff00[TUI:CD]|r Scanning equipped on-use items...")
+        -- Show equipped on-use items
+        print("|cff00ff00[TUICD CD]|r Scanning equipped on-use items...")
         local items = ScanEquippedOnUseItems()
         local count = 0
         for slotID, info in pairs(items) do
@@ -11513,15 +11954,68 @@ SlashCmdList["TUICDDEBUG"] = function(msg)
             print("  No equipped items with on-use abilities found.")
         end
         
+    elseif msg == "sizes" then
+        -- Debug icon sizes
+        print("|cff00ff00[TUICD CD]|r Icon Size Debug:")
+        
+        for _, tracker in ipairs(TRACKERS) do
+            local viewer = _G[tracker.name]
+            local trackerKey = tracker.key
+            
+            -- Get TUI settings
+            local tuiIconSize = GetSetting(trackerKey, "iconSize") or 36
+            local tuiAspect = GetSetting(trackerKey, "aspectRatio") or "1:1"
+            local tuiWidth = GetSetting(trackerKey, "iconWidth")
+            local tuiHeight = GetSetting(trackerKey, "iconHeight")
+            
+            print(string.format("  |cffffcc00%s:|r", tracker.name))
+            print(string.format("    TUI Settings: iconSize=%d, aspect=%s, customW=%s, customH=%s",
+                tuiIconSize, tuiAspect, tostring(tuiWidth), tostring(tuiHeight)))
+            
+            if viewer then
+                -- Get actual icon sizes
+                local icons = CollectIcons(viewer)
+                local shownCount = 0
+                local sizeStr = ""
+                for _, icon in ipairs(icons) do
+                    if icon:IsShown() then
+                        shownCount = shownCount + 1
+                        if shownCount <= 3 then
+                            local w, h = icon:GetWidth(), icon:GetHeight()
+                            sizeStr = sizeStr .. string.format("%.0fx%.0f ", w, h)
+                        end
+                    end
+                end
+                print(string.format("    Actual: %d icons shown, sizes: %s", shownCount, sizeStr))
+                
+                -- Try to get Edit Mode setting value
+                local settingID = HUD_EDIT_MODE_SETTING_COOLDOWN_VIEWER_ICON_SIZE
+                if settingID and viewer.GetSettingValue then
+                    local emSize = pcall(function() return viewer:GetSettingValue(settingID) end)
+                    print(string.format("    Edit Mode ICON_SIZE setting: %s", tostring(emSize)))
+                end
+            else
+                print("    (viewer not found)")
+            end
+        end
+        
     else
-        print("|cff00ff00[TUI:CD]|r Debug Commands:")
-        print("  /tuicddebug custom - Debug custom tracker")
-        print("  /tuicddebug dump - Dump icon structure")
-        print("  /tuicddebug test - Test settings")
-        print("  /tuicddebug reset - Reset all icon order")
-        print("  /tuicddebug resetbuffs - Reset buffs order")
-        print("  /tuicddebug order - Show saved order")
-        print("  /tuicddebug rebuild - Rebuild custom trackers")
-        print("  /tuicddebug equipped - Show on-use items")
+        print("|cff00ff00[TUICD CD]|r Commands:")
+        print("  /tuicd debug - Toggle debug mode")
+        print("  /tuicd dump - Dump icon structure info")
+        print("  /tuicd test - Test settings persistence")
+        print("  /tuicd reset - Clear and recapture ALL tracker icon order")
+        print("  /tuicd resetbuffs - Clear and recapture buffs tracker order")
+        print("  /tuicd order - Show saved icon order (texture fileIDs)")
+        print("  /tuicd custom - Rebuild custom trackers")
+        print("  /tuicd equipped - Show equipped on-use items")
+        print("  /tuicd sizes - Debug icon sizes")
+    end
+end
+
+-- Save settings to database
+function Cooldowns:SaveSettings()
+    if settings then
+        TUICD.Database:SetModuleSettings(TUICD.MODULE_IDS.COOLDOWNS, settings)
     end
 end

@@ -99,8 +99,10 @@ local function CreateButton()
         if btn == "LeftButton" then
             TUICD:ToggleSettings()
         elseif btn == "RightButton" then
-            if TUICD.LayoutMode then
-                TUICD.LayoutMode:Toggle()
+            if TUICD.Layout then
+                TUICD.Layout:Toggle()
+            elseif TUICD.LayoutUI then
+                TUICD.LayoutUI:Toggle()
             end
         end
     end)

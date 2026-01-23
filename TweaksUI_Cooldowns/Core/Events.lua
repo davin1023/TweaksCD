@@ -1,36 +1,12 @@
--- ============================================================================
--- TweaksUI: Cooldowns - Event System
--- Simple callback-based event system
--- ============================================================================
+-- TweaksUI: Cooldowns - Events
+-- Custom event system for inter-module communication
 
 local ADDON_NAME, TUICD = ...
 
 TUICD.Events = {}
 local Events = TUICD.Events
 
--- Event definitions
-TUICD.EVENTS = {
-    ADDON_LOADED = "ADDON_LOADED",
-    SETTINGS_CHANGED = "SETTINGS_CHANGED",
-    TRACKER_SETTINGS_CHANGED = "TRACKER_SETTINGS_CHANGED",
-    LAYOUT_UPDATE_NEEDED = "LAYOUT_UPDATE_NEEDED",
-    CUSTOM_ENTRIES_CHANGED = "CUSTOM_ENTRIES_CHANGED",
-    MIGRATION_COMPLETE = "MIGRATION_COMPLETE",
-    -- Profile events
-    PROFILE_LOADED = "PROFILE_LOADED",
-    PROFILE_NEEDS_RELOAD = "PROFILE_NEEDS_RELOAD",
-    PROFILE_SPEC_SWITCH_BLOCKED = "PROFILE_SPEC_SWITCH_BLOCKED",
-    -- Dock events
-    DOCKS_INITIALIZED = "DOCKS_INITIALIZED",
-    DOCK_SETTINGS_CHANGED = "DOCK_SETTINGS_CHANGED",
-    DOCK_ASSIGNMENT_CHANGED = "DOCK_ASSIGNMENT_CHANGED",
-    DOCK_LAYOUT_NEEDED = "DOCK_LAYOUT_NEEDED",
-    -- Layout Mode events
-    LAYOUT_MODE_ENTER = "LAYOUT_MODE_ENTER",
-    LAYOUT_MODE_EXIT = "LAYOUT_MODE_EXIT",
-}
-
--- Internal storage
+-- Registered callbacks
 local callbacks = {}
 
 -- Register a callback for an event
@@ -46,17 +22,6 @@ function Events:Register(event, callback, owner)
 end
 
 -- Unregister callbacks for an owner
-function Events:Unregister(event, owner)
-    if not callbacks[event] then return end
-    
-    for i = #callbacks[event], 1, -1 do
-        if callbacks[event][i].owner == owner then
-            table.remove(callbacks[event], i)
-        end
-    end
-end
-
--- Unregister all callbacks for an owner (all events)
 function Events:UnregisterAll(owner)
     for event, eventCallbacks in pairs(callbacks) do
         for i = #eventCallbacks, 1, -1 do
@@ -69,12 +34,62 @@ end
 
 -- Fire an event
 function Events:Fire(event, ...)
-    if not callbacks[event] then return end
+    if not callbacks[event] then
+        return
+    end
     
-    for _, entry in ipairs(callbacks[event]) do
-        local success, err = pcall(entry.callback, ...)
+    for _, cb in ipairs(callbacks[event]) do
+        local success, err = pcall(cb.callback, ...)
         if not success then
-            TUICD:PrintError("Event callback error (" .. event .. "): " .. tostring(err))
+            TUICD:PrintError("Event callback error for " .. event .. ": " .. tostring(err))
         end
     end
 end
+
+-- WoW Event frame for Blizzard events
+local eventFrame = CreateFrame("Frame")
+local blizzardCallbacks = {}
+
+-- Register for a Blizzard event
+function Events:RegisterBlizzard(event, callback, owner)
+    if not blizzardCallbacks[event] then
+        blizzardCallbacks[event] = {}
+        eventFrame:RegisterEvent(event)
+    end
+    
+    table.insert(blizzardCallbacks[event], {
+        callback = callback,
+        owner = owner,
+    })
+end
+
+-- Unregister Blizzard event callbacks for an owner
+function Events:UnregisterBlizzardAll(owner)
+    for event, eventCallbacks in pairs(blizzardCallbacks) do
+        for i = #eventCallbacks, 1, -1 do
+            if eventCallbacks[i].owner == owner then
+                table.remove(eventCallbacks, i)
+            end
+        end
+        
+        -- If no more callbacks for this event, unregister
+        if #eventCallbacks == 0 then
+            eventFrame:UnregisterEvent(event)
+            blizzardCallbacks[event] = nil
+        end
+    end
+end
+
+-- Handle Blizzard events
+eventFrame:SetScript("OnEvent", function(self, event, ...)
+    if not blizzardCallbacks[event] then
+        return
+    end
+    
+    for _, cb in ipairs(blizzardCallbacks[event]) do
+        local success, err = pcall(cb.callback, event, ...)
+        if not success then
+            TUICD:PrintError("Blizzard event callback error for " .. event .. ": " .. tostring(err))
+        end
+    end
+end)

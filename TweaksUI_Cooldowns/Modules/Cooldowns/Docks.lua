@@ -1,5 +1,5 @@
 -- ============================================================================
--- TweaksUI: Cooldowns - Docks Module
+-- TUICD: Cooldowns - Docks Module
 -- Dynamic icon grouping system with temporal ordering and flexible alignment
 -- Icons from any tracker can be assigned to docks via per-icon settings
 -- 
@@ -47,11 +47,12 @@ local dockedIcons = {}  -- [dockIndex] = { [iconKey] = { frame, originalParent, 
 local iconArrivalOrder = {}  -- [dockIndex] = { iconKey1, iconKey2, ... }
 local isInitialized = false
 local layoutQueued = {}
+local dockLayoutWrappers = {}  -- [dockIndex] = TUIFrame-compatible wrapper for Layout Mode
 
 -- Debug helper
 local function dprint(...)
     if TUICD.Database and TUICD.Database:GetGlobal("debugMode") == true then
-        print("|cff00ccff[TUI:CD Docks]|r", ...)
+        print("|cff00ccffTweaksUI Docks:|r", ...)
     end
 end
 
@@ -227,6 +228,11 @@ end
 local function EvaluateDockVisibility(dockIndex)
     local settings = GetDockSettings(dockIndex)
     
+    -- Always show in TUICD Layout Mode for positioning (even if disabled)
+    if TUICD.Layout and TUICD.Layout:IsActive() then
+        return true
+    end
+    
     if not settings.enabled then
         return false
     end
@@ -265,7 +271,7 @@ end
 -- ============================================================================
 
 local function CreateDockFrame(dockIndex)
-    local frameName = "TUICD_Dock_" .. dockIndex
+    local frameName = "TweaksUI_Dock_" .. dockIndex
     
     if _G[frameName] then
         return _G[frameName]
@@ -346,6 +352,266 @@ function Docks:ApplyDockAppearance(dockIndex)
 end
 
 -- ============================================================================
+-- LAYOUT MODE INTEGRATION
+-- Creates TUIFrame-compatible wrappers for docks so they appear in Layout Mode
+-- ============================================================================
+
+local function CreateDockLayoutWrapper(dockIndex)
+    local dock = docks[dockIndex]
+    if not dock then return nil end
+    
+    local settings = GetDockSettings(dockIndex)
+    local wrapperId = "Dock_" .. dockIndex
+    
+    -- Already has a wrapper
+    if dockLayoutWrappers[dockIndex] then
+        return dockLayoutWrappers[dockIndex]
+    end
+    
+    -- Create TUIFrame-compatible wrapper object
+    local wrapper = {
+        id = wrapperId,
+        frame = dock,
+        name = Docks:GetDockName(dockIndex),
+        category = "Cooldowns",
+        
+        -- Default position
+        defaultPosition = {
+            point = "CENTER",
+            x = 0,
+            y = -100 * dockIndex,  -- Stack docks vertically by default
+        },
+        
+        -- Position management
+        SetPosition = function(self, point, relFrame, relPoint, x, y)
+            if InCombatLockdown() then return end
+            
+            point = point or "CENTER"
+            relFrame = relFrame or UIParent
+            relPoint = relPoint or point
+            x = x or 0
+            y = y or 0
+            
+            dock:ClearAllPoints()
+            dock:SetPoint(point, relFrame, relPoint, x, y)
+            
+            -- Save to dock settings
+            SetDockSetting(dockIndex, "point", point)
+            SetDockSetting(dockIndex, "x", x)
+            SetDockSetting(dockIndex, "y", y)
+        end,
+        
+        GetSaveData = function(self)
+            local left = dock:GetLeft()
+            local bottom = dock:GetBottom()
+            
+            if not left or not bottom then
+                local point, _, _, x, y = dock:GetPoint(1)
+                return {
+                    point = point or "CENTER",
+                    x = x or 0,
+                    y = y or 0,
+                }
+            end
+            
+            return {
+                point = "BOTTOMLEFT",
+                x = left,
+                y = bottom,
+            }
+        end,
+        
+        LoadSaveData = function(self, data)
+            if not data then return end
+            if InCombatLockdown() then return end
+            
+            local point = data.point or "CENTER"
+            local x = data.x or 0
+            local y = data.y or 0
+            
+            dock:ClearAllPoints()
+            dock:SetPoint(point, UIParent, point, x, y)
+            
+            -- Save to dock settings
+            SetDockSetting(dockIndex, "point", point)
+            SetDockSetting(dockIndex, "x", x)
+            SetDockSetting(dockIndex, "y", y)
+        end,
+        
+        -- Size management
+        GetSize = function(self)
+            return dock:GetSize()
+        end,
+        
+        GetWidth = function(self)
+            return dock:GetWidth()
+        end,
+        
+        GetHeight = function(self)
+            return dock:GetHeight()
+        end,
+        
+        -- Scale (docks typically don't use scale, but provide the interface)
+        GetScale = function(self)
+            return dock:GetScale() or 1
+        end,
+        
+        SetScale = function(self, scale)
+            dock:SetScale(scale)
+        end,
+        
+        -- Visibility
+        Show = function(self)
+            dock:Show()
+        end,
+        
+        Hide = function(self)
+            dock:Hide()
+        end,
+        
+        IsShown = function(self)
+            return dock:IsShown()
+        end,
+        
+        -- Size locking (used by SnapLocking for size matching)
+        SetSizeLocked = function(self, locked)
+            self.sizeLocked = locked
+        end,
+        
+        IsSizeLocked = function(self)
+            return self.sizeLocked
+        end,
+        
+        -- Get outer size (for snap size matching)
+        GetOuterSize = function(self)
+            local left, bottom, width, height = dock:GetRect()
+            if width and height then
+                return width, height
+            end
+            return dock:GetSize()
+        end,
+        
+        -- FlyPaper snap detection
+        GetSnapPoints = function(self, tolerance)
+            local FlyPaper = LibStub and LibStub("LibFlyPaper-2.0", true)
+            if not FlyPaper or not FlyPaper.Stick then return nil end
+            
+            local point, relFrame, relPoint, x, y = FlyPaper.Stick(
+                dock,
+                "TUICD",
+                tolerance
+            )
+            if point and relFrame then
+                return relFrame, point, relPoint, x, y
+            end
+            return nil
+        end,
+        
+        -- GetSnapTarget (alias for GetSnapPoints, used by LayoutUI)
+        GetSnapTarget = function(self, tolerance)
+            local FlyPaper = LibStub and LibStub("LibFlyPaper-2.0", true)
+            if not FlyPaper or not FlyPaper.Stick then return nil end
+            
+            local point, relFrame, relPoint, x, y = FlyPaper.Stick(
+                dock,
+                "TUICD",
+                tolerance
+            )
+            if point and relFrame then
+                return relFrame, point, relPoint, x, y
+            end
+            return nil
+        end,
+        
+        -- Position changed callback
+        onPositionChanged = function(self, point, relFrame, relPoint, x, y)
+            SetDockSetting(dockIndex, "point", point)
+            SetDockSetting(dockIndex, "x", x)
+            SetDockSetting(dockIndex, "y", y)
+            dprint("Dock", dockIndex, "position saved via Layout Mode")
+        end,
+    }
+    
+    dock.tuiFrame = wrapper
+    dockLayoutWrappers[dockIndex] = wrapper
+    
+    -- Register with FlyPaper for snap highlighting
+    local FlyPaper = LibStub and LibStub("LibFlyPaper-2.0", true)
+    if FlyPaper and FlyPaper.AddFrame then
+        FlyPaper.AddFrame("TUICD", wrapperId, dock)
+    end
+    
+    dprint("Created Layout wrapper for dock", dockIndex)
+    return wrapper
+end
+
+local function RegisterDockWithLayout(dockIndex)
+    local Layout = TUICD.Layout
+    if not Layout or not Layout.RegisterElement then
+        dprint("Layout module not available for dock", dockIndex)
+        return false
+    end
+    
+    -- Ensure dock frame exists
+    local dock = docks[dockIndex]
+    if not dock then
+        dock = CreateDockFrame(dockIndex)
+    end
+    
+    if not dock then
+        dprint("Failed to create dock frame for", dockIndex)
+        return false
+    end
+    
+    -- Create wrapper
+    local wrapper = dockLayoutWrappers[dockIndex]
+    if not wrapper then
+        wrapper = CreateDockLayoutWrapper(dockIndex)
+    end
+    
+    if not wrapper then
+        dprint("Failed to create wrapper for dock", dockIndex)
+        return false
+    end
+    
+    local wrapperId = "Dock_" .. dockIndex
+    
+    -- Register with Layout
+    Layout:RegisterElement(wrapperId, {
+        name = Docks:GetDockName(dockIndex),
+        category = Layout.CATEGORIES and Layout.CATEGORIES.COOLDOWNS or "Cooldowns",
+        tuiFrame = wrapper,
+        defaultPosition = wrapper.defaultPosition,
+        onPositionChanged = function(id, pos)
+            if wrapper.onPositionChanged then
+                wrapper:onPositionChanged(pos.point, pos.relFrame, pos.relPoint, pos.x, pos.y)
+            end
+        end,
+    })
+    
+    dprint("Registered dock", dockIndex, "with Layout Mode as", wrapperId)
+    return true
+end
+
+local function UnregisterDockFromLayout(dockIndex)
+    local Layout = TUICD.Layout
+    if not Layout or not Layout.UnregisterElement then return end
+    
+    local wrapperId = "Dock_" .. dockIndex
+    Layout:UnregisterElement(wrapperId)
+    
+    dockLayoutWrappers[dockIndex] = nil
+    dprint("Unregistered dock", dockIndex, "from Layout Mode")
+end
+
+-- Register all docks with Layout Mode
+local function RegisterAllDocksWithLayout()
+    for i = 1, NUM_DOCKS do
+        RegisterDockWithLayout(i)
+    end
+end
+
+-- ============================================================================
 -- LAYOUT SYSTEM
 -- ============================================================================
 
@@ -399,11 +665,15 @@ end
 function Docks:LayoutDock(dockIndex)
     local dock = docks[dockIndex]
     local settings = GetDockSettings(dockIndex)
-    local isLayoutMode = TUICD.LayoutMode and TUICD.LayoutMode:IsUnlocked()
+    local isLayoutMode = TUICD.Layout and TUICD.Layout:IsActive()
     
     -- Create dock frame on demand if enabled OR if in layout mode
     if not dock and (settings.enabled or isLayoutMode) then
         dock = CreateDockFrame(dockIndex)
+        -- Also ensure Layout wrapper exists
+        if dock and not dockLayoutWrappers[dockIndex] then
+            RegisterDockWithLayout(dockIndex)
+        end
     end
     
     if not dock then return end
@@ -643,7 +913,7 @@ function Docks:AssignIcon(dockIndex, trackerType, slotIndex)
     end
     
     if TUICD.Events then
-        TUICD.Events:Fire(TUICD.EVENTS.DOCK_ASSIGNMENT_CHANGED, dockIndex, trackerType, slotIndex, true)
+        TUICD.Events:Fire("TweaksUI_DockAssignmentChanged", dockIndex, trackerType, slotIndex, true)
     end
     
     QueueLayout(dockIndex)
@@ -693,7 +963,7 @@ function Docks:UnassignIcon(dockIndex, trackerType, slotIndex)
     end
     
     if TUICD.Events then
-        TUICD.Events:Fire(TUICD.EVENTS.DOCK_ASSIGNMENT_CHANGED, dockIndex, trackerType, slotIndex, false)
+        TUICD.Events:Fire("TweaksUI_DockAssignmentChanged", dockIndex, trackerType, slotIndex, false)
     end
     
     QueueLayout(dockIndex)
@@ -714,6 +984,36 @@ end
 -- ============================================================================
 -- PUBLIC API
 -- ============================================================================
+
+-- Restore all docked icons to their original positions (for PLAYER_LOGOUT cleanup)
+function Docks:RestoreAllDockedIcons()
+    dprint("RestoreAllDockedIcons called")
+    
+    for dockIndex = 1, NUM_DOCKS do
+        local icons = dockedIcons[dockIndex]
+        if icons then
+            -- Collect keys first to avoid modifying table during iteration
+            local keysToUnassign = {}
+            for iconKey, iconInfo in pairs(icons) do
+                -- Parse iconKey back to trackerType and slotIndex
+                local trackerType, slotIndex = iconKey:match("^(.+):(%d+)$")
+                if trackerType and slotIndex then
+                    table.insert(keysToUnassign, {
+                        trackerType = trackerType,
+                        slotIndex = tonumber(slotIndex),
+                    })
+                end
+            end
+            
+            -- Now unassign each icon
+            for _, info in ipairs(keysToUnassign) do
+                self:UnassignIcon(dockIndex, info.trackerType, info.slotIndex)
+            end
+        end
+    end
+    
+    dprint("All docked icons restored to original positions")
+end
 
 function Docks:GetDockSettings(dockIndex)
     return GetDockSettings(dockIndex)
@@ -972,14 +1272,25 @@ function Docks:GetDock(dockIndex)
     return docks[dockIndex]
 end
 
+-- Get the Layout Mode wrapper for a dock
+function Docks:GetDockLayoutWrapper(dockIndex)
+    return dockLayoutWrappers[dockIndex]
+end
+
 -- Force-create a dock frame even if disabled (used by Layout Mode)
 function Docks:EnsureDockExists(dockIndex)
     if docks[dockIndex] then 
         -- Dock already exists, just make sure it's shown for layout mode
-        local isLayoutMode = TUICD.LayoutMode and TUICD.LayoutMode:IsUnlocked()
+        local isLayoutMode = TUICD.Layout and TUICD.Layout:IsActive()
         if isLayoutMode then
             docks[dockIndex]:Show()
         end
+        
+        -- Ensure Layout wrapper exists
+        if not dockLayoutWrappers[dockIndex] then
+            RegisterDockWithLayout(dockIndex)
+        end
+        
         return docks[dockIndex] 
     end
     
@@ -988,10 +1299,13 @@ function Docks:EnsureDockExists(dockIndex)
     
     -- Show it for overlay positioning in layout mode
     if dock then
-        local isLayoutMode = TUICD.LayoutMode and TUICD.LayoutMode:IsUnlocked()
+        local isLayoutMode = TUICD.Layout and TUICD.Layout:IsActive()
         if isLayoutMode then
             dock:Show()
         end
+        
+        -- Create Layout wrapper and register
+        RegisterDockWithLayout(dockIndex)
     end
     
     return dock
@@ -1047,6 +1361,12 @@ function Docks:Initialize()
         iconArrivalOrder[i] = iconArrivalOrder[i] or {}
     end
     
+    -- Register ALL docks with Layout Mode (even disabled ones, for positioning)
+    -- Delay slightly to ensure Layout module is ready
+    C_Timer.After(0.5, function()
+        RegisterAllDocksWithLayout()
+    end)
+    
     -- Register for visibility events
     local eventFrame = CreateFrame("Frame")
     eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
@@ -1062,15 +1382,42 @@ function Docks:Initialize()
         Docks:RefreshAllDocks()
     end)
     
-    -- Register for layout mode events
+    -- Register for layout mode events (TUICD.Events system)
     if TUICD.Events then
         TUICD.Events:Register("LAYOUT_MODE_ENTER", function()
+            -- Ensure all docks exist and are shown for Layout Mode
+            for i = 1, NUM_DOCKS do
+                Docks:EnsureDockExists(i)
+                local dock = docks[i]
+                if dock then
+                    dock:Show()
+                end
+            end
             Docks:RefreshAllDocks()
         end, Docks)
         
         TUICD.Events:Register("LAYOUT_MODE_EXIT", function()
             Docks:RefreshAllDocks()
         end, Docks)
+    end
+    
+    -- Also register with Layout module's callback system
+    if TUICD.Layout then
+        TUICD.Layout:RegisterCallback("OnLayoutModeEnter", function()
+            -- Ensure all docks exist and are shown for Layout Mode
+            for i = 1, NUM_DOCKS do
+                Docks:EnsureDockExists(i)
+                local dock = docks[i]
+                if dock then
+                    dock:Show()
+                end
+            end
+            Docks:RefreshAllDocks()
+        end)
+        
+        TUICD.Layout:RegisterCallback("OnLayoutModeExit", function()
+            Docks:RefreshAllDocks()
+        end)
     end
     
     -- Initial layout
@@ -1167,13 +1514,15 @@ end
 -- AUTO-INITIALIZE
 -- ============================================================================
 
-if TUICD.Events then
-    TUICD.Events:Register(TUICD.EVENTS.ADDON_LOADED, function()
-        C_Timer.After(0.1, function()
-            Docks:Initialize()
-        end)
-    end, Docks)
-end
+-- Initialize on PLAYER_LOGIN (most reliable timing)
+local initFrame = CreateFrame("Frame")
+initFrame:RegisterEvent("PLAYER_LOGIN")
+initFrame:SetScript("OnEvent", function(self, event)
+    C_Timer.After(0.1, function()
+        Docks:Initialize()
+    end)
+    self:UnregisterEvent("PLAYER_LOGIN")
+end)
 
 -- Also restore on PLAYER_ENTERING_WORLD as backup
 local pewFrame = CreateFrame("Frame")

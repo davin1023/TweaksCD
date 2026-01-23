@@ -1,253 +1,383 @@
 -- ============================================================================
 -- TweaksUI: Cooldowns - Main
 -- Core addon initialization and slash commands
+-- Version 3.0.2 - Unified Architecture
 -- ============================================================================
 
 local ADDON_NAME, TUICD = ...
 
--- ============================================================================
--- CMT COEXISTENCE DETECTION
--- ============================================================================
-
--- Track whether CMT is running (we will defer to it if so)
-TUICD.CMT_COEXISTENCE_MODE = false
-
-local function IsCMTLoaded()
-    -- Check if CooldownManagerTweaks addon is loaded
-    local loaded = C_AddOns.IsAddOnLoaded("CooldownManagerTweaks")
-    -- Also check for CMT's global tables which indicate it's actually running
-    local cmtRunning = _G.CMT_DB ~= nil or _G.CMT_CharDB ~= nil
-    return loaded or cmtRunning
-end
+-- Make TUICD accessible globally
+_G.TUICD = TUICD
 
 -- ============================================================================
 -- PRINT HELPERS
 -- ============================================================================
 
 function TUICD:Print(message)
-    print(self.CHAT_PREFIX .. message)
+    print(TUICD.CHAT_PREFIX .. message)
 end
 
 function TUICD:PrintError(message)
-    print(self.CHAT_PREFIX .. "|cffff3333" .. message .. "|r")
+    print(TUICD.CHAT_PREFIX .. "|cffff0000" .. message .. "|r")
 end
 
 function TUICD:PrintDebug(message)
-    -- Debug printing disabled
+    if self.debugMode then
+        print(TUICD.CHAT_PREFIX .. "|cff888888[DEBUG]|r " .. message)
+    end
+end
+
+-- Central helper to toggle the main settings hub
+function TUICD:ToggleSettings()
+    if self.Settings and self.Settings.Toggle then
+        self.Settings:Toggle()
+    else
+        self:PrintError("Settings UI not ready yet. Try again in a moment.")
+    end
 end
 
 -- Debug mode
 TUICD.debugMode = false
 
+-- Force all visibility conditions to be bypassed
+TUICD.forceAllVisible = false
+
 function TUICD:SetDebugMode(enabled)
     self.debugMode = enabled
-    self.Database:SetGlobal("debugMode", enabled)
     self:Print("Debug mode " .. (enabled and "enabled" or "disabled"))
 end
 
--- ============================================================================
--- WHAT'S NEW POPUP
--- ============================================================================
-
-local patchNotesPopup = nil
-
-local function ShowWhatsNewPopup()
-    if patchNotesPopup then
-        patchNotesPopup:Show()
-        return
+-- Toggle force-all-visible mode (bypasses all visibility conditions)
+function TUICD:SetForceAllVisible(enabled, silent)
+    self.forceAllVisible = enabled
+    
+    -- Save to database so it persists across reloads
+    if self.Database then
+        self.Database:SetGlobal("forceAllVisible", enabled)
     end
     
-    -- Create the popup frame
-    local frame = CreateFrame("Frame", "TUICD_WhatsNewPopup", UIParent, "BasicFrameTemplateWithInset")
-    frame:SetSize(520, 450)
-    frame:SetPoint("CENTER")
-    frame:SetFrameStrata("DIALOG")
-    frame:SetMovable(true)
-    frame:EnableMouse(true)
-    frame:RegisterForDrag("LeftButton")
-    frame:SetScript("OnDragStart", frame.StartMoving)
-    frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
-    
-    -- Title
-    frame.title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    frame.title:SetPoint("TOP", 0, -5)
-    frame.title:SetText("TweaksUI: Cooldowns - What's New")
-    
-    -- Version
-    local versionText = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    versionText:SetPoint("TOP", 0, -28)
-    versionText:SetText("|cff00ff00Version " .. TUICD.VERSION .. "|r")
-    
-    -- Scroll frame
-    local scrollFrame = CreateFrame("ScrollFrame", nil, frame, "UIPanelScrollFrameTemplate")
-    scrollFrame:SetPoint("TOPLEFT", 12, -50)
-    scrollFrame:SetPoint("BOTTOMRIGHT", -30, 55)
-    
-    scrollFrame:EnableMouseWheel(true)
-    scrollFrame:SetScript("OnMouseWheel", function(self, delta)
-        local current = self:GetVerticalScroll()
-        local maxScroll = self:GetVerticalScrollRange()
-        local step = 60
-        if delta > 0 then
-            self:SetVerticalScroll(math.max(0, current - step))
+    if not silent then
+        if enabled then
+            self:Print("|cff00ff00All visibility conditions BYPASSED|r - everything is now visible")
+            self:Print("Use |cffffff00/tuicd showall|r again to restore normal visibility")
         else
-            self:SetVerticalScroll(math.min(maxScroll, current + step))
+            self:Print("|cffff9900Visibility conditions RESTORED|r - normal visibility rules apply")
         end
-    end)
+    end
     
-    local scrollChild = CreateFrame("Frame", nil, scrollFrame)
-    scrollChild:SetSize(460, 1200)
-    scrollFrame:SetScrollChild(scrollChild)
-    
-    -- Content
-    local content = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    content:SetPoint("TOPLEFT", 5, -5)
-    content:SetWidth(450)
-    content:SetJustifyH("LEFT")
-    content:SetSpacing(3)
-    
-    local patchNotesText = [[
-|cffFFD700Version 2.0.0|r - Midnight Pre-Patch Release
-
-|cffFF6600IMPORTANT:|r Requires WoW 12.0.0 (Midnight)
-For The War Within, use version 1.5.x
-
-
-|cffFFD700>>> DYNAMIC DOCKS <<<|r
-
-The biggest feature in TUI:CD history! Create custom
-icon groups by pulling icons from ANY tracker.
-
-  |cff00FF00What are Docks?|r
-  |cff87CEEB-|r Separate containers that hold icons from multiple trackers
-  |cff87CEEB-|r Mix Essential, Utility, Buffs, and Custom icons together
-  |cff87CEEB-|r Create up to 10 independent docks
-  |cff87CEEB-|r Position anywhere via Layout Mode
-
-  |cff00FF00How to Use|r
-  |cff87CEEB-|r Open any tracker's Individual Icons tab
-  |cff87CEEB-|r Select an icon and find "Move to Dock" dropdown
-  |cff87CEEB-|r Choose Dock 1-10 to assign that icon
-  |cff87CEEB-|r Icon moves from tracker to dock automatically
-
-  |cff00FF00Dock Settings|r
-  |cff87CEEB-|r Independent size, columns, spacing, grow direction
-  |cff87CEEB-|r Center-out growth for symmetrical layouts
-  |cff87CEEB-|r Full visibility: Combat, Group, Target, Mounted
-
-
-|cff00FF00Visual Override System|r
-
-Override how docked icons look without changing the source:
-  |cff87CEEB-|r Custom icon size and opacity
-  |cff87CEEB-|r Border width and color
-  |cff87CEEB-|r Desaturation when inactive
-  |cff87CEEB-|r Countdown text: scale, color, position offset
-  |cff87CEEB-|r Toggle proc glow per icon
-
-
-|cff00FF00Individual Icons Settings Expanded|r
-
-New options in Individual Icons tabs for all trackers:
-  |cff87CEEB-|r "Move to Dock" dropdown to assign icons
-  |cff87CEEB-|r "Show Proc Glow" toggle per icon
-  |cff87CEEB-|r All existing per-icon customization preserved
-
-
-|cff00FF00New Visibility States|r
-
-  |cff87CEEB-|r Target / No Target - show based on target status
-  |cff87CEEB-|r Mounted / Dismounted - show based on mount status
-  |cff87CEEB-|r Available for all trackers AND docks
-
-
-|cff00FF00Other Improvements|r
-
-  |cff87CEEB-|r Setup Wizard for new users
-  |cff87CEEB-|r Global Scale (50-200%) for settings panels
-  |cff87CEEB-|r LibFlyPaper snap-to-grid in Layout Mode
-  |cff87CEEB-|r 60-80% CPU reduction in raids
-  |cff87CEEB-|r Midnight Duration Object API support
-
-
-|cff888888Access Docks: /tuicd > Docks button|r
-|cff888888/tuicd patchnotes - Show this again|r
-]]
-    
-    content:SetText(patchNotesText)
-    
-    local textHeight = content:GetStringHeight()
-    scrollChild:SetHeight(math.max(400, textHeight + 20))
-    
-    -- Scroll hint
-    local scrollHint = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    scrollHint:SetPoint("BOTTOM", 0, 38)
-    scrollHint:SetText("|cff888888Scroll down to read more|r")
-    
-    -- Buttons
-    local openSettingsBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-    openSettingsBtn:SetSize(120, 25)
-    openSettingsBtn:SetPoint("BOTTOMLEFT", 15, 12)
-    openSettingsBtn:SetText("Open Settings")
-    openSettingsBtn:SetScript("OnClick", function()
-        frame:Hide()
-        TUICD:ToggleSettings()
-    end)
-    
-    local closeBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-    closeBtn:SetSize(100, 25)
-    closeBtn:SetPoint("BOTTOMRIGHT", -15, 12)
-    closeBtn:SetText("Close")
-    closeBtn:SetScript("OnClick", function()
-        frame:Hide()
-    end)
-    
-    frame.CloseButton:SetScript("OnClick", function()
-        frame:Hide()
-    end)
-    
-    tinsert(UISpecialFrames, "TUICD_WhatsNewPopup")
-    patchNotesPopup = frame
-    frame:Show()
-end
-
--- Check if we should show the What's New popup
-local function CheckVersionAndShowPopup()
-    local lastSeen = TUICD.Database:GetGlobal("lastSeenVersion")
-    
-    if lastSeen ~= TUICD.VERSION then
-        TUICD.Database:SetGlobal("lastSeenVersion", TUICD.VERSION)
-        -- Delay popup slightly so UI is fully loaded
-        C_Timer.After(1.5, function()
-            ShowWhatsNewPopup()
-        end)
+    -- Trigger visibility updates in Cooldowns module
+    if self.Cooldowns and self.Cooldowns.UpdateAllTrackerVisibility then
+        self.Cooldowns:UpdateAllTrackerVisibility()
     end
 end
 
--- Expose for slash command
-function TUICD:ShowPatchNotes()
-    ShowWhatsNewPopup()
+-- Load forceAllVisible state from database
+function TUICD:LoadForceAllVisibleState()
+    if self.Database then
+        local saved = self.Database:GetGlobal("forceAllVisible")
+        if saved then
+            self.forceAllVisible = true
+            C_Timer.After(2, function()
+                self:SetForceAllVisible(true, true)
+                self:Print("|cff00ff00Show All mode is ACTIVE|r - use /tuicd showall to disable")
+            end)
+        end
+    end
 end
 
 -- ============================================================================
--- SETTINGS HUB TOGGLE
+-- BLIZZARD FRAME POSITION REPAIR
+-- One-time check on login to fix frames that may be positioned off-screen
+-- This can happen if TUI:CD was previously installed and modified frame parents
 -- ============================================================================
 
-function TUICD:ToggleSettings()
-    -- In CMT coexistence mode, show the migration dialog instead
-    if self.CMT_COEXISTENCE_MODE then
-        if self.Migration and self.Migration.ShowMigrationCompleteDialog then
-            self.Migration:ShowMigrationCompleteDialog()
+local BLIZZARD_VIEWER_FRAMES = {
+    "EssentialCooldownViewer",
+    "UtilityCooldownViewer", 
+    "BuffIconCooldownViewer",
+}
+
+local function IsFrameOffScreen(frame)
+    if not frame or not frame:IsShown() then return false end
+    
+    local left, bottom, width, height = frame:GetRect()
+    if not left or not bottom or not width or not height then return false end
+    
+    local screenWidth = GetScreenWidth()
+    local screenHeight = GetScreenHeight()
+    
+    -- Frame is considered off-screen if its center is outside visible area
+    -- with a generous margin (frame should be at least partially visible)
+    local centerX = left + (width / 2)
+    local centerY = bottom + (height / 2)
+    
+    -- Check if center is way off screen (more than frame size outside)
+    local offLeft = centerX < -width
+    local offRight = centerX > screenWidth + width
+    local offBottom = centerY < -height
+    local offTop = centerY > screenHeight + height
+    
+    return offLeft or offRight or offBottom or offTop
+end
+
+local function RepairBlizzardFramePositions()
+    local repairedFrames = {}
+    
+    for _, frameName in ipairs(BLIZZARD_VIEWER_FRAMES) do
+        local frame = _G[frameName]
+        if frame then
+            -- Check if frame is off-screen
+            if IsFrameOffScreen(frame) then
+                -- Check parent - if it's not UIParent, that might be the issue
+                local parent = frame:GetParent()
+                local parentName = parent and parent:GetName() or "nil"
+                
+                TUICD:PrintDebug("Repairing " .. frameName .. " (was off-screen, parent: " .. parentName .. ")")
+                
+                -- Reparent to UIParent if needed
+                if parent ~= UIParent then
+                    frame:SetParent(UIParent)
+                end
+                
+                -- Move to center of screen
+                frame:ClearAllPoints()
+                frame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+                frame:SetAlpha(1)
+                frame:Show()
+                
+                table.insert(repairedFrames, frameName)
+            end
+        end
+    end
+    
+    if #repairedFrames > 0 then
+        TUICD:Print("|cffff8800Warning:|r Found " .. #repairedFrames .. " Blizzard Cooldown frame(s) positioned off-screen.")
+        TUICD:Print("Frames have been moved to screen center.")
+        TUICD:Print("|cffffcc00To fix permanently:|r Open |cff00ccffEdit Mode|r (ESC > Edit Mode),")
+        TUICD:Print("position your cooldown trackers, then |cff00ff00Save Changes|r.")
+    end
+end
+
+-- ============================================================================
+-- LEGACY MIGRATION
+-- Migrates data from old TUI:CD 2.x format to new unified format
+-- ============================================================================
+
+local function RunLegacyMigration()
+    -- Check if we need to migrate from old format
+    local charDb = TweaksUI_Cooldowns_CharDB
+    if not charDb then return end
+    
+    -- ========================================================================
+    -- DETECT VARIOUS OLD FORMATS
+    -- ========================================================================
+    
+    -- Format 1: Old TUI:CD 2.x format (trackers table directly in CharDB)
+    local hasTUICD2xFormat = charDb.trackers ~= nil
+    
+    -- Format 2: CMT format (check for CMT_CharDB global)
+    local hasCMTFormat = _G.CMT_CharDB ~= nil and _G.CMT_CharDB.trackers ~= nil
+    
+    -- Format 3: Full TweaksUI format (check for TweaksUI_CharDB with cooldowns module)
+    local hasTUIFormat = _G.TweaksUI_CharDB ~= nil and 
+                         _G.TweaksUI_CharDB.settings ~= nil and 
+                         _G.TweaksUI_CharDB.settings.cooldowns ~= nil
+    
+    -- Check if we've already migrated
+    local needsMigration = false
+    local migrationSource = nil
+    
+    if hasTUICD2xFormat then
+        if not charDb._migratedFromLegacy then
+            needsMigration = true
+            migrationSource = "TUI:CD 2.x"
+        elseif charDb._legacyMigrationVersion == "3.0.0" then
+            -- v3.0.0 migration may have been incomplete
+            if not charDb.settings or not charDb.settings.cooldowns then
+                needsMigration = true
+                migrationSource = "TUI:CD 2.x (incomplete)"
+                TUICD:Print("Re-running migration (v3.0.0 migration was incomplete)...")
+            elseif not charDb.settings.cooldowns.essential and not charDb.settings.cooldowns.utility then
+                needsMigration = true
+                migrationSource = "TUI:CD 2.x (incomplete)"
+                TUICD:Print("Re-running migration (settings were not properly migrated)...")
+            end
+        end
+    elseif hasCMTFormat then
+        if not charDb._migratedFromCMT then
+            needsMigration = true
+            migrationSource = "CMT"
+        end
+    elseif hasTUIFormat then
+        if not charDb._migratedFromTUI then
+            needsMigration = true
+            migrationSource = "TweaksUI"
+        end
+    end
+    
+    -- ========================================================================
+    -- PERFORM MIGRATION
+    -- ========================================================================
+    
+    if needsMigration and migrationSource then
+        TUICD:Print("Migrating settings from " .. migrationSource .. " format...")
+        
+        -- Ensure settings structure exists
+        charDb.settings = charDb.settings or {}
+        charDb.settings.cooldowns = charDb.settings.cooldowns or {}
+        charDb.settings.layout = charDb.settings.layout or {}
+        
+        local sourceDb = nil
+        
+        if migrationSource == "CMT" then
+            sourceDb = _G.CMT_CharDB
+        elseif migrationSource == "TweaksUI" then
+            sourceDb = _G.TweaksUI_CharDB.settings.cooldowns
+            -- Direct copy of cooldowns settings
+            for key, value in pairs(sourceDb) do
+                charDb.settings.cooldowns[key] = value
+            end
+            
+            -- Also migrate layout positions from TweaksUI
+            local tuiLayout = _G.TweaksUI_CharDB.settings and _G.TweaksUI_CharDB.settings.layout
+            if tuiLayout and tuiLayout.elements then
+                charDb.settings.layout.elements = charDb.settings.layout.elements or {}
+                
+                -- Copy cooldown-related element positions
+                local cooldownElements = {
+                    "EssentialCooldownViewer_TUIWrapper",
+                    "UtilityCooldownViewer_TUIWrapper",
+                    "BuffIconCooldownViewer_TUIWrapper",
+                    "CustomTracker_TUIWrapper",
+                }
+                
+                local migratedCount = 0
+                for _, elementId in ipairs(cooldownElements) do
+                    if tuiLayout.elements[elementId] then
+                        charDb.settings.layout.elements[elementId] = {
+                            point = tuiLayout.elements[elementId].point,
+                            x = tuiLayout.elements[elementId].x,
+                            y = tuiLayout.elements[elementId].y,
+                            scale = tuiLayout.elements[elementId].scale,
+                        }
+                        migratedCount = migratedCount + 1
+                        TUICD:PrintDebug("Migrated position: " .. elementId)
+                    end
+                end
+                
+                -- Also copy any Dock positions
+                for elementId, pos in pairs(tuiLayout.elements) do
+                    if elementId:match("^Dock_") then
+                        charDb.settings.layout.elements[elementId] = {
+                            point = pos.point,
+                            x = pos.x,
+                            y = pos.y,
+                            scale = pos.scale,
+                        }
+                        migratedCount = migratedCount + 1
+                        TUICD:PrintDebug("Migrated dock position: " .. elementId)
+                    end
+                end
+                
+                -- CRITICAL: Set dataVersion to 4 so Layout:OnInitialize doesn't clear our positions
+                if migratedCount > 0 then
+                    charDb.settings.layout.dataVersion = 4
+                    TUICD:Print("Migrated " .. migratedCount .. " tracker positions from TweaksUI.")
+                end
+            end
+            
+            charDb._migratedFromTUI = true
+            charDb._tuiMigrationVersion = TUICD.VERSION
+            TUICD:Print("Migration from TweaksUI complete!")
+            return
         else
-            self:PrintError("CMT is running. Disable CMT and reload to use TweaksUI: Cooldowns.")
+            sourceDb = charDb  -- TUI:CD 2.x format
         end
-        return
-    end
-    
-    if self.Settings and self.Settings.Toggle then
-        self.Settings:Toggle()
-    else
-        self:PrintError("Settings UI not ready yet.")
+        
+        -- Migrate tracker settings
+        if sourceDb.trackers then
+            for trackerKey, trackerSettings in pairs(sourceDb.trackers) do
+                charDb.settings.cooldowns[trackerKey] = trackerSettings
+                TUICD:PrintDebug("Migrated tracker: " .. trackerKey)
+            end
+        end
+        
+        -- Migrate highlights
+        if sourceDb.buffHighlights then
+            charDb.settings.cooldowns.buffHighlights = sourceDb.buffHighlights
+        end
+        if sourceDb.essentialHighlights then
+            charDb.settings.cooldowns.essentialHighlights = sourceDb.essentialHighlights
+        end
+        if sourceDb.utilityHighlights then
+            charDb.settings.cooldowns.utilityHighlights = sourceDb.utilityHighlights
+        end
+        if sourceDb.customHighlights then
+            charDb.settings.cooldowns.customHighlights = sourceDb.customHighlights
+        end
+        
+        -- Migrate custom entries
+        if sourceDb.customEntries then
+            charDb.settings.cooldowns.customEntries = sourceDb.customEntries
+        end
+        
+        -- Migrate container positions to layout format
+        -- Map old container keys to new element IDs
+        local containerToElementId = {
+            essential = "EssentialCooldownViewer_TUIWrapper",
+            utility = "UtilityCooldownViewer_TUIWrapper",
+            buffs = "BuffIconCooldownViewer_TUIWrapper",
+            customTrackers = "CustomTracker_TUIWrapper",
+        }
+        
+        local migratedPositions = 0
+        if sourceDb.containerPositions then
+            charDb.settings.layout.elements = charDb.settings.layout.elements or {}
+            for key, pos in pairs(sourceDb.containerPositions) do
+                local elementId = containerToElementId[key]
+                if elementId then
+                    charDb.settings.layout.elements[elementId] = {
+                        point = pos.point or "CENTER",
+                        x = pos.x or 0,
+                        y = pos.y or 0,
+                        scale = 1,
+                    }
+                    migratedPositions = migratedPositions + 1
+                    TUICD:PrintDebug("Migrated container position: " .. key .. " -> " .. elementId)
+                end
+            end
+        end
+        
+        -- CRITICAL: Set dataVersion to 4 so Layout:OnInitialize doesn't clear our positions
+        if migratedPositions > 0 then
+            charDb.settings.layout.dataVersion = 4
+            TUICD:Print("Migrated " .. migratedPositions .. " tracker positions.")
+        end
+        
+        -- Mark migration complete
+        if migrationSource == "CMT" then
+            charDb._migratedFromCMT = true
+            charDb._cmtMigrationVersion = TUICD.VERSION
+        else
+            charDb._migratedFromLegacy = true
+            charDb._legacyMigrationVersion = TUICD.VERSION
+        end
+        
+        TUICD:Print("Migration complete! Your settings have been preserved.")
+        TUICD:Print("Use |cff00ccff/tuicd|r to open settings.")
+    elseif not charDb._migratedFromLegacy and not hasTUICD2xFormat and not hasCMTFormat and not hasTUIFormat then
+        -- No old data found and this is a fresh install
+        -- Check if user might have old data in WTF folder that didn't load
+        if not charDb._checkedForOldData then
+            charDb._checkedForOldData = true
+            -- Only show this message on first load
+            C_Timer.After(5, function()
+                if not charDb._migratedFromLegacy then
+                    TUICD:Print("|cff888888No previous TUI:CD/CMT data detected.|r")
+                    TUICD:Print("|cff888888If you have exported profiles, use |cff00ccff/tuicd|r → Profiles → Import|r")
+                end
+            end)
+        end
     end
 end
 
@@ -262,202 +392,200 @@ initFrame:RegisterEvent("PLAYER_LOGIN")
 local addonLoaded = false
 local playerLoggedIn = false
 
--- Forward declaration
-local ContinueInitialization
-
-local function InitializeNormally()
-    -- Initialize database first (needed for setup check)
-    TUICD.Database:Initialize()
-    
-    -- Restore debug mode
-    TUICD.debugMode = TUICD.Database:GetGlobal("debugMode") or false
-    
-    -- Check if setup wizard needs to be shown
-    if TUICD.SetupWizard and not TUICD.SetupWizard:IsSetupComplete() then
-        -- Define the continue function for after setup
-        TUICD.ContinueLoading = function()
-            ContinueInitialization()
-        end
-        -- Show setup wizard - it will call ContinueLoading when ready
-        TUICD.SetupWizard:Show()
+local function Initialize()
+    if not addonLoaded or not playerLoggedIn then
         return
     end
     
-    -- Setup already complete, continue normally
-    ContinueInitialization()
-end
-
-ContinueInitialization = function()
-    -- Initialize profiles system
-    if TUICD.Profiles and TUICD.Profiles.Initialize then
-        TUICD.Profiles:Initialize()
-    end
+    TUICD:PrintDebug("Initializing v" .. TUICD.VERSION)
     
-    -- Initialize global scale system
-    if TUICD.GlobalScale and TUICD.GlobalScale.Initialize then
+    -- Initialize database
+    TUICD.Database:Initialize()
+    
+    -- Run legacy migration before anything else
+    RunLegacyMigration()
+    
+    -- Initialize GlobalScale
+    if TUICD.GlobalScale then
         TUICD.GlobalScale:Initialize()
     end
     
-    -- Run startup migration check (for first-time welcome, etc.)
-    if TUICD.Migration and TUICD.Migration.RunStartupMigration then
-        TUICD.Migration:RunStartupMigration()
+    -- Initialize Profiles system
+    if TUICD.Profiles then
+        TUICD.Profiles:Initialize()
+    end
+    
+    -- Initialize ProfileImportExport
+    if TUICD.ProfileImportExport then
+        TUICD.ProfileImportExport:Initialize()
+    end
+    
+    -- Initialize media
+    TUICD.Media:Initialize()
+    
+    -- Initialize SnapLocking (standalone utility, not a module)
+    if TUICD.SnapLocking and TUICD.SnapLocking.Initialize then
+        TUICD.SnapLocking:Initialize()
+    end
+    
+    -- Initialize all registered modules (including Layout and Cooldowns)
+    if TUICD.ModuleManager then
+        TUICD.ModuleManager:InitializeAll()
+        TUICD.ModuleManager:EnableAll()
     end
     
     -- Initialize minimap button
-    if TUICD.MinimapButton and TUICD.MinimapButton.Initialize then
+    if TUICD.MinimapButton then
         TUICD.MinimapButton:Initialize()
     end
     
-    -- Initialize cooldowns module
-    if TUICD.Cooldowns and TUICD.Cooldowns.Initialize then
-        TUICD.Cooldowns:Initialize()
-    end
-    
-    -- Initialize layout mode (after cooldowns so frames exist)
-    if TUICD.LayoutMode and TUICD.LayoutMode.Initialize then
-        TUICD.LayoutMode:Initialize()
-    end
-    
-    -- Initialize highlights modules
-    if TUICD.BuffHighlights and TUICD.BuffHighlights.Initialize then
-        TUICD.BuffHighlights:Initialize()
-    end
-    if TUICD.CooldownHighlights and TUICD.CooldownHighlights.Initialize then
-        TUICD.CooldownHighlights:Initialize()
-    end
-    
-    -- Initialize settings UI
-    if TUICD.Settings and TUICD.Settings.Initialize then
-        TUICD.Settings:Initialize()
-    end
-    
-    -- Print load message
-    TUICD:Print("Loaded - /tuicd to configure")
-    
-    TUICD:PrintDebug("TweaksUI: Cooldowns initialized")
-    
-    -- Check if we should show What's New popup
-    CheckVersionAndShowPopup()
-    
-    -- Fire loaded event
-    TUICD.Events:Fire(TUICD.EVENTS.ADDON_LOADED)
-end
-
-local function InitializeInCoexistenceMode()
-    -- CMT is running - we'll let it handle the cooldown trackers
-    -- But we WILL initialize our database and run migration
-    TUICD.CMT_COEXISTENCE_MODE = true
-    
-    -- Initialize database (needed for migration to work)
-    TUICD.Database:Initialize()
-    
-    -- Restore debug mode
-    TUICD.debugMode = TUICD.Database:GetGlobal("debugMode") or false
-    
-    -- Initialize minimap button (so users can click it to see the migration dialog)
-    if TUICD.MinimapButton and TUICD.MinimapButton.Initialize then
-        TUICD.MinimapButton:Initialize()
-    end
-    
-    -- Now run migration from CMT
-    if TUICD.Migration then
-        -- Check if we've already migrated
-        local alreadyMigrated = TUICD.Migration:HasMigrated()
-        
-        if not alreadyMigrated and TUICD.Migration:IsCMTDataAvailable() then
-            -- Run migration
-            local success, trackers, entries = TUICD.Migration:DoMigration()
-            if success then
-                TUICD:Print("|cff00ff00Settings migrated from CMT!|r")
-                TUICD:Print("Migrated " .. (trackers or 0) .. " tracker(s) and " .. (entries or 0) .. " custom entries.")
-            end
-        end
-        
-        -- Show the migration complete dialog (tells user to disable CMT)
+    -- Apply snap attachments after frames are created
+    if TUICD.SnapLocking then
         C_Timer.After(2, function()
-            if TUICD.Migration.ShowMigrationCompleteDialog then
-                TUICD.Migration:ShowMigrationCompleteDialog()
-            end
+            TUICD.SnapLocking:ApplyAllAttachments()
         end)
     end
     
-    -- Print coexistence notice
-    TUICD:Print("|cffffcc00CMT detected.|r Running in migration mode. Your settings have been imported.")
-    TUICD:Print("Disable CMT and reload to activate TweaksUI: Cooldowns.")
+    -- Check for off-screen Blizzard frames (fixes orphaned frames from previous TUI:CD installs)
+    C_Timer.After(3, function()
+        RepairBlizzardFramePositions()
+    end)
     
-    -- DO NOT initialize the cooldowns module, layout mode, highlights, etc.
-    -- CMT will handle those - we're just sitting here ready to take over after reload
-end
-
-local function OnAddonLoaded()
-    if not addonLoaded or not playerLoggedIn then return end
+    -- Load forceAllVisible state
+    TUICD:LoadForceAllVisibleState()
     
-    -- Check if CMT is loaded
-    if IsCMTLoaded() then
-        -- CMT is running - go into coexistence/migration mode
-        InitializeInCoexistenceMode()
-    else
-        -- CMT is not running - initialize normally
-        InitializeNormally()
-    end
+    TUICD:Print("Loaded - Type |cffFFFFFF/tuicd|r to open settings")
 end
 
 initFrame:SetScript("OnEvent", function(self, event, arg1)
-    if event == "ADDON_LOADED" then
-        if arg1 == "TweaksUI_Cooldowns" then
-            addonLoaded = true
-            OnAddonLoaded()
-        end
+    if event == "ADDON_LOADED" and arg1 == ADDON_NAME then
+        addonLoaded = true
+        Initialize()
     elseif event == "PLAYER_LOGIN" then
         playerLoggedIn = true
-        OnAddonLoaded()
+        Initialize()
     end
 end)
 
 -- ============================================================================
--- SLASH COMMANDS
+-- PLAYER_LOGOUT CLEANUP
 -- ============================================================================
 
-SLASH_TUICD1 = "/tuicd"
-SLASH_TUICD2 = "/tweaksuicooldowns"
-SlashCmdList["TUICD"] = function(msg)
-    msg = (msg or ""):lower():trim()
+local logoutFrame = CreateFrame("Frame")
+logoutFrame:RegisterEvent("PLAYER_LOGOUT")
+logoutFrame:SetScript("OnEvent", function()
+    TUICD:PrintDebug("PLAYER_LOGOUT: Restoring Blizzard frames...")
     
-    -- In coexistence mode, most commands should show the migration dialog
-    if TUICD.CMT_COEXISTENCE_MODE then
-        if msg == "debug" then
-            TUICD:SetDebugMode(not TUICD.debugMode)
-        elseif msg == "help" then
-            TUICD:Print("TweaksUI: Cooldowns is in |cffffcc00CMT Coexistence Mode|r")
-            TUICD:Print("CMT is handling your cooldown trackers.")
-            TUICD:Print("Your settings have been migrated to TweaksUI: Cooldowns.")
-            TUICD:Print("|cff00ff00Disable CMT and reload to switch over.|r")
-        else
-            -- Show migration dialog for any other command
-            if TUICD.Migration and TUICD.Migration.ShowMigrationCompleteDialog then
-                TUICD.Migration:ShowMigrationCompleteDialog()
-            else
-                TUICD:Print("CMT is running. Disable CMT and reload to use TweaksUI: Cooldowns.")
-            end
-        end
-        return
+    -- Restore all docked icons
+    if TUICD.Docks and TUICD.Docks.RestoreAllDockedIcons then
+        pcall(function()
+            TUICD.Docks:RestoreAllDockedIcons()
+        end)
     end
     
-    -- Normal mode commands
-    if msg == "" or msg == "settings" or msg == "config" then
+    TUICD:PrintDebug("PLAYER_LOGOUT: Cleanup complete")
+end)
+
+-- ============================================================================
+-- SLASH COMMAND HANDLER
+-- ============================================================================
+
+local function HandleSlashCommand(msg)
+    local cmd, args = msg:match("^(%S*)%s*(.*)$")
+    cmd = cmd:lower()
+    
+    if cmd == "" or cmd == "settings" or cmd == "options" then
         TUICD:ToggleSettings()
         
-    elseif msg == "debug" then
+    elseif cmd == "help" then
+        TUICD:Print("|cff00ccff=== TUI: Cooldowns Commands ===|r")
+        TUICD:Print("|cffffff00/tuicd|r - Open settings hub")
+        TUICD:Print("|cffffff00/tuicd layout|r - Toggle Layout Mode")
+        TUICD:Print("|cffffff00/tuicd cdm|r - Open Blizzard Cooldown Manager")
+        TUICD:Print("|cffffff00/tuicd showall|r - Toggle visibility bypass")
+        TUICD:Print("|cffffff00/tuicd status|r - Show debug status info")
+        TUICD:Print("|cffffff00/tuicd debug|r - Toggle debug mode")
+        TUICD:Print("|cffffff00/tuicd remigrate|r - Re-import positions from TweaksUI")
+        TUICD:Print("|cffffff00/tuicd migrateprofiles|r - Convert old profiles to 3.0 format")
+        TUICD:Print("|cffffff00/tuicd version|r - Show version info")
+        TUICD:Print("|cffffff00/cdm|r - Toggle Blizzard Cooldown Settings")
+        TUICD:Print("|cffffff00/rl|r - Reload UI")
+        
+    elseif cmd == "layout" then
+        if TUICD.Layout then
+            TUICD.Layout:Toggle()
+        else
+            TUICD:PrintError("Layout module not available")
+        end
+        
+    elseif cmd == "cdm" or cmd == "cooldownmanager" then
+        -- Open Blizzard's Cooldown Settings frame
+        local cooldownFrame = CooldownViewerSettings or _G["CooldownViewerSettings"]
+        if cooldownFrame then
+            if cooldownFrame:IsShown() then
+                cooldownFrame:Hide()
+            else
+                cooldownFrame:Show()
+            end
+        else
+            TUICD:PrintError("Cooldown Settings not available")
+        end
+        
+    elseif cmd == "showall" then
+        TUICD:SetForceAllVisible(not TUICD.forceAllVisible)
+        
+    elseif cmd == "debug" then
         TUICD:SetDebugMode(not TUICD.debugMode)
         
-    elseif msg == "reset" then
+    elseif cmd == "version" or cmd == "ver" then
+        TUICD:Print("Version: |cff00ff00" .. TUICD.VERSION .. "|r")
+        TUICD:Print("WoW Build: " .. TUICD.BUILD_VERSION)
+        TUICD:Print("Expansion: " .. TUICD.EXPANSION)
+        
+    elseif cmd == "status" then
+        -- Debug status check
+        TUICD:Print("|cff00ccff=== TUI:CD Status ===|r")
+        
+        -- Check modules
+        local mm = TUICD.ModuleManager
+        if mm then
+            local modules = mm:GetAllModules()
+            for id, mod in pairs(modules) do
+                local state = mod.enabled and "|cff00ff00enabled|r" or "|cffff0000disabled|r"
+                TUICD:Print(string.format("Module '%s': %s (loaded=%s)", id, state, tostring(mod.loaded)))
+            end
+        end
+        
+        -- Check Blizzard viewers
+        local viewers = {"EssentialCooldownViewer", "UtilityCooldownViewer", "BuffIconCooldownViewer"}
+        TUICD:Print("|cff00ccffBlizzard Viewers:|r")
+        for _, name in ipairs(viewers) do
+            local v = _G[name]
+            if v then
+                local shown = v:IsShown() and "shown" or "hidden"
+                local alpha = v:GetAlpha()
+                TUICD:Print(string.format("  %s: exists (%s, alpha=%.2f)", name, shown, alpha))
+            else
+                TUICD:Print(string.format("  %s: |cffff0000NOT FOUND|r - Enable in Edit Mode!", name))
+            end
+        end
+        
+        -- Check Layout elements
+        if TUICD.Layout then
+            local elements = TUICD.Layout:GetAllElements()
+            local count = 0
+            for _ in pairs(elements) do count = count + 1 end
+            TUICD:Print(string.format("|cff00ccffLayout elements:|r %d registered", count))
+        end
+        
+    elseif cmd == "reset" then
         StaticPopupDialogs["TUICD_RESET_CONFIRM"] = {
-            text = "Are you sure you want to reset all TweaksUI: Cooldowns settings?\n\nThis cannot be undone.",
+            text = "Are you sure you want to reset ALL TUI: Cooldowns settings?\n\nThis cannot be undone!",
             button1 = "Reset",
             button2 = "Cancel",
             OnAccept = function()
                 TweaksUI_Cooldowns_CharDB = nil
-                TUICD.Database:Initialize()
+                TweaksUI_Cooldowns_DB = nil
                 ReloadUI()
             end,
             timeout = 0,
@@ -467,174 +595,208 @@ SlashCmdList["TUICD"] = function(msg)
         }
         StaticPopup_Show("TUICD_RESET_CONFIRM")
         
-    elseif msg == "help" then
-        TUICD:Print("Commands:")
-        print("  /tuicd - Open settings")
-        print("  /tuicd layout - Toggle layout mode")
-        print("  /tuicd profiles - Open profiles panel")
-        print("  /tuicd debug - Toggle debug mode")
-        print("  /tuicd reset - Reset all settings")
-        print("  /tuicd resetpos - Reset all tracker positions")
-        print("  /tuicd resettext - Reset text settings to defaults")
-        print("  /tuicd patchnotes - Show patch notes")
-        print("  /tuicdmigrate - CMT migration commands")
-        print("")
-        print("  |cff888888Shortcuts:|r")
-        print("  /cmt - Same as /tuicd")
-        print("  /rl - Reload UI")
-        print("  /em - Toggle Edit Mode")
-        print("  /cdm - Open Blizzard Cooldown Manager")
-        
-    elseif msg == "patchnotes" or msg == "whatsnew" then
-        TUICD:ShowPatchNotes()
-        
-    elseif msg == "profiles" then
-        if TUICD.ProfilesUI then
-            TUICD.ProfilesUI:Toggle()
+    elseif cmd == "remigrate" then
+        -- Re-run migration for users who lost positions
+        local charDb = TweaksUI_Cooldowns_CharDB
+        if not charDb then
+            TUICD:PrintError("No character database found")
+            return
         end
         
-    elseif msg == "spectest" then
-        -- Debug command to test spec switching
-        TUICD:Print("=== Spec Switch Debug ===")
-        local specIndex = GetSpecialization()
-        TUICD:Print("Current spec index: " .. tostring(specIndex))
-        
-        if TUICD.Profiles then
-            local enabled = TUICD.Profiles:IsSpecAutoSwitchEnabled()
-            TUICD:Print("Auto-switch enabled: " .. tostring(enabled))
-            
-            local profileName = TUICD.Profiles:GetSpecProfile(specIndex)
-            TUICD:Print("Profile for spec " .. tostring(specIndex) .. ": " .. tostring(profileName))
-            
-            local loadedProfile = TUICD.Profiles:GetLoadedProfileName()
-            TUICD:Print("Currently loaded profile: " .. tostring(loadedProfile))
-            
-            -- Show all spec mappings
-            if TweaksUI_Cooldowns_CharDB and TweaksUI_Cooldowns_CharDB.specProfiles then
-                TUICD:Print("Spec profile mappings:")
-                for k, v in pairs(TweaksUI_Cooldowns_CharDB.specProfiles) do
-                    TUICD:Print("  [" .. tostring(k) .. "] = " .. tostring(v))
+        -- Check if TweaksUI data is available
+        if _G.TweaksUI_CharDB and _G.TweaksUI_CharDB.settings and _G.TweaksUI_CharDB.settings.layout then
+            local tuiLayout = _G.TweaksUI_CharDB.settings.layout
+            if tuiLayout.elements then
+                charDb.settings = charDb.settings or {}
+                charDb.settings.layout = charDb.settings.layout or {}
+                charDb.settings.layout.elements = charDb.settings.layout.elements or {}
+                
+                local cooldownElements = {
+                    "EssentialCooldownViewer_TUIWrapper",
+                    "UtilityCooldownViewer_TUIWrapper",
+                    "BuffIconCooldownViewer_TUIWrapper",
+                    "CustomTracker_TUIWrapper",
+                }
+                
+                local migratedCount = 0
+                for _, elementId in ipairs(cooldownElements) do
+                    if tuiLayout.elements[elementId] then
+                        charDb.settings.layout.elements[elementId] = {
+                            point = tuiLayout.elements[elementId].point,
+                            x = tuiLayout.elements[elementId].x,
+                            y = tuiLayout.elements[elementId].y,
+                            scale = tuiLayout.elements[elementId].scale,
+                        }
+                        migratedCount = migratedCount + 1
+                    end
+                end
+                
+                -- Also copy Dock positions
+                for elementId, pos in pairs(tuiLayout.elements) do
+                    if elementId:match("^Dock_") then
+                        charDb.settings.layout.elements[elementId] = {
+                            point = pos.point,
+                            x = pos.x,
+                            y = pos.y,
+                            scale = pos.scale,
+                        }
+                        migratedCount = migratedCount + 1
+                    end
+                end
+                
+                charDb.settings.layout.dataVersion = 4
+                
+                if migratedCount > 0 then
+                    TUICD:Print("Re-migrated " .. migratedCount .. " positions from TweaksUI.")
+                    TUICD:Print("Reload UI to apply positions: |cff00ff00/rl|r")
+                else
+                    TUICD:Print("No positions found in TweaksUI data.")
                 end
             else
-                TUICD:Print("No specProfiles table found!")
+                TUICD:PrintError("No layout data found in TweaksUI.")
             end
-            
-            -- Force trigger OnSpecChanged
-            TUICD:Print("Manually triggering OnSpecChanged...")
-            TUICD.Profiles:OnSpecChanged()
         else
-            TUICD:Print("Profiles module not loaded!")
+            TUICD:PrintError("TweaksUI character data not found. Make sure TweaksUI is installed and has been loaded at least once.")
         end
         
-    elseif msg == "resetpos" then
-        TUICD.Database:ClearContainerPositions()
-        TUICD:Print("All tracker positions reset. Reload UI to apply.")
+    elseif cmd == "migrateprofiles" then
+        -- Force migration of all stored profiles from old format to new format
+        if not TweaksUI_Cooldowns_DB or not TweaksUI_Cooldowns_DB.profiles then
+            TUICD:Print("No stored profiles found.")
+            return
+        end
         
-    elseif msg == "resettext" then
-        -- Reset all text settings to defaults for all trackers
-        local trackerKeys = {"essential", "utility", "buffs", "custom"}
-        local textSettings = {
-            "cooldownTextScale", "cooldownTextOffsetX", "cooldownTextOffsetY",
-            "cooldownTextColorR", "cooldownTextColorG", "cooldownTextColorB", "cooldownTextFont",
-            "countTextScale", "countTextOffsetX", "countTextOffsetY",
-            "countTextColorR", "countTextColorG", "countTextColorB", "countTextFont"
-        }
-        local defaults = {
-            cooldownTextScale = 1.0, cooldownTextOffsetX = 0, cooldownTextOffsetY = 0,
-            cooldownTextColorR = 1.0, cooldownTextColorG = 1.0, cooldownTextColorB = 1.0, cooldownTextFont = "Default",
-            countTextScale = 1.0, countTextOffsetX = 0, countTextOffsetY = 0,
-            countTextColorR = 1.0, countTextColorG = 1.0, countTextColorB = 1.0, countTextFont = "Default"
-        }
+        local migratedCount = 0
+        local skippedCount = 0
         
-        for _, trackerKey in ipairs(trackerKeys) do
-            local settings = TUICD.Database:GetTrackerSettings(trackerKey)
-            if settings then
-                for _, key in ipairs(textSettings) do
-                    settings[key] = defaults[key]
+        for name, profileData in pairs(TweaksUI_Cooldowns_DB.profiles) do
+            -- Check if this is old format (has trackers but no modules)
+            if profileData.trackers ~= nil and profileData.modules == nil then
+                TUICD:Print("Migrating profile: |cffffff00" .. name .. "|r")
+                
+                -- Convert to new format
+                local converted = {
+                    modules = {
+                        cooldowns = {},
+                        layout = {
+                            elements = {},
+                            dataVersion = 4,
+                        },
+                    },
+                    enabled = {
+                        cooldowns = true,
+                    },
+                }
+                
+                -- Convert tracker settings
+                if profileData.trackers then
+                    for trackerKey, trackerSettings in pairs(profileData.trackers) do
+                        converted.modules.cooldowns[trackerKey] = trackerSettings
+                    end
                 end
-            end
-        end
-        
-        TUICD:Print("Text settings reset to defaults for all trackers.")
-        TUICD:Print("Reload UI to apply changes: /rl")
-        
-    elseif msg == "layout" then
-        if TUICD.LayoutMode and TUICD.LayoutMode.Toggle then
-            TUICD.LayoutMode:Toggle()
-        else
-            TUICD:PrintError("Layout Mode not available.")
-        end
-        
-    elseif msg == "profiledebug" then
-        print("|cff00ff00=== TUI:CD Profile Debug ===|r")
-        print("TweaksUI_Cooldowns_DB exists: " .. tostring(TweaksUI_Cooldowns_DB ~= nil))
-        print("TweaksUI_Cooldowns_CharDB exists: " .. tostring(TweaksUI_Cooldowns_CharDB ~= nil))
-        
-        if TweaksUI_Cooldowns_DB and TweaksUI_Cooldowns_DB.profiles then
-            print("Saved profiles:")
-            for name, data in pairs(TweaksUI_Cooldowns_DB.profiles) do
-                local hasTrackers = data.trackers ~= nil
-                local iconSize = data.trackers and data.trackers.essential and data.trackers.essential.iconSize
-                print("  - '" .. name .. "' (hasTrackers=" .. tostring(hasTrackers) .. ", essential.iconSize=" .. tostring(iconSize) .. ")")
-            end
-        else
-            print("No profiles table!")
-        end
-        
-        if TweaksUI_Cooldowns_CharDB then
-            print("CharDB.profileInfo:")
-            if TweaksUI_Cooldowns_CharDB.profileInfo then
-                print("  basedOn: " .. tostring(TweaksUI_Cooldowns_CharDB.profileInfo.basedOn))
-                print("  loadedHash: " .. tostring(TweaksUI_Cooldowns_CharDB.profileInfo.loadedHash))
+                
+                -- Convert container positions
+                local containerToElementId = {
+                    essential = "EssentialCooldownViewer_TUIWrapper",
+                    utility = "UtilityCooldownViewer_TUIWrapper",
+                    buffs = "BuffIconCooldownViewer_TUIWrapper",
+                    customTrackers = "CustomTracker_TUIWrapper",
+                }
+                
+                if profileData.containerPositions then
+                    for key, pos in pairs(profileData.containerPositions) do
+                        local elementId = containerToElementId[key]
+                        if elementId and pos then
+                            converted.modules.layout.elements[elementId] = {
+                                point = pos.point or "CENTER",
+                                x = pos.x or 0,
+                                y = pos.y or 0,
+                                scale = pos.scale or 1,
+                            }
+                        end
+                    end
+                end
+                
+                -- Copy highlight settings
+                if profileData.buffHighlights then converted.buffHighlights = profileData.buffHighlights end
+                if profileData.essentialHighlights then converted.essentialHighlights = profileData.essentialHighlights end
+                if profileData.utilityHighlights then converted.utilityHighlights = profileData.utilityHighlights end
+                if profileData.customHighlights then converted.customHighlights = profileData.customHighlights end
+                
+                -- Convert custom entries
+                if profileData.customEntries then
+                    converted.cooldowns = { customEntries = profileData.customEntries }
+                end
+                
+                -- Copy docks and metadata
+                if profileData.docks then converted.docks = profileData.docks end
+                if profileData.savedAt then converted.savedAt = profileData.savedAt end
+                if profileData.addonVersion then converted.addonVersion = profileData.addonVersion end
+                
+                TweaksUI_Cooldowns_DB.profiles[name] = converted
+                migratedCount = migratedCount + 1
             else
-                print("  (no profileInfo)")
+                skippedCount = skippedCount + 1
             end
-            
-            print("CharDB.trackers.essential.iconSize: " .. tostring(TweaksUI_Cooldowns_CharDB.trackers and TweaksUI_Cooldowns_CharDB.trackers.essential and TweaksUI_Cooldowns_CharDB.trackers.essential.iconSize))
         end
         
-        if TUICD.Profiles then
-            print("Profiles module lastLoadedProfile: " .. tostring(TUICD.Profiles:GetLoadedProfileName()))
+        if migratedCount > 0 then
+            TUICD:Print("|cff00ff00Migrated " .. migratedCount .. " profile(s) to 3.0 format.|r")
+            TUICD:Print("You can now switch profiles normally.")
+        else
+            TUICD:Print("No old-format profiles found to migrate. (" .. skippedCount .. " already in 3.0 format)")
         end
         
     else
-        TUICD:Print("Unknown command. Type /tuicd help for available commands.")
+        TUICD:Print("Unknown command: " .. cmd)
+        TUICD:Print("Type /tuicd help for commands")
     end
 end
 
--- ============================================================================
--- CONVENIENCE SLASH COMMANDS
--- ============================================================================
-
--- /cmt - Alias for /tuicd (familiar for CMT users)
-SLASH_CMT1 = "/cmt"
-SlashCmdList["CMT"] = function(msg)
-    SlashCmdList["TUICD"](msg)
+-- Register slash commands
+for _, cmd in ipairs(TUICD.SLASH_COMMANDS) do
+    local cmdName = cmd:upper():gsub("/", "")
+    _G["SLASH_" .. cmdName .. "1"] = cmd
+    SlashCmdList[cmdName] = HandleSlashCommand
 end
 
--- /rl - Reload UI (common convenience command)
-SLASH_TUICDRL1 = "/rl"
-SlashCmdList["TUICDRL"] = function()
+-- Additional standalone commands
+SLASH_TUICDLAYOUT1 = "/tuicdlayout"
+SlashCmdList["TUICDLAYOUT"] = function(msg)
+    local subcmd = msg:lower():match("^(%S*)") or ""
+    
+    if subcmd == "grid" then
+        if TUICD.Layout then
+            TUICD.Layout:ToggleGrid()
+        end
+    else
+        if TUICD.Layout then
+            TUICD.Layout:Toggle()
+        end
+    end
+end
+
+-- Quick reload command
+SLASH_RL1 = "/rl"
+SlashCmdList["RL"] = function()
     ReloadUI()
 end
 
--- /em - Open Edit Mode
-SLASH_TUICDEM1 = "/em"
-SlashCmdList["TUICDEM"] = function()
-    if EditModeManagerFrame and EditModeManagerFrame.Show then
+-- Edit Mode shortcut
+SLASH_EM1 = "/em"
+SlashCmdList["EM"] = function()
+    if EditModeManagerFrame then
         if EditModeManagerFrame:IsShown() then
-            EditModeManagerFrame:Hide()
+            HideUIPanel(EditModeManagerFrame)
         else
-            EditModeManagerFrame:Show()
+            ShowUIPanel(EditModeManagerFrame)
         end
-    else
-        TUICD:PrintError("Edit Mode not available.")
     end
 end
 
--- /cdm - Open Blizzard's Cooldown Manager settings
-SLASH_TUICDCDM1 = "/cdm"
-SlashCmdList["TUICDCDM"] = function()
+-- Blizzard Cooldown Manager shortcut
+SLASH_CDM1 = "/cdm"
+SlashCmdList["CDM"] = function()
     -- CooldownViewerSettings is Blizzard's Cooldown Settings frame
     local cooldownFrame = CooldownViewerSettings or _G["CooldownViewerSettings"]
     

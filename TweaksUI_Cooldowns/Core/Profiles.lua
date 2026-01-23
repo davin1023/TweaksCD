@@ -1,7 +1,5 @@
--- ============================================================================
--- TweaksUI: Cooldowns - Profiles
--- Profile save/load/switch/dirty tracking system
--- ============================================================================
+-- TUICD Profiles
+-- Profile save/load/switch/dirty tracking system (1.5.0+)
 
 local ADDON_NAME, TUICD = ...
 
@@ -12,7 +10,11 @@ local Profiles = TUICD.Profiles
 -- CONSTANTS
 -- ============================================================================
 
-local PROFILE_VERSION = "1.0.0"
+local PROFILE_VERSION = "1.5.0"
+
+-- Settings that can be hot-applied vs require reload
+-- Modules register their capabilities here
+local HOT_APPLY_REGISTRY = {}
 
 -- ============================================================================
 -- INTERNAL STATE
@@ -21,6 +23,25 @@ local PROFILE_VERSION = "1.0.0"
 local profileLoadedHash = nil
 local lastLoadedProfile = nil
 local isDirty = false
+local lastLoadedIsBuiltIn = false
+
+-- ============================================================================
+-- BUILT-IN PROFILE HELPERS
+-- ============================================================================
+
+-- Check if a profile name is a built-in default profile
+local function IsBuiltInProfile(name)
+    local DefaultProfiles = TUICD.DefaultProfiles
+    if DefaultProfiles and DefaultProfiles.IsDefaultProfile then
+        return DefaultProfiles:IsDefaultProfile(name)
+    end
+    return false
+end
+
+-- Public version
+function Profiles:IsBuiltInProfile(name)
+    return IsBuiltInProfile(name)
+end
 
 -- ============================================================================
 -- UTILITY FUNCTIONS
@@ -38,12 +59,84 @@ local function DeepCopy(orig)
     return copy
 end
 
+-- Keys that represent scale values that should be adjusted for resolution
+local SCALE_KEYS = {
+    ["scale"] = true,
+    ["globalScale"] = true,
+}
+
+-- Keys that represent sizes that should be adjusted for resolution
+-- Note: We're conservative here - only adjust explicit size settings, not things like borderWidth
+local SIZE_KEYS = {
+    ["iconSize"] = true,
+    ["buttonSize"] = true,
+}
+
+-- Recursively adjust scale values in a settings table
+-- scaleAdjustment: multiplier (e.g., 1.5 means target screen is 50% larger)
+local function AdjustScalesInTable(tbl, scaleAdjustment, depth)
+    if type(tbl) ~= "table" then return tbl end
+    depth = depth or 0
+    if depth > 20 then return tbl end  -- Prevent infinite recursion
+    
+    for key, value in pairs(tbl) do
+        if type(value) == "table" then
+            AdjustScalesInTable(value, scaleAdjustment, depth + 1)
+        elseif type(value) == "number" then
+            -- Adjust scale keys
+            if SCALE_KEYS[key] then
+                tbl[key] = value * scaleAdjustment
+            -- Adjust size keys (icon sizes, button sizes)
+            elseif SIZE_KEYS[key] then
+                tbl[key] = math.floor(value * scaleAdjustment + 0.5)  -- Round to nearest integer
+            end
+        end
+    end
+    
+    return tbl
+end
+
+-- Calculate scale adjustment factor between source and target resolution
+-- Returns a multiplier to apply to scale values
+local function CalculateScaleAdjustment(sourceWidth, sourceHeight, sourceUIScale)
+    if not sourceWidth or not sourceHeight then
+        return 1.0
+    end
+    
+    local targetWidth, targetHeight = GetPhysicalScreenSize()
+    local targetUIScale = UIParent:GetEffectiveScale()
+    
+    -- Use height as the primary scaling reference (more consistent for UI)
+    -- Calculate "effective" height (pixels / UI scale)
+    local sourceEffective = sourceHeight / (sourceUIScale or 1)
+    local targetEffective = targetHeight / targetUIScale
+    
+    -- Scale factor: how much bigger/smaller the target screen is
+    local scaleAdjustment = targetEffective / sourceEffective
+    
+    -- Clamp to reasonable range (0.5x to 2x)
+    scaleAdjustment = math.max(0.5, math.min(2.0, scaleAdjustment))
+    
+    -- Only adjust if difference is significant (more than 10%)
+    if math.abs(scaleAdjustment - 1.0) < 0.1 then
+        return 1.0
+    end
+    
+    return scaleAdjustment
+end
+
 -- Simple hash function for dirty detection
+-- Uses string serialization + checksum
+-- IMPORTANT: Rounds floats to avoid floating-point precision issues
 local function SerializeForHash(tbl, depth)
     depth = depth or 0
     if depth > 50 then return "MAX_DEPTH" end
     
     if type(tbl) ~= "table" then
+        if type(tbl) == "number" then
+            -- Round to 2 decimal places to avoid floating point precision issues
+            return string.format("%.2f", tbl)
+        end
         return tostring(tbl)
     end
     
@@ -78,13 +171,22 @@ end
 -- DATABASE HELPERS
 -- ============================================================================
 
--- Ensure profile storage exists in account-wide DB
+-- Ensure profile storage exists
 local function EnsureProfileStorage()
     if not TweaksUI_Cooldowns_DB then
         TweaksUI_Cooldowns_DB = {}
     end
     if not TweaksUI_Cooldowns_DB.profiles then
         TweaksUI_Cooldowns_DB.profiles = {}
+    end
+    if not TweaksUI_Cooldowns_DB.global then
+        TweaksUI_Cooldowns_DB.global = {}
+    end
+    if not TweaksUI_Cooldowns_DB.global.presetSettings then
+        TweaksUI_Cooldowns_DB.global.presetSettings = {
+            autoBackup = true,
+            maxBackupsPerModule = 3,
+        }
     end
 end
 
@@ -104,98 +206,435 @@ local function EnsureCharProfileInfo()
 end
 
 -- ============================================================================
+-- OLD PROFILE FORMAT CONVERSION
+-- ============================================================================
+
+-- Convert old TUI:CD 2.x profile format to 3.0 format
+-- Old format:
+--   trackers = { essential = {...}, utility = {...}, buffs = {...}, customTrackers = {...} }
+--   containerPositions = { essential = {point, x, y}, ... }
+--   buffHighlights, essentialHighlights, utilityHighlights, customHighlights
+--   customEntries = {...}
+-- New format:
+--   modules = { cooldowns = {...}, layout = { elements = {...} } }
+--   enabled = { cooldowns = true }
+--   buffHighlights, essentialHighlights, utilityHighlights, customHighlights
+--   cooldowns = { customEntries = {...} }
+local function ConvertOldProfileFormat(profileData)
+    if not profileData then return profileData end
+    
+    -- Check if this is old format (has trackers but no modules)
+    local isOldFormat = profileData.trackers ~= nil and profileData.modules == nil
+    
+    if not isOldFormat then
+        return profileData  -- Already new format
+    end
+    
+    TUICD:PrintDebug("Converting old profile format to 3.0 format...")
+    
+    local converted = {
+        modules = {
+            cooldowns = {},
+            layout = {
+                elements = {},
+                dataVersion = 4,  -- BOTTOMLEFT absolute format
+            },
+        },
+        enabled = {
+            cooldowns = true,
+        },
+    }
+    
+    -- Convert tracker settings
+    if profileData.trackers then
+        for trackerKey, trackerSettings in pairs(profileData.trackers) do
+            converted.modules.cooldowns[trackerKey] = DeepCopy(trackerSettings)
+        end
+    end
+    
+    -- Convert container positions to layout elements
+    local containerToElementId = {
+        essential = "EssentialCooldownViewer_TUIWrapper",
+        utility = "UtilityCooldownViewer_TUIWrapper",
+        buffs = "BuffIconCooldownViewer_TUIWrapper",
+        customTrackers = "CustomTracker_TUIWrapper",
+    }
+    
+    if profileData.containerPositions then
+        for key, pos in pairs(profileData.containerPositions) do
+            local elementId = containerToElementId[key]
+            if elementId and pos then
+                converted.modules.layout.elements[elementId] = {
+                    point = pos.point or "CENTER",
+                    x = pos.x or 0,
+                    y = pos.y or 0,
+                    scale = pos.scale or 1,
+                }
+            end
+        end
+    end
+    
+    -- Copy highlight settings (these are the same format)
+    if profileData.buffHighlights then
+        converted.buffHighlights = DeepCopy(profileData.buffHighlights)
+    end
+    if profileData.essentialHighlights then
+        converted.essentialHighlights = DeepCopy(profileData.essentialHighlights)
+    end
+    if profileData.utilityHighlights then
+        converted.utilityHighlights = DeepCopy(profileData.utilityHighlights)
+    end
+    if profileData.customHighlights then
+        converted.customHighlights = DeepCopy(profileData.customHighlights)
+    end
+    
+    -- Convert custom entries
+    if profileData.customEntries then
+        converted.cooldowns = {
+            customEntries = DeepCopy(profileData.customEntries),
+        }
+    end
+    
+    -- Copy docks if present (may not exist in very old profiles)
+    if profileData.docks then
+        converted.docks = DeepCopy(profileData.docks)
+    end
+    
+    -- Copy metadata if present
+    if profileData.savedAt then
+        converted.savedAt = profileData.savedAt
+    end
+    if profileData.addonVersion then
+        converted.addonVersion = profileData.addonVersion
+    end
+    if profileData.importedFrom then
+        converted.importedFrom = profileData.importedFrom
+    end
+    
+    TUICD:PrintDebug("Profile format conversion complete.")
+    return converted
+end
+
+-- Migrate all stored profiles from old format to new format (one-time at load)
+local function MigrateStoredProfiles()
+    EnsureProfileStorage()
+    
+    if not TweaksUI_Cooldowns_DB.profiles then return end
+    
+    local migratedCount = 0
+    for name, profileData in pairs(TweaksUI_Cooldowns_DB.profiles) do
+        -- Check if this is old format
+        if profileData.trackers ~= nil and profileData.modules == nil then
+            TUICD:PrintDebug("Migrating stored profile: " .. name)
+            TweaksUI_Cooldowns_DB.profiles[name] = ConvertOldProfileFormat(profileData)
+            migratedCount = migratedCount + 1
+        end
+    end
+    
+    if migratedCount > 0 then
+        TUICD:Print("Migrated " .. migratedCount .. " profile(s) to 3.0 format.")
+    end
+end
+
+-- ============================================================================
 -- CURRENT SETTINGS GATHERING
 -- ============================================================================
 
--- Get all current tracker settings as a profile-ready table
-function Profiles:GetCurrentSettings()
+-- Internal function to gather settings from database
+-- skipSync: if true, don't call SyncAllModulesToDatabase (used for dirty checking)
+local function GatherCurrentSettings(skipSync)
     EnsureCharProfileInfo()
     
-    local charDb = TweaksUI_Cooldowns_CharDB
+    -- Sync all in-memory settings to database before gathering (unless skipped)
+    -- This ensures attachments and other runtime state is persisted
+    if not skipSync then
+        if TUICD.ProfileImportExport and TUICD.ProfileImportExport.SyncAllModulesToDatabase then
+            TUICD.ProfileImportExport:SyncAllModulesToDatabase()
+        end
+    end
+    
+    -- Only include cooldowns.customEntries, not runtime data like trackerCache
+    local cooldownsData = {}
+    if TweaksUI_Cooldowns_CharDB.cooldowns and TweaksUI_Cooldowns_CharDB.cooldowns.customEntries then
+        cooldownsData.customEntries = DeepCopy(TweaksUI_Cooldowns_CharDB.cooldowns.customEntries)
+    end
     
     return {
-        -- All tracker settings
-        trackers = DeepCopy(charDb.trackers or {}),
-        -- Custom entries per spec
-        customEntries = DeepCopy(charDb.customEntries or {}),
-        -- Container positions
-        containerPositions = DeepCopy(charDb.containerPositions or {}),
-        -- Highlight settings
-        buffHighlights = DeepCopy(charDb.buffHighlights or {}),
-        essentialHighlights = DeepCopy(charDb.essentialHighlights or {}),
-        utilityHighlights = DeepCopy(charDb.utilityHighlights or {}),
-        customHighlights = DeepCopy(charDb.customHighlights or {}),
-        -- Dynamic Docks settings
-        docks = DeepCopy(charDb.docks or {}),
+        modules = DeepCopy(TweaksUI_Cooldowns_CharDB.settings or {}),
+        enabled = DeepCopy(TweaksUI_Cooldowns_CharDB.modules or {}),
+        -- Container positions (UI Frame and Action Bar containers)
+        uiFrameContainerPositions = DeepCopy(TweaksUI_Cooldowns_CharDB.uiFrameContainerPositions or {}),
+        actionBarContainerPositions = DeepCopy(TweaksUI_Cooldowns_CharDB.actionBarContainerPositions or {}),
+        -- Cooldowns custom entries ONLY (tracked abilities per spec) - excludes trackerCache
+        cooldowns = cooldownsData,
+        -- Per-Icon Highlight settings (all tracker types)
+        buffHighlights = DeepCopy(TweaksUI_Cooldowns_CharDB.buffHighlights or {}),
+        essentialHighlights = DeepCopy(TweaksUI_Cooldowns_CharDB.essentialHighlights or {}),
+        utilityHighlights = DeepCopy(TweaksUI_Cooldowns_CharDB.utilityHighlights or {}),
+        customHighlights = DeepCopy(TweaksUI_Cooldowns_CharDB.customHighlights or {}),
+        -- Docks settings (Dynamic Docks feature)
+        docks = DeepCopy(TweaksUI_Cooldowns_CharDB.docks or {}),
     }
 end
 
+-- Get all current settings as a profile-ready table (with sync)
+-- NOTE: Layout positions and snap attachments are stored in modules.layout
+-- (via TweaksUI_Cooldowns_CharDB.settings.layout.elements and .attachments)
+-- IMPORTANT: Only include data that gets saved/restored in profiles, not runtime data
+function Profiles:GetCurrentSettings()
+    return GatherCurrentSettings(false)
+end
+
+-- Get current settings WITHOUT syncing (for dirty checking only)
+-- This prevents the sync from modifying data and causing false dirty detection
+function Profiles:GetCurrentSettingsForComparison()
+    return GatherCurrentSettings(true)
+end
+
 -- Apply settings from a profile table to current character
-function Profiles:ApplySettings(profileData)
-    print("|cff00ff00[TUI:CD DEBUG]|r ApplySettings called")
+function Profiles:ApplySettings(profileData, skipReloadCheck)
+    if not profileData then return false, "No profile data" end
     
-    if not profileData then 
-        print("|cff00ff00[TUI:CD DEBUG]|r No profileData!")
-        return false, "No profile data" 
-    end
-    
-    print("|cff00ff00[TUI:CD DEBUG]|r profileData has trackers: " .. tostring(profileData.trackers ~= nil))
+    -- Convert old profile format to 3.0 format if needed
+    profileData = ConvertOldProfileFormat(profileData)
     
     EnsureCharProfileInfo()
     
-    local charDb = TweaksUI_Cooldowns_CharDB
-    print("|cff00ff00[TUI:CD DEBUG]|r charDb exists: " .. tostring(charDb ~= nil))
+    -- Track what needs reload vs what can hot-apply
+    local needsReload = false
+    local hotApplied = {}
     
-    -- Apply tracker settings
-    if profileData.trackers then
-        print("|cff00ff00[TUI:CD DEBUG]|r Copying trackers...")
-        charDb.trackers = DeepCopy(profileData.trackers)
-        print("|cff00ff00[TUI:CD DEBUG]|r Trackers copied. charDb.trackers exists: " .. tostring(charDb.trackers ~= nil))
+    -- Calculate scale adjustment factor if source resolution is available
+    local scaleAdjustment = 1.0
+    if profileData.importedFrom then
+        scaleAdjustment = CalculateScaleAdjustment(
+            profileData.importedFrom.screenWidth,
+            profileData.importedFrom.screenHeight,
+            profileData.importedFrom.uiScale
+        )
+        
+        if scaleAdjustment ~= 1.0 then
+            TUICD:Print(string.format("Adjusting scales by %.0f%% for resolution difference", (scaleAdjustment - 1) * 100))
+        end
     end
     
-    -- Apply custom entries
-    if profileData.customEntries then
-        charDb.customEntries = DeepCopy(profileData.customEntries)
+    -- Apply module settings
+    if profileData.modules then
+        -- Ensure settings table exists
+        TweaksUI_Cooldowns_CharDB.settings = TweaksUI_Cooldowns_CharDB.settings or {}
+        
+        for moduleId, moduleSettings in pairs(profileData.modules) do
+            -- Check if this module can hot-apply
+            local canHotApply = self:CanModuleHotApply(moduleId)
+            
+            -- Deep copy settings first
+            local processedSettings = DeepCopy(moduleSettings)
+            
+            -- Special handling for layout module
+            -- New exports use BOTTOMLEFT directly, but handle legacy CENTER_REL for backwards compatibility
+            if moduleId == "layout" and processedSettings.elements then
+                local CenterToScreen = TUICD.CenterToScreen
+                for id, pos in pairs(processedSettings.elements) do
+                    -- Legacy: convert CENTER_REL to BOTTOMLEFT if present
+                    if pos.point == "CENTER_REL" and pos.x and pos.y and CenterToScreen then
+                        local absX, absY = CenterToScreen(pos.x, pos.y)
+                        local halfWidth, halfHeight = 50, 25
+                        local element = TUICD.Layout and TUICD.Layout:GetElement(id)
+                        if element and element.tuiFrame and element.tuiFrame.frame then
+                            local frame = element.tuiFrame.frame
+                            halfWidth = (frame:GetWidth() or 100) / 2
+                            halfHeight = (frame:GetHeight() or 50) / 2
+                        end
+                        processedSettings.elements[id] = {
+                            point = "BOTTOMLEFT",
+                            x = absX - halfWidth,
+                            y = absY - halfHeight,
+                            scale = pos.scale,
+                        }
+                    end
+                    -- BOTTOMLEFT positions pass through unchanged
+                end
+            end
+            
+            -- Apply scale adjustment to all scale values in the module settings
+            if scaleAdjustment ~= 1.0 then
+                AdjustScalesInTable(processedSettings, scaleAdjustment)
+            end
+            
+            TweaksUI_Cooldowns_CharDB.settings[moduleId] = processedSettings
+            
+            -- Notify the module that its settings were changed externally
+            -- This invalidates any in-memory settings cache
+            local moduleObj = TUICD.ModuleManager and TUICD.ModuleManager:GetModule(moduleId)
+            if moduleObj and moduleObj.OnProfileChanged then
+                pcall(function() moduleObj:OnProfileChanged("profile_load") end)
+            elseif moduleObj and moduleObj.InvalidateSettingsCache then
+                pcall(function() moduleObj:InvalidateSettingsCache() end)
+            end
+            
+            if canHotApply and not skipReloadCheck then
+                -- Try to hot-apply
+                local success = self:TryHotApplyModule(moduleId)
+                if success then
+                    table.insert(hotApplied, moduleId)
+                else
+                    needsReload = true
+                end
+            else
+                needsReload = true
+            end
+        end
     end
     
-    -- Apply container positions
-    if profileData.containerPositions then
-        charDb.containerPositions = DeepCopy(profileData.containerPositions)
+    -- Apply module enabled states
+    if profileData.enabled then
+        -- Ensure modules table exists
+        TweaksUI_Cooldowns_CharDB.modules = TweaksUI_Cooldowns_CharDB.modules or {}
+        
+        for moduleId, enabled in pairs(profileData.enabled) do
+            TweaksUI_Cooldowns_CharDB.modules[moduleId] = enabled
+        end
+        needsReload = true  -- Module enable/disable always needs reload
     end
     
-    -- Apply highlight settings
+    -- Layout positions are stored in modules.layout, so after applying modules
+    -- we should try to refresh positions if the Layout module exists
+    if profileData.modules and profileData.modules.layout then
+        if TUICD.Layout and TUICD.Layout.RefreshAllPositions then
+            pcall(function() TUICD.Layout:RefreshAllPositions() end)
+        end
+        
+        -- Reload and apply snap attachments from the new layout settings
+        if TUICD.SnapLocking then
+            pcall(function() 
+                TUICD.SnapLocking:LoadAttachments()
+                -- Apply after a short delay to let frames initialize
+                C_Timer.After(0.5, function()
+                    if TUICD.SnapLocking.ApplyAllAttachments then
+                        TUICD.SnapLocking:ApplyAllAttachments()
+                    end
+                end)
+            end)
+        end
+        
+        -- Always need reload for layout changes to fully apply
+        needsReload = true
+    end
+    
+    -- Apply container positions (UI Frame Containers)
+    if profileData.uiFrameContainerPositions then
+        TweaksUI_Cooldowns_CharDB.uiFrameContainerPositions = DeepCopy(profileData.uiFrameContainerPositions)
+        -- These require reload to reposition
+        needsReload = true
+    end
+    
+    -- Apply container positions (Action Bar Containers)
+    if profileData.actionBarContainerPositions then
+        TweaksUI_Cooldowns_CharDB.actionBarContainerPositions = DeepCopy(profileData.actionBarContainerPositions)
+        -- These require reload to reposition
+        needsReload = true
+    end
+    
+    -- Apply cooldowns custom entries
+    if profileData.cooldowns then
+        TweaksUI_Cooldowns_CharDB.cooldowns = TweaksUI_Cooldowns_CharDB.cooldowns or {}
+        -- Only copy customEntries, preserve trackerCache (it's regenerated)
+        if profileData.cooldowns.customEntries then
+            TweaksUI_Cooldowns_CharDB.cooldowns.customEntries = DeepCopy(profileData.cooldowns.customEntries)
+        end
+        needsReload = true
+    end
+    
+    -- Apply buff highlights settings
     if profileData.buffHighlights then
-        charDb.buffHighlights = DeepCopy(profileData.buffHighlights)
+        TweaksUI_Cooldowns_CharDB.buffHighlights = DeepCopy(profileData.buffHighlights)
+        needsReload = true
     end
+    
+    -- Apply cooldown tracker per-icon highlight settings
     if profileData.essentialHighlights then
-        charDb.essentialHighlights = DeepCopy(profileData.essentialHighlights)
+        TweaksUI_Cooldowns_CharDB.essentialHighlights = DeepCopy(profileData.essentialHighlights)
+        needsReload = true
     end
+    
     if profileData.utilityHighlights then
-        charDb.utilityHighlights = DeepCopy(profileData.utilityHighlights)
+        TweaksUI_Cooldowns_CharDB.utilityHighlights = DeepCopy(profileData.utilityHighlights)
+        needsReload = true
     end
+    
     if profileData.customHighlights then
-        charDb.customHighlights = DeepCopy(profileData.customHighlights)
+        TweaksUI_Cooldowns_CharDB.customHighlights = DeepCopy(profileData.customHighlights)
+        needsReload = true
     end
     
-    -- Apply Dynamic Docks settings
+    -- Apply Docks settings (Dynamic Docks feature)
     if profileData.docks then
-        charDb.docks = DeepCopy(profileData.docks)
+        -- Debug: show what we're importing
+        if TUICD.PrintDebug then
+            TUICD:PrintDebug("Profile docks data found, applying...")
+            for k, v in pairs(profileData.docks) do
+                if type(v) == "table" then
+                    TUICD:PrintDebug(string.format("  Dock key=%s (type=%s): enabled=%s, showBg=%s, showBorder=%s",
+                        tostring(k), type(k), tostring(v.enabled), tostring(v.showBackground), tostring(v.showBorder)))
+                end
+            end
+        end
+        TweaksUI_Cooldowns_CharDB.docks = DeepCopy(profileData.docks)
+        needsReload = true
+    else
+        if TUICD.PrintDebug then
+            TUICD:PrintDebug("Profile has NO docks data!")
+        end
     end
-    
-    print("|cff00ff00[TUI:CD DEBUG]|r All settings applied to charDb")
     
     -- Fire settings changed event
     if TUICD.Events then
-        TUICD.Events:Fire(TUICD.EVENTS.TRACKER_SETTINGS_CHANGED, nil, nil, nil)
+        TUICD.Events:Fire(TUICD.EVENTS.SETTINGS_CHANGED, nil, nil, nil)
     end
     
-    -- Refresh Docks if available
-    if TUICD.Docks and TUICD.Docks.RefreshAllDocks then
-        TUICD.Docks:RefreshAllDocks()
+    return true, needsReload, hotApplied
+end
+
+-- ============================================================================
+-- HOT-APPLY SYSTEM
+-- ============================================================================
+
+-- Register a module's hot-apply capability
+function Profiles:RegisterHotApply(moduleId, config)
+    HOT_APPLY_REGISTRY[moduleId] = config or {
+        canHotApply = false,
+        refreshFunc = nil,
+    }
+end
+
+-- Check if a module can hot-apply its settings
+function Profiles:CanModuleHotApply(moduleId)
+    local reg = HOT_APPLY_REGISTRY[moduleId]
+    if not reg then return false end
+    return reg.canHotApply == true
+end
+
+-- Attempt to hot-apply a module's settings
+function Profiles:TryHotApplyModule(moduleId)
+    local reg = HOT_APPLY_REGISTRY[moduleId]
+    if not reg or not reg.canHotApply then
+        return false
     end
     
-    print("|cff00ff00[TUI:CD DEBUG]|r ApplySettings completed successfully")
-    return true
+    -- Try the registered refresh function
+    if reg.refreshFunc then
+        local success = pcall(reg.refreshFunc)
+        return success
+    end
+    
+    -- Try to find the module and call RefreshFromSettings
+    local moduleObj = TUICD.ModuleManager and TUICD.ModuleManager:GetModule(moduleId)
+    if moduleObj and moduleObj.RefreshFromSettings then
+        local success = pcall(function() moduleObj:RefreshFromSettings() end)
+        return success
+    end
+    
+    return false
 end
 
 -- ============================================================================
@@ -208,26 +647,39 @@ function Profiles:SaveProfile(name)
         return false, "Profile name is required"
     end
     
+    -- Cannot overwrite built-in profiles
+    if IsBuiltInProfile(name) then
+        return false, "Cannot overwrite built-in profile: " .. name
+    end
+    
     EnsureProfileStorage()
     
+    -- Get current settings WITH sync for saving (captures in-memory state)
     local currentSettings = self:GetCurrentSettings()
     
     TweaksUI_Cooldowns_DB.profiles[name] = {
         version = PROFILE_VERSION,
         created = TweaksUI_Cooldowns_DB.profiles[name] and TweaksUI_Cooldowns_DB.profiles[name].created or time(),
         modified = time(),
-        trackers = currentSettings.trackers,
-        customEntries = currentSettings.customEntries,
-        containerPositions = currentSettings.containerPositions,
+        modules = currentSettings.modules,
+        enabled = currentSettings.enabled,
+        -- Container positions
+        uiFrameContainerPositions = currentSettings.uiFrameContainerPositions,
+        actionBarContainerPositions = currentSettings.actionBarContainerPositions,
+        -- Cooldowns custom entries
+        cooldowns = currentSettings.cooldowns,
+        -- Per-Icon highlight settings (all tracker types)
         buffHighlights = currentSettings.buffHighlights,
         essentialHighlights = currentSettings.essentialHighlights,
         utilityHighlights = currentSettings.utilityHighlights,
         customHighlights = currentSettings.customHighlights,
+        -- Docks settings (Dynamic Docks feature)
         docks = currentSettings.docks,
     }
     
-    -- Update tracking
-    self:SetLoadedProfile(name, currentSettings)
+    -- Update tracking - use comparison function (no sync) for consistent hash baseline
+    -- The sync already happened above, so DB is current
+    self:SetLoadedProfile(name, self:GetCurrentSettingsForComparison())
     
     TUICD:Print("Profile saved: |cff00ff00" .. name .. "|r")
     return true
@@ -237,54 +689,60 @@ end
 function Profiles:LoadProfile(name, skipWarning)
     EnsureProfileStorage()
     
-    print("|cff00ff00[TUI:CD DEBUG]|r LoadProfile called: name='" .. tostring(name) .. "', skipWarning=" .. tostring(skipWarning))
+    -- Check for built-in default profile first
+    local isBuiltIn = IsBuiltInProfile(name)
+    local profile
     
-    local profile = TweaksUI_Cooldowns_DB.profiles[name]
-    if not profile then
-        print("|cff00ff00[TUI:CD DEBUG]|r Profile NOT FOUND in DB!")
-        -- List available profiles
-        print("|cff00ff00[TUI:CD DEBUG]|r Available profiles:")
-        for pname, _ in pairs(TweaksUI_Cooldowns_DB.profiles or {}) do
-            print("|cff00ff00[TUI:CD DEBUG]|r   - '" .. tostring(pname) .. "'")
+    if isBuiltIn then
+        local DefaultProfiles = TUICD.DefaultProfiles
+        profile = DefaultProfiles:GetProfile(name)
+        if not profile then
+            return false, "Built-in profile not available: " .. name
         end
-        return false, "Profile not found: " .. name
+    else
+        profile = TweaksUI_Cooldowns_DB.profiles[name]
+        if not profile then
+            return false, "Profile not found: " .. name
+        end
     end
-    
-    print("|cff00ff00[TUI:CD DEBUG]|r Profile found, applying settings...")
     
     -- Check for unsaved changes
     if not skipWarning and self:IsDirty() then
-        print("|cff00ff00[TUI:CD DEBUG]|r Dirty check triggered, returning warning")
         return false, "DIRTY_WARNING", lastLoadedProfile
     end
     
     -- Apply the profile
-    local success, err = self:ApplySettings(profile)
+    local success, needsReload, hotApplied = self:ApplySettings(profile)
     if not success then
-        print("|cff00ff00[TUI:CD DEBUG]|r ApplySettings FAILED: " .. tostring(err))
-        return false, err
+        return false, needsReload  -- needsReload is error message here
     end
     
-    print("|cff00ff00[TUI:CD DEBUG]|r ApplySettings succeeded")
-    
-    -- Ensure all new default settings exist (for profiles saved on older versions)
-    if TUICD.Database and TUICD.Database.EnsureDefaults then
-        TUICD.Database:EnsureDefaults()
+    -- Mark that a TUI profile has been applied (skip Modern preset check from now on)
+    if TweaksUI_Cooldowns_CharDB then
+        TweaksUI_Cooldowns_CharDB.tuiProfileApplied = true
     end
     
-    -- Update tracking
-    self:SetLoadedProfile(name, self:GetCurrentSettings())
+    -- Update tracking - use comparison function for consistent hash baseline
+    lastLoadedIsBuiltIn = isBuiltIn
+    self:SetLoadedProfile(name, self:GetCurrentSettingsForComparison())
     
-    print("|cff00ff00[TUI:CD DEBUG]|r SetLoadedProfile called, lastLoadedProfile now: " .. tostring(lastLoadedProfile))
+    TUICD:Print("Profile loaded: |cff00ff00" .. name .. "|r" .. (isBuiltIn and " (built-in)" or ""))
     
-    TUICD:Print("Profile loaded: |cff00ff00" .. name .. "|r")
+    if needsReload then
+        return true, "NEEDS_RELOAD", hotApplied
+    end
     
-    return true, "NEEDS_RELOAD"
+    return true
 end
 
 -- Delete a profile
 function Profiles:DeleteProfile(name)
     EnsureProfileStorage()
+    
+    -- Cannot delete built-in profiles
+    if IsBuiltInProfile(name) then
+        return false, "Cannot delete built-in profile"
+    end
     
     if not TweaksUI_Cooldowns_DB.profiles[name] then
         return false, "Profile not found"
@@ -304,11 +762,24 @@ end
 function Profiles:DuplicateProfile(sourceName, newName)
     EnsureProfileStorage()
     
+    -- Cannot use a built-in name as the destination
+    if IsBuiltInProfile(newName) then
+        return false, "Cannot use built-in profile name: " .. newName
+    end
+    
     if TweaksUI_Cooldowns_DB.profiles[newName] then
         return false, "A profile with that name already exists"
     end
     
-    local source = TweaksUI_Cooldowns_DB.profiles[sourceName]
+    -- Get source from built-in or user profiles
+    local source
+    if IsBuiltInProfile(sourceName) then
+        local DefaultProfiles = TUICD.DefaultProfiles
+        source = DefaultProfiles:GetProfile(sourceName)
+    else
+        source = TweaksUI_Cooldowns_DB.profiles[sourceName]
+    end
+    
     if not source then
         return false, "Source profile not found"
     end
@@ -317,13 +788,16 @@ function Profiles:DuplicateProfile(sourceName, newName)
         version = PROFILE_VERSION,
         created = time(),
         modified = time(),
-        trackers = DeepCopy(source.trackers or {}),
-        customEntries = DeepCopy(source.customEntries or {}),
-        containerPositions = DeepCopy(source.containerPositions or {}),
+        modules = DeepCopy(source.modules),
+        enabled = DeepCopy(source.enabled),
+        uiFrameContainerPositions = DeepCopy(source.uiFrameContainerPositions or {}),
+        actionBarContainerPositions = DeepCopy(source.actionBarContainerPositions or {}),
+        cooldowns = DeepCopy(source.cooldowns or {}),
         buffHighlights = DeepCopy(source.buffHighlights or {}),
         essentialHighlights = DeepCopy(source.essentialHighlights or {}),
         utilityHighlights = DeepCopy(source.utilityHighlights or {}),
         customHighlights = DeepCopy(source.customHighlights or {}),
+        docks = DeepCopy(source.docks or {}),
     }
     
     TUICD:Print("Profile duplicated: |cff00ff00" .. newName .. "|r")
@@ -333,6 +807,16 @@ end
 -- Rename a profile
 function Profiles:RenameProfile(oldName, newName)
     EnsureProfileStorage()
+    
+    -- Cannot rename built-in profiles
+    if IsBuiltInProfile(oldName) then
+        return false, "Cannot rename built-in profile"
+    end
+    
+    -- Cannot rename to a built-in profile name
+    if IsBuiltInProfile(newName) then
+        return false, "Cannot use built-in profile name: " .. newName
+    end
     
     if not TweaksUI_Cooldowns_DB.profiles[oldName] then
         return false, "Profile not found"
@@ -368,17 +852,38 @@ function Profiles:GetProfileList()
     
     local list = {}
     
+    -- Add built-in profiles first
+    local DefaultProfiles = TUICD.DefaultProfiles
+    if DefaultProfiles and DefaultProfiles.GetProfileList then
+        for _, profile in ipairs(DefaultProfiles:GetProfileList()) do
+            table.insert(list, profile)
+        end
+    end
+    
+    -- Add user profiles
     for name, data in pairs(TweaksUI_Cooldowns_DB.profiles) do
         table.insert(list, {
             name = name,
             created = data.created,
             modified = data.modified,
             version = data.version,
+            isBuiltIn = false,
         })
     end
     
-    -- Sort alphabetically
+    -- Sort: built-in first (by order), then user profiles alphabetically
     table.sort(list, function(a, b)
+        -- Built-in before user
+        if a.isBuiltIn and not b.isBuiltIn then
+            return true
+        elseif not a.isBuiltIn and b.isBuiltIn then
+            return false
+        end
+        -- Both built-in: sort by order
+        if a.isBuiltIn and b.isBuiltIn then
+            return (a.order or 999) < (b.order or 999)
+        end
+        -- Both user: sort by name
         return a.name < b.name
     end)
     
@@ -387,6 +892,11 @@ end
 
 -- Check if a profile exists
 function Profiles:ProfileExists(name)
+    -- Check built-in profiles first
+    if IsBuiltInProfile(name) then
+        return true
+    end
+    
     EnsureProfileStorage()
     return TweaksUI_Cooldowns_DB.profiles[name] ~= nil
 end
@@ -396,12 +906,12 @@ end
 -- ============================================================================
 
 -- Set the currently loaded profile (called after save/load)
+-- Uses GetCurrentSettingsForComparison to avoid sync side effects
 function Profiles:SetLoadedProfile(name, settingsSnapshot)
     lastLoadedProfile = name
-    profileLoadedHash = HashSettings(settingsSnapshot or self:GetCurrentSettings())
+    -- Use the provided snapshot, or get current settings WITHOUT sync
+    profileLoadedHash = HashSettings(settingsSnapshot or self:GetCurrentSettingsForComparison())
     isDirty = false
-    
-    TUICD:PrintDebug("SetLoadedProfile: " .. tostring(name) .. ", hash=" .. tostring(profileLoadedHash))
     
     EnsureCharProfileInfo()
     TweaksUI_Cooldowns_CharDB.profileInfo.basedOn = name
@@ -416,13 +926,15 @@ function Profiles:MarkDirty()
         return
     end
     
-    local currentHash = HashSettings(self:GetCurrentSettings())
+    -- Use non-syncing version to avoid false positives from sync side effects
+    local currentHash = HashSettings(self:GetCurrentSettingsForComparison())
     isDirty = (currentHash ~= profileLoadedHash)
 end
 
 -- Mark as clean (after saving)
 function Profiles:MarkClean()
-    profileLoadedHash = HashSettings(self:GetCurrentSettings())
+    -- Use non-syncing version for consistent comparison baseline
+    profileLoadedHash = HashSettings(self:GetCurrentSettingsForComparison())
     isDirty = false
     
     EnsureCharProfileInfo()
@@ -431,32 +943,12 @@ end
 
 -- Check if there are unsaved changes
 function Profiles:IsDirty()
-    -- If no profile was ever loaded, not dirty
-    if not profileLoadedHash then
-        TUICD:PrintDebug("IsDirty: No profileLoadedHash, returning false")
-        return false
+    -- Recalculate to be sure, using non-syncing version
+    if profileLoadedHash then
+        local currentHash = HashSettings(self:GetCurrentSettingsForComparison())
+        isDirty = (currentHash ~= profileLoadedHash)
     end
-    
-    -- Recalculate current hash
-    local currentSettings = self:GetCurrentSettings()
-    local currentHash = HashSettings(currentSettings)
-    isDirty = (currentHash ~= profileLoadedHash)
-    
-    if TUICD.debugMode then
-        TUICD:PrintDebug("IsDirty check:")
-        TUICD:PrintDebug("  Loaded hash: " .. tostring(profileLoadedHash))
-        TUICD:PrintDebug("  Current hash: " .. tostring(currentHash))
-        TUICD:PrintDebug("  Is dirty: " .. tostring(isDirty))
-    end
-    
     return isDirty
-end
-
--- Clear dirty state (reset hash to current state)
-function Profiles:ClearDirty()
-    profileLoadedHash = HashSettings(self:GetCurrentSettings())
-    isDirty = false
-    TUICD:PrintDebug("ClearDirty: new hash=" .. tostring(profileLoadedHash))
 end
 
 -- Get dirty state info
@@ -502,249 +994,66 @@ end
 
 -- Handle spec change event
 function Profiles:OnSpecChanged()
-    print("|cff00ff00[TUI:CD DEBUG]|r OnSpecChanged called")
-    
-    local enabled = self:IsSpecAutoSwitchEnabled()
-    print("|cff00ff00[TUI:CD DEBUG]|r Auto-switch enabled: " .. tostring(enabled))
-    
-    if not enabled then
+    if not self:IsSpecAutoSwitchEnabled() then
         return
     end
     
     local specIndex = GetSpecialization()
-    print("|cff00ff00[TUI:CD DEBUG]|r Current spec index: " .. tostring(specIndex))
-    
-    if not specIndex then 
-        print("|cff00ff00[TUI:CD DEBUG]|r No spec index, aborting")
-        return 
-    end
+    if not specIndex then return end
     
     local profileName = self:GetSpecProfile(specIndex)
-    print("|cff00ff00[TUI:CD DEBUG]|r Profile for spec " .. specIndex .. ": " .. tostring(profileName))
+    if not profileName then return end
     
-    if not profileName then 
-        print("|cff00ff00[TUI:CD DEBUG]|r No profile assigned, aborting")
-        return 
-    end
-    
-    print("|cff00ff00[TUI:CD DEBUG]|r lastLoadedProfile: " .. tostring(lastLoadedProfile))
+    -- Debug output
+    TUICD:PrintDebug("OnSpecChanged: specIndex=" .. tostring(specIndex) .. 
+        ", profileName=" .. tostring(profileName) .. 
+        ", lastLoadedProfile=" .. tostring(lastLoadedProfile) ..
+        ", basedOn=" .. tostring(TweaksUI_Cooldowns_CharDB.profileInfo and TweaksUI_Cooldowns_CharDB.profileInfo.basedOn) ..
+        ", lastSpecIndex=" .. tostring(TweaksUI_Cooldowns_CharDB.profileInfo and TweaksUI_Cooldowns_CharDB.profileInfo.lastSpecIndex))
     
     -- Check if we're already on this profile
     if profileName == lastLoadedProfile then
-        print("|cff00ff00[TUI:CD DEBUG]|r Already on this profile, skipping")
+        TUICD:PrintDebug("OnSpecChanged: Skipping - already on profile " .. profileName)
         return
     end
     
-    print("|cff00ff00[TUI:CD DEBUG]|r Will switch from '" .. tostring(lastLoadedProfile) .. "' to '" .. profileName .. "'")
+    -- Also check if this is the same spec we were on at login
+    -- This prevents unnecessary reloads when logging in
+    if TweaksUI_Cooldowns_CharDB.profileInfo.lastSpecIndex == specIndex then
+        -- Same spec as login - check if basedOn matches the spec's assigned profile
+        if TweaksUI_Cooldowns_CharDB.profileInfo.basedOn == profileName then
+            TUICD:PrintDebug("OnSpecChanged: Skipping - same spec as login with matching profile")
+            -- Update lastLoadedProfile to stay in sync
+            lastLoadedProfile = profileName
+            return
+        end
+    end
     
-    -- For spec auto-switch, just switch without asking about dirty state
-    local success, result = self:LoadProfile(profileName, true)
-    print("|cff00ff00[TUI:CD DEBUG]|r LoadProfile returned: success=" .. tostring(success) .. ", result=" .. tostring(result))
+    -- Check for dirty state
+    if self:IsDirty() then
+        -- Show dirty warning dialog for spec switch
+        local dialog = StaticPopup_Show("TWEAKSUI_SPEC_SWITCH_DIRTY", profileName)
+        if dialog then
+            dialog.data = { 
+                targetProfile = profileName,
+                specIndex = specIndex,
+                currentProfile = lastLoadedProfile,
+            }
+        end
+        return
+    end
     
+    -- Load the profile
+    local success, result = self:LoadProfile(profileName, true)  -- skipWarning = true
     if success then
         TUICD:Print("Auto-switched to profile: |cff00ff00" .. profileName .. "|r (spec change)")
-        self:ShowReloadDialog(profileName)
-    else
-        TUICD:PrintError("Failed to switch profile: " .. tostring(result))
-    end
-end
-
--- Show reload dialog after profile switch
-function Profiles:ShowReloadDialog(profileName)
-    StaticPopupDialogs["TUICD_PROFILE_RELOAD"] = {
-        text = "Profile '" .. profileName .. "' has been loaded.\n\nA UI reload is required to fully apply the new settings.",
-        button1 = "Reload Now",
-        button2 = "Later",
-        OnAccept = function()
-            ReloadUI()
-        end,
-        OnCancel = function()
-            TUICD:Print("|cffffcc00Reminder:|r Type |cff00ff00/rl|r to reload when ready.")
-        end,
-        timeout = 0,
-        whileDead = true,
-        hideOnEscape = true,
-        preferredIndex = 3,
-    }
-    StaticPopup_Show("TUICD_PROFILE_RELOAD")
-end
-
--- Show dialog when spec switch is blocked due to dirty profile
-function Profiles:ShowSpecSwitchBlockedDialog(specIndex, targetProfile)
-    -- Store the current profile name for saving
-    local currentProfileName = lastLoadedProfile
-    
-    StaticPopupDialogs["TUICD_SPEC_SWITCH_DIRTY"] = {
-        text = "You have unsaved changes to your current profile.\n\nSwitch to '" .. targetProfile .. "'?",
-        button1 = "Save & Switch",
-        button2 = "Discard & Switch", 
-        button3 = "Cancel",
-        OnAccept = function()
-            -- Save current settings to the current profile, then switch
-            if currentProfileName then
-                Profiles:SaveProfile(currentProfileName)
-                TUICD:Print("Saved changes to: |cff00ff00" .. currentProfileName .. "|r")
-            end
-            local success = Profiles:LoadProfile(targetProfile, true)
-            if success then
-                TUICD:Print("Switched to profile: |cff00ff00" .. targetProfile .. "|r")
-                Profiles:ShowReloadDialog(targetProfile)
-            end
-        end,
-        OnCancel = function()
-            -- "Discard & Switch" - clear dirty state and switch
-            Profiles:ClearDirty()
-            local success = Profiles:LoadProfile(targetProfile, true)
-            if success then
-                TUICD:Print("Switched to profile: |cff00ff00" .. targetProfile .. "|r (changes discarded)")
-                Profiles:ShowReloadDialog(targetProfile)
-            end
-        end,
-        OnAlt = function()
-            -- "Cancel" - do nothing
-            TUICD:Print("Profile switch cancelled.")
-        end,
-        timeout = 0,
-        whileDead = true,
-        hideOnEscape = true,
-        preferredIndex = 3,
-    }
-    StaticPopup_Show("TUICD_SPEC_SWITCH_DIRTY")
-end
-
--- ============================================================================
--- IMPORT/EXPORT
--- ============================================================================
-
--- Export current settings as a string
-function Profiles:ExportProfile(profileName)
-    EnsureProfileStorage()
-    
-    local profile
-    if profileName then
-        profile = TweaksUI_Cooldowns_DB.profiles[profileName]
-        if not profile then
-            return nil, "Profile not found"
+        -- Update lastSpecIndex after successful spec change
+        TweaksUI_Cooldowns_CharDB.profileInfo.lastSpecIndex = specIndex
+        if result == "NEEDS_RELOAD" then
+            -- Show reload prompt
+            StaticPopup_Show("TWEAKSUI_RELOAD_AFTER_PROFILE")
         end
-    else
-        -- Export current settings
-        profile = self:GetCurrentSettings()
-        profile.version = PROFILE_VERSION
-        profile.exportedAt = time()
     end
-    
-    -- Add metadata
-    local exportData = {
-        addon = "TweaksUI_Cooldowns",
-        version = PROFILE_VERSION,
-        exportedAt = time(),
-        profile = profile,
-    }
-    
-    -- Serialize
-    local LibDeflate = LibStub and LibStub:GetLibrary("LibDeflate", true)
-    if not LibDeflate then
-        return nil, "LibDeflate not available"
-    end
-    
-    -- Convert to string
-    local serialized = TUICD.Utilities:TableToString(exportData)
-    if not serialized then
-        return nil, "Failed to serialize profile"
-    end
-    
-    -- Compress
-    local compressed = LibDeflate:CompressDeflate(serialized)
-    if not compressed then
-        return nil, "Failed to compress profile"
-    end
-    
-    -- Encode for sharing
-    local encoded = LibDeflate:EncodeForPrint(compressed)
-    if not encoded then
-        return nil, "Failed to encode profile"
-    end
-    
-    return "!TUICD1!" .. encoded, nil
-end
-
--- Import settings from a string
-function Profiles:ImportProfile(importString, profileName)
-    if not importString or importString == "" then
-        return nil, "Import string is empty"
-    end
-    
-    -- Check header
-    if not importString:match("^!TUICD1!") then
-        return nil, "Invalid import string format"
-    end
-    
-    local encoded = importString:gsub("^!TUICD1!", "")
-    
-    local LibDeflate = LibStub and LibStub:GetLibrary("LibDeflate", true)
-    if not LibDeflate then
-        return nil, "LibDeflate not available"
-    end
-    
-    -- Decode
-    local compressed = LibDeflate:DecodeForPrint(encoded)
-    if not compressed then
-        return nil, "Failed to decode import string"
-    end
-    
-    -- Decompress
-    local serialized = LibDeflate:DecompressDeflate(compressed)
-    if not serialized then
-        return nil, "Failed to decompress import string"
-    end
-    
-    -- Deserialize
-    local importData = TUICD.Utilities:StringToTable(serialized)
-    if not importData then
-        return nil, "Failed to deserialize import data"
-    end
-    
-    -- Validate
-    if importData.addon ~= "TweaksUI_Cooldowns" then
-        return nil, "This is not a TweaksUI: Cooldowns profile"
-    end
-    
-    if not importData.profile then
-        return nil, "Import data missing profile"
-    end
-    
-    -- Return validated profile data for the UI to save
-    return importData.profile, nil
-end
-
--- Save an imported profile
-function Profiles:SaveImportedProfile(profileData, profileName)
-    if not profileName or profileName == "" then
-        return false, "Profile name is required"
-    end
-    
-    EnsureProfileStorage()
-    
-    if TweaksUI_Cooldowns_DB.profiles[profileName] then
-        return false, "A profile with that name already exists"
-    end
-    
-    TweaksUI_Cooldowns_DB.profiles[profileName] = {
-        version = PROFILE_VERSION,
-        created = time(),
-        modified = time(),
-        imported = true,
-        trackers = DeepCopy(profileData.trackers or {}),
-        customEntries = DeepCopy(profileData.customEntries or {}),
-        containerPositions = DeepCopy(profileData.containerPositions or {}),
-        buffHighlights = DeepCopy(profileData.buffHighlights or {}),
-        essentialHighlights = DeepCopy(profileData.essentialHighlights or {}),
-        utilityHighlights = DeepCopy(profileData.utilityHighlights or {}),
-        customHighlights = DeepCopy(profileData.customHighlights or {}),
-    }
-    
-    TUICD:Print("Profile imported: |cff00ff00" .. profileName .. "|r")
-    return true
 end
 
 -- ============================================================================
@@ -755,28 +1064,182 @@ function Profiles:Initialize()
     EnsureProfileStorage()
     EnsureCharProfileInfo()
     
+    -- Migrate any old-format profiles to 3.0 format (one-time)
+    MigrateStoredProfiles()
+    
     -- Restore tracking state from character DB
     if TweaksUI_Cooldowns_CharDB.profileInfo.basedOn then
         lastLoadedProfile = TweaksUI_Cooldowns_CharDB.profileInfo.basedOn
-        profileLoadedHash = TweaksUI_Cooldowns_CharDB.profileInfo.loadedHash
+        -- IMPORTANT: Recalculate the hash instead of using stored one
+        -- This ensures consistency with the current GetCurrentSettingsForComparison method
+        -- The stored hash may have been generated with different settings gathering logic
+        profileLoadedHash = HashSettings(self:GetCurrentSettingsForComparison())
+        -- Update the stored hash to the new value
+        TweaksUI_Cooldowns_CharDB.profileInfo.loadedHash = profileLoadedHash
+    end
+    
+    -- Store current spec index at login to prevent unnecessary spec-switch reloads
+    local currentSpec = GetSpecialization()
+    if currentSpec then
+        TweaksUI_Cooldowns_CharDB.profileInfo.lastSpecIndex = currentSpec
+        
+        -- If spec auto-switch is enabled and this spec has a profile assigned,
+        -- ensure lastLoadedProfile matches (to prevent reload on login)
+        if self:IsSpecAutoSwitchEnabled() then
+            local specProfile = self:GetSpecProfile(currentSpec)
+            if specProfile and specProfile == TweaksUI_Cooldowns_CharDB.profileInfo.basedOn then
+                -- Already matches, good
+                lastLoadedProfile = specProfile
+                TUICD:PrintDebug("Profiles: Login spec " .. currentSpec .. " matches basedOn profile: " .. specProfile)
+            end
+        end
     end
     
     -- Register for spec change events
-    -- Both events are needed for reliable detection across all scenarios
     local frame = CreateFrame("Frame")
     frame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
-    frame:RegisterEvent("ACTIVE_TALENT_GROUP_CHANGED")
-    frame:SetScript("OnEvent", function(self, event, unit)
-        -- PLAYER_SPECIALIZATION_CHANGED passes a unit argument
-        if event == "PLAYER_SPECIALIZATION_CHANGED" and unit ~= "player" then
-            return
+    frame:SetScript("OnEvent", function(self, event, ...)
+        if event == "PLAYER_SPECIALIZATION_CHANGED" then
+            -- Delay slightly to let game settle
+            C_Timer.After(0.5, function()
+                Profiles:OnSpecChanged()
+            end)
         end
-        
-        -- Delay slightly to let game settle
-        C_Timer.After(0.5, function()
-            Profiles:OnSpecChanged()
-        end)
     end)
     
     TUICD:PrintDebug("Profiles system initialized")
+end
+
+-- ============================================================================
+-- MIGRATION (from 1.4.0 to 1.5.0)
+-- ============================================================================
+
+function Profiles:MigrateFrom_1_4_0()
+    EnsureProfileStorage()
+    EnsureCharProfileInfo()
+    
+    -- Check if already migrated
+    if TweaksUI_Cooldowns_CharDB.profileInfo.migrated_1_5_0 then
+        return false
+    end
+    
+    -- Check if this character has settings but no profile
+    if TweaksUI_Cooldowns_CharDB.settings and next(TweaksUI_Cooldowns_CharDB.settings) then
+        local charName = UnitName("player")
+        local defaultProfileName = charName .. " - Default"
+        
+        -- Create default profile from current settings if one doesn't exist
+        if not TweaksUI_Cooldowns_DB.profiles[defaultProfileName] then
+            local success = self:SaveProfile(defaultProfileName)
+            if success then
+                TUICD:Print("|cff00ff80TweaksUI 1.5.0:|r Your settings have been saved as profile: |cffffd700" .. defaultProfileName .. "|r")
+            end
+        end
+        
+        -- Set as loaded profile - use comparison function for consistent hash
+        self:SetLoadedProfile(defaultProfileName, self:GetCurrentSettingsForComparison())
+    end
+    
+    -- Mark migration complete
+    TweaksUI_Cooldowns_CharDB.profileInfo.migrated_1_5_0 = true
+    
+    return true
+end
+
+-- ============================================================================
+-- DEBUG COMMANDS
+-- ============================================================================
+
+-- Debug function to check why dirty state might be incorrect
+function Profiles:DebugDirtyState()
+    print("|cff00ff00=== TUICD Profile Dirty State Debug ===|r")
+    print("Loaded profile: " .. tostring(lastLoadedProfile))
+    print("Stored hash: " .. tostring(profileLoadedHash))
+    
+    -- Use the same function that IsDirty uses
+    local currentSettings = self:GetCurrentSettingsForComparison()
+    local currentHash = HashSettings(currentSettings)
+    print("Current hash (no sync): " .. tostring(currentHash))
+    
+    print("Hashes match: " .. tostring(currentHash == profileLoadedHash))
+    print("isDirty: " .. tostring(self:IsDirty()))
+    
+    -- Show what's in current settings (keys only)
+    print("|cffFFFF00Current settings keys:|r")
+    for k, v in pairs(currentSettings) do
+        if type(v) == "table" then
+            local count = 0
+            for _ in pairs(v) do count = count + 1 end
+            print("  " .. k .. " (table with " .. count .. " keys)")
+        else
+            print("  " .. k .. " = " .. tostring(v))
+        end
+    end
+    
+    -- Show cooldowns structure specifically
+    print("|cffFFFF00Cooldowns structure:|r")
+    if currentSettings.cooldowns then
+        for k, v in pairs(currentSettings.cooldowns) do
+            if type(v) == "table" then
+                local count = 0
+                for _ in pairs(v) do count = count + 1 end
+                print("  cooldowns." .. k .. " (table with " .. count .. " keys)")
+            else
+                print("  cooldowns." .. k .. " = " .. tostring(v))
+            end
+        end
+    else
+        print("  (empty)")
+    end
+    
+    print("|cff00ff00=== End Debug ===|r")
+end
+
+-- Slash command for debugging profile dirty state
+SLASH_TUIDIRTY1 = "/tuidirty"
+SlashCmdList["TUIDIRTY"] = function()
+    TUICD.Profiles:DebugDirtyState()
+end
+
+-- Debug command to show docks in a saved profile
+SLASH_TUIPROFILEDOCKS1 = "/tuiprofiledocks"
+SlashCmdList["TUIPROFILEDOCKS"] = function(profileName)
+    if not profileName or profileName == "" then
+        print("|cff00ff00TUI Profile Docks:|r Usage: /tuiprofiledocks <profilename>")
+        print("Available profiles:")
+        if TweaksUI_Cooldowns_DB and TweaksUI_Cooldowns_DB.profiles then
+            for name in pairs(TweaksUI_Cooldowns_DB.profiles) do
+                print("  - " .. name)
+            end
+        end
+        return
+    end
+    
+    if not TweaksUI_Cooldowns_DB or not TweaksUI_Cooldowns_DB.profiles or not TweaksUI_Cooldowns_DB.profiles[profileName] then
+        print("|cffff0000Profile not found: " .. profileName .. "|r")
+        return
+    end
+    
+    local profile = TweaksUI_Cooldowns_DB.profiles[profileName]
+    print("|cff00ff00=== Docks in Profile: " .. profileName .. " ===|r")
+    
+    if not profile.docks then
+        print("|cffff8800Profile has NO docks data!|r")
+        return
+    end
+    
+    for k, v in pairs(profile.docks) do
+        print(string.format("Key: %s (type=%s)", tostring(k), type(k)))
+        if type(v) == "table" then
+            print(string.format("  enabled=%s, showBackground=%s, showBorder=%s",
+                tostring(v.enabled), tostring(v.showBackground), tostring(v.showBorder)))
+            if v.bgColor then
+                print(string.format("  bgColor: r=%.2f, g=%.2f, b=%.2f, a=%.2f",
+                    v.bgColor.r or 0, v.bgColor.g or 0, v.bgColor.b or 0, v.bgColor.a or 0))
+            else
+                print("  bgColor: nil")
+            end
+        end
+    end
+    print("|cff00ff00=== End Profile Docks ===|r")
 end

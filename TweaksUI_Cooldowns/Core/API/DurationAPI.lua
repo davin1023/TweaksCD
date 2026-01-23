@@ -1,5 +1,5 @@
 -- ============================================================================
--- TweaksUI: Cooldowns - Duration API Wrapper
+-- TUICD: Duration API Wrapper
 -- Midnight Duration Object utilities and helpers
 -- ============================================================================
 
@@ -14,36 +14,27 @@ local DurationAPI = TUICD.DurationAPI
 
 -- Create an empty duration object
 function DurationAPI:Create()
-    if C_DurationUtil and C_DurationUtil.CreateDuration then
-        return C_DurationUtil.CreateDuration()
-    end
-    return nil
+    return C_DurationUtil.CreateDuration()
 end
 
 -- Create a duration from start time and length
 function DurationAPI:CreateFromStart(startTime, duration, modRate)
-    local durationObj = self:Create()
-    if durationObj then
-        durationObj:SetTimeFromStart(startTime, duration, modRate)
-    end
+    local durationObj = C_DurationUtil.CreateDuration()
+    durationObj:SetTimeFromStart(startTime, duration, modRate)
     return durationObj
 end
 
 -- Create a duration from end time and length
 function DurationAPI:CreateFromEnd(endTime, duration, modRate)
-    local durationObj = self:Create()
-    if durationObj then
-        durationObj:SetTimeFromEnd(endTime, duration, modRate)
-    end
+    local durationObj = C_DurationUtil.CreateDuration()
+    durationObj:SetTimeFromEnd(endTime, duration, modRate)
     return durationObj
 end
 
 -- Create a duration from time span
 function DurationAPI:CreateFromSpan(startTime, endTime)
-    local durationObj = self:Create()
-    if durationObj then
-        durationObj:SetTimeSpan(startTime, endTime)
-    end
+    local durationObj = C_DurationUtil.CreateDuration()
+    durationObj:SetTimeSpan(startTime, endTime)
     return durationObj
 end
 
@@ -103,7 +94,7 @@ end
 -- Apply duration to status bar for remaining time display
 function DurationAPI:ApplyToStatusBarRemaining(statusBar, durationObj, interpolation)
     return self:ApplyToStatusBar(statusBar, durationObj, interpolation, 
-        TUICD.API.TIMER_DIRECTION and TUICD.API.TIMER_DIRECTION.REMAINING)
+        TUICD.API.TIMER_DIRECTION.REMAINING)
 end
 
 -- ============================================================================
@@ -113,11 +104,8 @@ end
 -- Set cooldown from expiration time (convenience wrapper)
 function DurationAPI:SetCooldownFromExpiration(cooldownFrame, expirationTime, duration, modRate)
     if not cooldownFrame then return false end
-    if cooldownFrame.SetCooldownFromExpirationTime then
-        cooldownFrame:SetCooldownFromExpirationTime(expirationTime, duration, modRate)
-        return true
-    end
-    return false
+    cooldownFrame:SetCooldownFromExpirationTime(expirationTime, duration, modRate)
+    return true
 end
 
 -- ============================================================================
@@ -139,10 +127,7 @@ end
 -- Get spell loss of control duration object
 function DurationAPI:GetSpellLossOfControl(spellID)
     if not spellID then return nil end
-    if C_Spell.GetSpellLossOfControlCooldownDuration then
-        return C_Spell.GetSpellLossOfControlCooldownDuration(spellID)
-    end
-    return nil
+    return C_Spell.GetSpellLossOfControlCooldownDuration(spellID)
 end
 
 -- ============================================================================
@@ -152,28 +137,19 @@ end
 -- Get action cooldown duration object
 function DurationAPI:GetActionCooldown(slot)
     if not slot then return nil end
-    if C_ActionBar and C_ActionBar.GetActionCooldownDuration then
-        return C_ActionBar.GetActionCooldownDuration(slot)
-    end
-    return nil
+    return C_ActionBar.GetActionCooldownDuration(slot)
 end
 
 -- Get action charges cooldown duration object
 function DurationAPI:GetActionCharges(slot)
     if not slot then return nil end
-    if C_ActionBar and C_ActionBar.GetActionChargesCooldownDuration then
-        return C_ActionBar.GetActionChargesCooldownDuration(slot)
-    end
-    return nil
+    return C_ActionBar.GetActionChargesCooldownDuration(slot)
 end
 
 -- Get action loss of control duration object
 function DurationAPI:GetActionLossOfControl(slot)
     if not slot then return nil end
-    if C_ActionBar and C_ActionBar.GetActionLossOfControlCooldownDuration then
-        return C_ActionBar.GetActionLossOfControlCooldownDuration(slot)
-    end
-    return nil
+    return C_ActionBar.GetActionLossOfControlCooldownDuration(slot)
 end
 
 -- ============================================================================
@@ -258,19 +234,13 @@ end
 -- Get unit casting duration object
 function DurationAPI:GetCastingDuration(unit)
     if not unit then return nil end
-    if UnitCastingDuration then
-        return UnitCastingDuration(unit)
-    end
-    return nil
+    return UnitCastingDuration(unit)
 end
 
 -- Get unit channel duration object
 function DurationAPI:GetChannelDuration(unit)
     if not unit then return nil end
-    if UnitChannelDuration then
-        return UnitChannelDuration(unit)
-    end
-    return nil
+    return UnitChannelDuration(unit)
 end
 
 -- Get empowered channel duration object

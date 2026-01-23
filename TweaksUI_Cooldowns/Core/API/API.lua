@@ -1,5 +1,5 @@
 -- ============================================================================
--- TweaksUI: Cooldowns - API Wrapper System
+-- TUICD: API Wrapper System
 -- Midnight-native API wrappers for consistent usage across all modules
 -- Version 2.0.0 - No TWW fallbacks, direct Midnight API usage
 -- ============================================================================
@@ -14,23 +14,19 @@ local API = TUICD.API
 -- VERSION CHECK
 -- ============================================================================
 
--- Minimum WoW version (Midnight 12.0.0)
-local MIN_WOW_VERSION = 120000
-
 -- Verify we're running on Midnight (12.0.0+)
 local function CheckMidnightVersion()
     local _, _, _, tocVersion = GetBuildInfo()
-    if tocVersion < MIN_WOW_VERSION then
+    if tocVersion < TUICD.MIN_WOW_VERSION then
         -- This shouldn't happen since TOC enforces it, but just in case
-        print("|cffff0000TUI:CD Error:|r This version requires World of Warcraft: Midnight (12.0.0+)")
-        print("|cffff0000TUI:CD Error:|r Current version: " .. tocVersion .. ", Required: " .. MIN_WOW_VERSION)
+        print("|cffff0000TweaksUI Error:|r This version requires World of Warcraft: Midnight (12.0.0+)")
+        print("|cffff0000TweaksUI Error:|r Current version: " .. tocVersion .. ", Required: " .. TUICD.MIN_WOW_VERSION)
         return false
     end
     return true
 end
 
 API.IsMidnightVerified = CheckMidnightVersion()
-API.MIN_WOW_VERSION = MIN_WOW_VERSION
 
 -- ============================================================================
 -- API AVAILABILITY FLAGS
@@ -80,6 +76,7 @@ API.HAS_COLOR_CURVES = true                  -- ColorCurve objects
 -- Unit APIs
 API.HAS_UNIT_HEALTH_PERCENT = true           -- UnitHealthPercent with curve support
 API.HAS_UNIT_POWER_PERCENT = true            -- UnitPowerPercent with curve support
+API.HAS_HEAL_PREDICTION_CALC = true          -- CreateUnitHealPredictionCalculator
 
 -- Secret Value System
 API.HAS_SECRET_VALUES = true                 -- issecretvalue()
@@ -99,7 +96,7 @@ API.HAS_SECRET_COLOR_WRAP = true             -- WrapTextInColorCode with secrets
 -- ============================================================================
 
 -- Status bar interpolation (always available in Midnight)
-API.BAR_INTERPOLATION = Enum.StatusBarInterpolation and Enum.StatusBarInterpolation.ExponentialEaseOut
+API.BAR_INTERPOLATION = Enum.StatusBarInterpolation.ExponentialEaseOut
 
 -- Timer bar directions
 API.TIMER_DIRECTION = {
@@ -111,7 +108,7 @@ API.TIMER_DIRECTION = {
 -- AURA SORTING CONSTANTS
 -- ============================================================================
 
-API.AURA_SORT = Enum.UnitAuraSortRule and {
+API.AURA_SORT = {
     UNSORTED = Enum.UnitAuraSortRule.Unsorted,
     DEFAULT = Enum.UnitAuraSortRule.Default,
     BIG_DEFENSIVE = Enum.UnitAuraSortRule.BigDefensive,
@@ -119,58 +116,59 @@ API.AURA_SORT = Enum.UnitAuraSortRule and {
     EXPIRATION_ONLY = Enum.UnitAuraSortRule.ExpirationOnly,
     NAME = Enum.UnitAuraSortRule.Name,
     NAME_ONLY = Enum.UnitAuraSortRule.NameOnly,
-} or {}
+}
 
-API.AURA_SORT_DIRECTION = Enum.UnitAuraSortDirection and {
+API.AURA_SORT_DIRECTION = {
     NORMAL = Enum.UnitAuraSortDirection.Normal,
     REVERSE = Enum.UnitAuraSortDirection.Reverse,
-} or {}
+}
 
 -- ============================================================================
 -- RESTRICTION TYPE CONSTANTS
 -- ============================================================================
 
-API.RESTRICTION_TYPE = Enum.AddOnRestrictionType and {
+API.RESTRICTION_TYPE = {
     COMBAT = Enum.AddOnRestrictionType.Combat,
     ENCOUNTER = Enum.AddOnRestrictionType.Encounter,
     CHALLENGE_MODE = Enum.AddOnRestrictionType.ChallengeMode,
     PVP_MATCH = Enum.AddOnRestrictionType.PvPMatch,
     MAP = Enum.AddOnRestrictionType.Map,
-} or {}
+}
 
-API.RESTRICTION_STATE = Enum.AddOnRestrictionState and {
+API.RESTRICTION_STATE = {
     INACTIVE = Enum.AddOnRestrictionState.Inactive,
     ACTIVATING = Enum.AddOnRestrictionState.Activating,
     ACTIVE = Enum.AddOnRestrictionState.Active,
-} or {}
+}
 
 -- ============================================================================
 -- SECRECY LEVEL CONSTANTS
 -- ============================================================================
 
-API.SECRECY_LEVEL = Enum.SecrecyLevel and {
+API.SECRECY_LEVEL = {
     NEVER = Enum.SecrecyLevel.NeverSecret,
     ALWAYS = Enum.SecrecyLevel.AlwaysSecret,
     CONTEXTUAL = Enum.SecrecyLevel.Contextual,
-} or {}
+}
 
 -- ============================================================================
 -- DEBUG / STATUS
 -- ============================================================================
 
 function API:PrintStatus()
-    TUICD:Print("=== TUI:CD 2.0 API Status ===")
+    TUICD:Print("=== TUICD 2.0 API Status ===")
     TUICD:Print("Midnight Verified: " .. (self.IsMidnightVerified and "|cff00ff00YES|r" or "|cffff0000NO|r"))
-    TUICD:Print("Version: " .. TUICD.VERSION)
+    TUICD:Print("Build Version: " .. TUICD.BUILD_VERSION)
     TUICD:Print("Duration Objects: |cff00ff00Available|r")
     TUICD:Print("Smooth Status Bars: |cff00ff00Available|r")
     TUICD:Print("Secret Value System: |cff00ff00Available|r")
     TUICD:Print("Aura Sorting: |cff00ff00Available|r")
+    TUICD:Print("Heal Prediction Calculator: |cff00ff00Available|r")
 end
 
 -- Slash command to check API status
-SLASH_TUICDAPI1 = "/tuicdapi"
-SlashCmdList["TUICDAPI"] = function()
+SLASH_TUIAPI1 = "/tuiapi"
+SlashCmdList["TUIAPI"] = function()
     API:PrintStatus()
 end
 

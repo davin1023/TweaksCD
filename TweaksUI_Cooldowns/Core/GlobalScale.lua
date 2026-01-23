@@ -1,5 +1,5 @@
 -- ============================================================================
--- TweaksUI: Cooldowns - GlobalScale
+-- TweaksUI: GlobalScale
 -- Handles scaling of settings panels for different monitor sizes
 -- ============================================================================
 
@@ -91,25 +91,30 @@ end
 -- SLASH COMMANDS
 -- ============================================================================
 
-SLASH_TUICDSCALE1 = "/tuicdscale"
-SlashCmdList["TUICDSCALE"] = function(msg)
+SLASH_TUISCALE1 = "/tuiscale"
+SlashCmdList["TUISCALE"] = function(msg)
     local args = {}
     for word in msg:gmatch("%S+") do
         table.insert(args, word:lower())
     end
     
-    local value = tonumber(args[1])
+    local cmd = args[1]
+    local value = tonumber(args[2])
     
-    if value then
-        local newScale = GS:SetSettingsScale(value)
-        TUICD:Print(string.format("Settings scale set to: %.0f%%", newScale * 100))
-    elseif args[1] == "reset" then
+    if cmd == "settings" or cmd == "s" then
+        if value then
+            local newScale = GS:SetSettingsScale(value)
+            TUICD:Print(string.format("Settings scale set to: %.0f%%", newScale * 100))
+        else
+            TUICD:Print(string.format("Current settings scale: %.0f%%", GS:GetSettingsScale() * 100))
+        end
+    elseif cmd == "reset" then
         GS:SetSettingsScale(1.0)
         TUICD:Print("Settings scale reset to 100%")
     else
-        TUICD:Print(string.format("Current settings scale: %.0f%%", GS:GetSettingsScale() * 100))
-        print("  /tuicdscale [value] - Set settings panel scale (0.5-2.0)")
-        print("  /tuicdscale reset - Reset settings scale to 100%")
+        print("|cffffd100TweaksUI Scale Commands:|r")
+        print("  /tuiscale settings [value] - Get/set settings panel scale (0.5-2.0)")
+        print("  /tuiscale reset - Reset settings scale to 100%")
     end
 end
 

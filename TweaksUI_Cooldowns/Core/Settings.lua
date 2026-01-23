@@ -1,6 +1,6 @@
 -- ============================================================================
--- TweaksUI: Cooldowns - Settings UI
--- Main settings hub and panels for configuring cooldown trackers
+-- TweaksUI: Cooldowns - Settings
+-- Main settings hub UI - simplified for cooldowns-only addon
 -- ============================================================================
 
 local ADDON_NAME, TUICD = ...
@@ -8,545 +8,576 @@ local ADDON_NAME, TUICD = ...
 TUICD.Settings = {}
 local Settings = TUICD.Settings
 
--- ============================================================================
--- LOCAL VARIABLES
--- ============================================================================
+-- ============================================================
+-- CONSTANTS
+-- ============================================================
+local HUB_WIDTH = 200
+local HUB_HEIGHT = 355
+local BUTTON_WIDTH = 170
+local BUTTON_HEIGHT = 28
+local BUTTON_SPACING = 6
+local SECTION_SPACING = 16
 
-local settingsHub = nil
-local settingsPanels = {}
-local currentOpenPanel = nil
-local initialized = false
+local PANEL_WIDTH = 420
+local PANEL_HEIGHT = 600
 
--- ============================================================================
--- UI HELPERS
--- ============================================================================
+-- ============================================================
+-- DARK BACKDROP TEMPLATE
+-- ============================================================
+local darkBackdrop = {
+    bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
+    edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+    tile = true, tileSize = 32, edgeSize = 32,
+    insets = { left = 8, right = 8, top = 8, bottom = 8 }
+}
 
-local function CreateBackdrop(frame)
-    if frame.SetBackdrop then
-        frame:SetBackdrop(TUICD.BACKDROP_DARK)
-    elseif BackdropTemplateMixin then
-        Mixin(frame, BackdropTemplateMixin)
-        frame:SetBackdrop(TUICD.BACKDROP_DARK)
+-- Panel references
+local hubPanel = nil
+local allPanels = {}
+local moduleSettingsPanels = {}
+
+-- Static popup for reload prompt
+StaticPopupDialogs["TUICD_RELOAD_PROMPT"] = {
+    text = "Settings changed. Reload UI to apply?",
+    button1 = "Reload Now",
+    button2 = "Later",
+    OnAccept = function()
+        ReloadUI()
+    end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
+
+-- ============================================================
+-- HELPER: Create a dockable panel
+-- ============================================================
+local function CreateDockedPanel(name, width, height, headerText)
+    local p = CreateFrame("Frame", name, UIParent, "BackdropTemplate")
+    p:SetSize(width, height)
+    p:SetBackdrop(darkBackdrop)
+    p:SetBackdropColor(0.08, 0.08, 0.08, 0.95)
+    p:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
+    p:SetFrameStrata("HIGH")
+    p:Hide()
+    
+    local header = p:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    header:SetPoint("TOP", 0, -12)
+    header:SetText(headerText)
+    header:SetTextColor(1, 0.82, 0)  -- Gold color
+    p.header = header
+    
+    local closeBtn = CreateFrame("Button", nil, p, "UIPanelCloseButton")
+    closeBtn:SetPoint("TOPRIGHT", -2, -2)
+    closeBtn:SetScript("OnClick", function() p:Hide() end)
+    
+    table.insert(allPanels, p)
+    return p
+end
+
+-- ============================================================
+-- HELPER: Position panel next to hub
+-- ============================================================
+local function PositionPanelNextToHub(targetPanel)
+    if not hubPanel then return end
+    targetPanel:ClearAllPoints()
+    targetPanel:SetPoint("TOPLEFT", hubPanel, "TOPRIGHT", 0, 0)
+end
+
+-- ============================================================
+-- HELPER: Hide all docked panels
+-- ============================================================
+local function HideAllPanels()
+    for _, p in ipairs(allPanels) do
+        p:Hide()
     end
 end
 
-local function CreateButton(parent, text, width, height)
-    local button = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
-    button:SetSize(width or 120, height or 24)
-    button:SetText(text)
-    return button
+-- ============================================================
+-- HELPER: Open a panel (hide others, dock to hub)
+-- ============================================================
+local function OpenPanel(targetPanel)
+    HideAllPanels()
+    PositionPanelNextToHub(targetPanel)
+    targetPanel:Show()
 end
 
-local function CreateCheckbox(parent, text, tooltip)
-    local check = CreateFrame("CheckButton", nil, parent, "InterfaceOptionsCheckButtonTemplate")
-    check.Text:SetText(text)
-    if tooltip then
-        check.tooltipText = tooltip
-    end
-    return check
-end
-
-local function CreateSlider(parent, label, min, max, step, width)
-    local container = CreateFrame("Frame", nil, parent)
-    container:SetSize(width or 200, 45)
+-- ============================================================
+-- CREATE THE HUB PANEL
+-- ============================================================
+function Settings:CreatePanel()
+    if hubPanel then return hubPanel end
     
-    local slider = CreateFrame("Slider", nil, container, "OptionsSliderTemplate")
-    slider:SetPoint("TOP", 0, -15)
-    slider:SetSize((width or 200) - 20, 17)
-    slider:SetMinMaxValues(min, max)
-    slider:SetValueStep(step or 1)
-    slider:SetObeyStepOnDrag(true)
+    -- Main hub panel
+    hubPanel = CreateFrame("Frame", "TUICD_HubPanel", UIParent, "BackdropTemplate")
+    hubPanel:SetSize(HUB_WIDTH, HUB_HEIGHT)
+    hubPanel:SetPoint("CENTER", -200, 0)
+    hubPanel:SetBackdrop(darkBackdrop)
+    hubPanel:SetBackdropColor(0.08, 0.08, 0.08, 0.95)
+    hubPanel:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
+    hubPanel:SetFrameStrata("HIGH")
+    hubPanel:SetMovable(true)
+    hubPanel:EnableMouse(true)
+    hubPanel:RegisterForDrag("LeftButton")
+    hubPanel:SetScript("OnDragStart", hubPanel.StartMoving)
+    hubPanel:SetScript("OnDragStop", hubPanel.StopMovingOrSizing)
+    hubPanel:SetClampedToScreen(true)
+    hubPanel:Hide()
     
-    slider.Low:SetText(tostring(min))
-    slider.High:SetText(tostring(max))
+    -- Register for ESC closing
+    tinsert(UISpecialFrames, "TUICD_HubPanel")
     
-    local title = container:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    title:SetPoint("BOTTOM", slider, "TOP", 0, 3)
-    title:SetText(label)
-    
-    local value = container:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    value:SetPoint("TOP", slider, "BOTTOM", 0, -2)
-    
-    slider:SetScript("OnValueChanged", function(self, val)
-        value:SetText(string.format("%.2f", val))
-    end)
-    
-    container.slider = slider
-    container.value = value
-    
-    return container
-end
-
-local function CreateDropdown(parent, label, width)
-    local container = CreateFrame("Frame", nil, parent)
-    container:SetSize(width or 180, 45)
-    
-    local title = container:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    title:SetPoint("TOPLEFT", 0, 0)
-    title:SetText(label)
-    
-    local dropdown = CreateFrame("Frame", nil, container, "UIDropDownMenuTemplate")
-    dropdown:SetPoint("TOPLEFT", -16, -15)
-    UIDropDownMenu_SetWidth(dropdown, (width or 180) - 40)
-    
-    container.dropdown = dropdown
-    
-    return container
-end
-
--- ============================================================================
--- SETTINGS HUB
--- ============================================================================
-
-local function CreateSettingsHub()
-    if settingsHub then return settingsHub end
-    
-    local frame = CreateFrame("Frame", "TUICD_SettingsHub", UIParent, "BasicFrameTemplateWithInset")
-    frame:SetSize(TUICD.UI.HUB_WIDTH, TUICD.UI.HUB_HEIGHT)
-    frame:SetPoint("CENTER", -200, 0)
-    frame:SetFrameStrata("HIGH")
-    frame:SetMovable(true)
-    frame:EnableMouse(true)
-    frame:RegisterForDrag("LeftButton")
-    frame:SetScript("OnDragStart", frame.StartMoving)
-    frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
-    frame:SetClampedToScreen(true)
-    frame:Hide()
-    
-    -- Register for ESC to close
-    tinsert(UISpecialFrames, "TUICD_SettingsHub")
-    
-    -- Lock layout mode when hub is closed (ESC or close button)
-    frame:SetScript("OnHide", function()
-        if TUICD.LayoutMode and TUICD.LayoutMode:IsUnlocked() then
-            TUICD.LayoutMode:Lock()
-        end
-        -- Also close any open panels
-        if currentOpenPanel and settingsPanels[currentOpenPanel] then
-            settingsPanels[currentOpenPanel]:Hide()
-        end
-    end)
-    
-    -- Title
-    frame.TitleText:SetText("TweaksUI: Cooldowns")
+    -- Title (cyan for TUI:CD branding)
+    local title = hubPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    title:SetPoint("TOP", 0, -12)
+    title:SetText("|cff00ccffTUI: Cooldowns|r")
     
     -- Version
-    local version = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    version:SetPoint("TOP", frame.TitleText, "BOTTOM", 0, -2)
+    local version = hubPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    version:SetPoint("TOP", title, "BOTTOM", 0, -2)
     version:SetText("|cff00ff00v" .. TUICD.VERSION .. "|r")
     
-    -- Content area starts below title bar
-    local contentTop = -50
-    local yOffset = contentTop
-    local buttonWidth = TUICD.UI.HUB_WIDTH - 50
-    
-    -- Tracker buttons
-    local trackerOrder = { "essential", "utility", "buffs", "customTrackers" }
-    local trackerNames = {
-        essential = "Essential Cooldowns",
-        utility = "Utility Cooldowns",
-        buffs = "Buff Tracker",
-        customTrackers = "Custom Trackers",
-    }
-    
-    for _, trackerKey in ipairs(trackerOrder) do
-        -- Settings button (full width, no checkbox)
-        local settingsBtn = CreateButton(frame, trackerNames[trackerKey], buttonWidth, TUICD.UI.BUTTON_HEIGHT)
-        settingsBtn:SetPoint("TOP", frame, "TOP", 0, yOffset)
-        settingsBtn.trackerKey = trackerKey
-        
-        settingsBtn:SetScript("OnClick", function()
-            Settings:OpenTrackerPanel(trackerKey)
-        end)
-        
-        frame["tracker_" .. trackerKey] = settingsBtn
-        
-        yOffset = yOffset - (TUICD.UI.BUTTON_HEIGHT + TUICD.UI.BUTTON_SPACING)
-    end
-    
-    -- Dynamic Docks button
-    local docksBtn = CreateButton(frame, "Dynamic Docks", buttonWidth, TUICD.UI.BUTTON_HEIGHT)
-    docksBtn:SetPoint("TOP", frame, "TOP", 0, yOffset)
-    docksBtn:SetScript("OnClick", function()
-        Settings:OpenDocksPanel()
+    -- Close button
+    local closeBtn = CreateFrame("Button", nil, hubPanel, "UIPanelCloseButton")
+    closeBtn:SetPoint("TOPRIGHT", -2, -2)
+    closeBtn:SetScript("OnClick", function() 
+        HideAllPanels()
+        hubPanel:Hide() 
     end)
-    frame.docksBtn = docksBtn
-    yOffset = yOffset - (TUICD.UI.BUTTON_HEIGHT + TUICD.UI.BUTTON_SPACING)
     
-    -- Divider
-    local divider = frame:CreateTexture(nil, "ARTWORK")
-    divider:SetPoint("TOPLEFT", frame, "TOPLEFT", 15, yOffset - 5)
-    divider:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -15, yOffset - 5)
-    divider:SetHeight(1)
-    divider:SetColorTexture(0.4, 0.4, 0.4, 0.8)
+    local yOffset = -50
     
-    yOffset = yOffset - 15
+    -- ============================================================
+    -- MODULES SECTION
+    -- ============================================================
+    local modulesLabel = hubPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    modulesLabel:SetPoint("TOPLEFT", 15, yOffset)
+    modulesLabel:SetText("|cffaaaaaa— Modules —|r")
+    yOffset = yOffset - 22
     
-    -- Unlock/Lock Frames button
-    local layoutBtn = CreateButton(frame, "Unlock Frames", buttonWidth, 28)
-    layoutBtn:SetPoint("TOP", frame, "TOP", 0, yOffset)
+    -- Cooldowns Button
+    local cooldownsBtn = CreateFrame("Button", nil, hubPanel, "UIPanelButtonTemplate")
+    cooldownsBtn:SetPoint("TOPLEFT", 15, yOffset)
+    cooldownsBtn:SetSize(BUTTON_WIDTH, BUTTON_HEIGHT)
+    cooldownsBtn:SetText("Cooldowns")
+    cooldownsBtn:SetScript("OnClick", function()
+        self:OpenCooldownsPanel()
+    end)
+    yOffset = yOffset - BUTTON_HEIGHT - BUTTON_SPACING
+    
+    -- Layout Button
+    local layoutBtn = CreateFrame("Button", nil, hubPanel, "UIPanelButtonTemplate")
+    layoutBtn:SetPoint("TOPLEFT", 15, yOffset)
+    layoutBtn:SetSize(BUTTON_WIDTH, BUTTON_HEIGHT)
+    layoutBtn:SetText("Layout Mode")
     layoutBtn:SetScript("OnClick", function()
-        if TUICD.LayoutMode then
-            TUICD.LayoutMode:Toggle()
-            if TUICD.LayoutMode:IsUnlocked() then
-                layoutBtn:SetText("|cff00ff00Lock Frames|r")
-            else
-                layoutBtn:SetText("Unlock Frames")
-            end
+        if TUICD.Layout then
+            TUICD.Layout:Toggle()
         end
     end)
-    frame.layoutBtn = layoutBtn
-    yOffset = yOffset - 34
+    yOffset = yOffset - BUTTON_HEIGHT - SECTION_SPACING
     
-    -- Import / Export button
-    local profilesBtn = CreateButton(frame, "Profiles", buttonWidth, 28)
-    profilesBtn:SetPoint("TOP", frame, "TOP", 0, yOffset)
+    -- ============================================================
+    -- SETTINGS SECTION
+    -- ============================================================
+    local settingsLabel = hubPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    settingsLabel:SetPoint("TOPLEFT", 15, yOffset)
+    settingsLabel:SetText("|cffaaaaaa— Settings —|r")
+    yOffset = yOffset - 22
+    
+    -- Profiles Button
+    local profilesBtn = CreateFrame("Button", nil, hubPanel, "UIPanelButtonTemplate")
+    profilesBtn:SetPoint("TOPLEFT", 15, yOffset)
+    profilesBtn:SetSize(BUTTON_WIDTH, BUTTON_HEIGHT)
+    profilesBtn:SetText("Profiles")
     profilesBtn:SetScript("OnClick", function()
-        if TUICD.ProfilesUI then
-            TUICD.ProfilesUI:Toggle()
-        end
+        self:OpenProfilesPanel()
     end)
-    yOffset = yOffset - 34
+    yOffset = yOffset - BUTTON_HEIGHT - BUTTON_SPACING
     
-    -- Patch Notes button
-    local patchNotesBtn = CreateButton(frame, "Patch Notes", buttonWidth, 28)
-    patchNotesBtn:SetPoint("TOP", frame, "TOP", 0, yOffset)
-    patchNotesBtn:SetScript("OnClick", function()
-        Settings:ShowPatchNotes()
-    end)
-    yOffset = yOffset - 34
-    
-    -- About / Discord button
-    local aboutBtn = CreateButton(frame, "About / Discord", buttonWidth, 28)
-    aboutBtn:SetPoint("TOP", frame, "TOP", 0, yOffset)
+    -- About Button
+    local aboutBtn = CreateFrame("Button", nil, hubPanel, "UIPanelButtonTemplate")
+    aboutBtn:SetPoint("TOPLEFT", 15, yOffset)
+    aboutBtn:SetSize(BUTTON_WIDTH, BUTTON_HEIGHT)
+    aboutBtn:SetText("About")
     aboutBtn:SetScript("OnClick", function()
-        if TUICD.Migration and TUICD.Migration.ShowWelcome then
-            TUICD.Migration:ShowWelcome()
-        end
+        self:OpenAboutPanel()
     end)
-    yOffset = yOffset - 40
+    yOffset = yOffset - BUTTON_HEIGHT - BUTTON_SPACING
     
-    -- Minimap button toggle
-    local minimapCB = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
-    minimapCB:SetPoint("TOPLEFT", frame, "TOPLEFT", 15, yOffset)
-    minimapCB:SetSize(24, 24)
-    minimapCB.text = minimapCB:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    minimapCB.text:SetPoint("LEFT", minimapCB, "RIGHT", 2, 0)
-    minimapCB.text:SetText("Show Minimap Button")
+    -- Panel Scale Button
+    local panelScaleBtn = CreateFrame("Button", nil, hubPanel, "UIPanelButtonTemplate")
+    panelScaleBtn:SetPoint("TOPLEFT", 15, yOffset)
+    panelScaleBtn:SetSize(BUTTON_WIDTH, BUTTON_HEIGHT)
+    hubPanel.panelScaleBtn = panelScaleBtn
     
-    minimapCB:SetScript("OnClick", function(self)
-        if TUICD.MinimapButton then
-            TUICD.MinimapButton:SetShown(self:GetChecked())
-        end
+    local function UpdatePanelScaleBtnText()
+        local scale = TUICD.GlobalScale and TUICD.GlobalScale:GetSettingsScale() or 1.0
+        panelScaleBtn:SetText(string.format("Panel Scale: %.0f%%", scale * 100))
+    end
+    UpdatePanelScaleBtnText()
+    hubPanel.UpdatePanelScaleBtnText = UpdatePanelScaleBtnText
+    
+    panelScaleBtn:SetScript("OnClick", function()
+        self:OpenPanelScalePanel()
     end)
-    frame.minimapCB = minimapCB
-    yOffset = yOffset - 30
-    
-    -- UI Scale slider
-    local scaleLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    scaleLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", 18, yOffset)
-    scaleLabel:SetText("UI Scale:")
-    
-    local scaleSlider = CreateFrame("Slider", nil, frame, "OptionsSliderTemplate")
-    scaleSlider:SetPoint("LEFT", scaleLabel, "RIGHT", 10, 0)
-    scaleSlider:SetSize(70, 14)
-    scaleSlider:SetMinMaxValues(0.5, 2.0)
-    scaleSlider:SetValueStep(0.1)
-    scaleSlider:SetObeyStepOnDrag(true)
-    scaleSlider.Low:SetText("")
-    scaleSlider.High:SetText("")
-    
-    local scaleValue = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    scaleValue:SetPoint("LEFT", scaleSlider, "RIGHT", 5, 0)
-    
-    -- Only update display while dragging, apply on release
-    scaleSlider:SetScript("OnValueChanged", function(self, val)
-        scaleValue:SetText(string.format("%.0f%%", val * 100))
-    end)
-    
-    scaleSlider:SetScript("OnMouseUp", function(self)
-        local val = self:GetValue()
-        if TUICD.GlobalScale then
-            TUICD.GlobalScale:SetSettingsScale(val)
-        end
-    end)
-    
-    -- Reset button
-    local resetBtn = CreateFrame("Button", nil, frame)
-    resetBtn:SetPoint("LEFT", scaleValue, "RIGHT", 5, 0)
-    resetBtn:SetSize(16, 16)
-    resetBtn:SetNormalTexture("Interface\\Buttons\\UI-RefreshButton")
-    resetBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight", "ADD")
-    resetBtn:SetScript("OnClick", function()
-        scaleSlider:SetValue(1.0)
-        if TUICD.GlobalScale then
-            TUICD.GlobalScale:SetSettingsScale(1.0)
-        end
-    end)
-    resetBtn:SetScript("OnEnter", function(self)
+    panelScaleBtn:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-        GameTooltip:SetText("Reset to 100%")
+        GameTooltip:AddLine("Panel Scale", 1, 0.82, 0)
+        GameTooltip:AddLine("Adjust the size of all TUI:CD settings panels.", 1, 1, 1)
+        GameTooltip:AddLine("Useful for high-DPI displays.", 1, 1, 1)
         GameTooltip:Show()
     end)
-    resetBtn:SetScript("OnLeave", function()
+    panelScaleBtn:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+    yOffset = yOffset - BUTTON_HEIGHT - SECTION_SPACING
+    
+    -- ============================================================
+    -- QUICK ACTIONS SECTION
+    -- ============================================================
+    local actionsLabel = hubPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    actionsLabel:SetPoint("TOPLEFT", 15, yOffset)
+    actionsLabel:SetText("|cffaaaaaa— Quick Actions —|r")
+    yOffset = yOffset - 22
+    
+    -- Open Blizzard CDM button
+    local cdmBtn = CreateFrame("Button", nil, hubPanel, "UIPanelButtonTemplate")
+    cdmBtn:SetPoint("TOPLEFT", 15, yOffset)
+    cdmBtn:SetSize(BUTTON_WIDTH, BUTTON_HEIGHT)
+    cdmBtn:SetText("Blizzard CDM")
+    cdmBtn:SetScript("OnClick", function()
+        -- CooldownViewerSettings is Blizzard's Cooldown Settings frame
+        local cooldownFrame = CooldownViewerSettings or _G["CooldownViewerSettings"]
+        
+        if cooldownFrame then
+            if cooldownFrame:IsShown() then
+                cooldownFrame:Hide()
+            else
+                cooldownFrame:Show()
+            end
+        else
+            TUICD:PrintError("Cooldown Settings not available.")
+        end
+    end)
+    cdmBtn:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:AddLine("Blizzard Cooldown Manager", 1, 0.82, 0)
+        GameTooltip:AddLine("Opens Blizzard's Cooldown Settings", 1, 1, 1)
+        GameTooltip:AddLine("to enable/disable trackers.", 1, 1, 1)
+        GameTooltip:AddLine(" ", 1, 1, 1)
+        GameTooltip:AddLine("Also accessible via |cff00ff00/cdm|r", 0.5, 0.5, 0.5)
+        GameTooltip:Show()
+    end)
+    cdmBtn:SetScript("OnLeave", function()
         GameTooltip:Hide()
     end)
     
-    frame.scaleSlider = scaleSlider
-    frame.scaleValue = scaleValue
-    frame.scaleResetBtn = resetBtn
-    
-    -- Full TweaksUI promo
-    local promoText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    promoText:SetPoint("BOTTOM", frame, "BOTTOM", 0, 45)
-    promoText:SetWidth(TUICD.UI.HUB_WIDTH - 30)
-    promoText:SetJustifyH("CENTER")
-    promoText:SetText("|cff888888Want UnitFrames, CastBars,\nNameplates & more?|r")
-    
-    local promoLink = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    promoLink:SetPoint("TOP", promoText, "BOTTOM", 0, -4)
-    promoLink:SetText("|cff00ccffCheck out the full TweaksUI suite!|r")
-    
-    settingsHub = frame
+    -- Close panels when hub is hidden
+    hubPanel:SetScript("OnHide", function()
+        HideAllPanels()
+        -- Exit layout mode if it's active
+        if TUICD.Layout and TUICD.Layout:IsActive() then
+            TUICD.Layout:Exit()
+        end
+    end)
     
     -- Register with GlobalScale for settings scaling
     if TUICD.GlobalScale then
-        TUICD.GlobalScale:RegisterSettingsPanel(settingsHub, 1.0)
+        TUICD.GlobalScale:RegisterSettingsPanel(hubPanel, 1.0)
     end
     
-    return frame
+    return hubPanel
 end
 
--- ============================================================================
--- PANEL MANAGEMENT
--- ============================================================================
-
-function Settings:RefreshHub()
-    if not settingsHub then return end
-    
-    -- Update layout button text
-    if settingsHub.layoutBtn and TUICD.LayoutMode then
-        if TUICD.LayoutMode:IsUnlocked() then
-            settingsHub.layoutBtn:SetText("|cff00ff00Lock Frames|r")
-        else
-            settingsHub.layoutBtn:SetText("Unlock Frames")
-        end
-    end
-    
-    -- Update minimap button checkbox
-    if settingsHub.minimapCB then
-        local showMinimap = TUICD.Database:GetGlobal("showMinimapButton")
-        settingsHub.minimapCB:SetChecked(showMinimap ~= false)
-    end
-    
-    -- Update scale slider
-    if settingsHub.scaleSlider and TUICD.GlobalScale then
-        local currentScale = TUICD.GlobalScale:GetSettingsScale()
-        settingsHub.scaleSlider:SetValue(currentScale)
-        if settingsHub.scaleValue then
-            settingsHub.scaleValue:SetText(string.format("%.0f%%", currentScale * 100))
-        end
-    end
-end
-
-function Settings:OpenTrackerPanel(trackerKey)
-    -- Delegate to Cooldowns module which has the full tabbed panels
-    if TUICD.Cooldowns and TUICD.Cooldowns.TogglePanel then
-        TUICD.Cooldowns:TogglePanel(trackerKey)
-    end
-end
-
-function Settings:OpenDocksPanel()
-    -- Delegate to DocksUI module
-    if TUICD.DocksUI and TUICD.DocksUI.Toggle then
-        TUICD.DocksUI:Toggle()
+-- ============================================================
+-- OPEN COOLDOWNS PANEL
+-- ============================================================
+function Settings:OpenCooldownsPanel()
+    -- Use the Cooldowns module's built-in settings panel
+    if TUICD.Cooldowns and TUICD.Cooldowns.ToggleSettingsPanel then
+        TUICD.Cooldowns:ToggleSettingsPanel(hubPanel)
     else
-        TUICD:Print("Docks panel loading...")
+        TUICD:PrintError("Cooldowns module not available")
     end
 end
 
-function Settings:OpenHighlightsPanel()
-    TUICD:Print("Proc & Buff Alerts panel coming soon!")
-    -- TODO: Implement highlights configuration panel
+-- ============================================================
+-- OPEN PROFILES PANEL
+-- ============================================================
+function Settings:OpenProfilesPanel()
+    if TUICD.ProfilesUI then
+        TUICD.ProfilesUI:ShowProfilesPanel(hubPanel)
+    else
+        TUICD:PrintError("ProfilesUI not available")
+    end
 end
 
-function Settings:ShowPatchNotes()
-    -- Create patch notes frame if it doesn't exist
-    if _G["TUICD_PatchNotesFrame"] then
-        _G["TUICD_PatchNotesFrame"]:Show()
-        return
+-- ============================================================
+-- CREATE ABOUT PANEL
+-- ============================================================
+function Settings:OpenAboutPanel()
+    if not moduleSettingsPanels.about then
+        local panel = CreateDockedPanel("TUICD_AboutPanel", PANEL_WIDTH, 450, "About TUI: Cooldowns")
+        
+        -- Create scroll frame for content
+        local scrollFrame = CreateFrame("ScrollFrame", nil, panel, "UIPanelScrollFrameTemplate")
+        scrollFrame:SetPoint("TOPLEFT", 15, -40)
+        scrollFrame:SetPoint("BOTTOMRIGHT", -35, 15)
+        
+        local content = CreateFrame("Frame", nil, scrollFrame)
+        content:SetSize(PANEL_WIDTH - 60, 450)
+        scrollFrame:SetScrollChild(content)
+        
+        local yPos = 0
+        
+        -- Header info
+        local header = content:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        header:SetPoint("TOPLEFT", 0, yPos)
+        header:SetText("|cff00ccffTweaksUI: Cooldowns|r v" .. TUICD.VERSION)
+        yPos = yPos - 25
+        
+        local desc = content:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        desc:SetPoint("TOPLEFT", 0, yPos)
+        desc:SetWidth(PANEL_WIDTH - 60)
+        desc:SetJustifyH("LEFT")
+        desc:SetText("A standalone cooldown tracking addon for World of Warcraft: Midnight.")
+        yPos = yPos - 25
+        
+        local author = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        author:SetPoint("TOPLEFT", 0, yPos)
+        author:SetText("|cffffffffAuthor:|r Meltheran")
+        author:SetTextColor(0.7, 0.7, 0.7)
+        yPos = yPos - 20
+        
+        local website = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        website:SetPoint("TOPLEFT", 0, yPos)
+        website:SetText("|cffffffffCurseForge:|r curseforge.com/wow/addons/tweaksui-cooldowns")
+        website:SetTextColor(0.7, 0.7, 0.7)
+        yPos = yPos - 35
+        
+        -- Part of TweaksUI Section
+        local partOfTitle = content:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        partOfTitle:SetPoint("TOPLEFT", 0, yPos)
+        partOfTitle:SetText("|cff00ff80Part of TweaksUI|r")
+        yPos = yPos - 22
+        
+        local partOfText = content:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        partOfText:SetPoint("TOPLEFT", 0, yPos)
+        partOfText:SetWidth(PANEL_WIDTH - 60)
+        partOfText:SetJustifyH("LEFT")
+        partOfText:SetSpacing(2)
+        partOfText:SetText("TUI: Cooldowns is the standalone version of the Cooldowns module from the full TweaksUI suite. If you want additional features like Unit Frames, Nameplates, Cast Bars, and more, check out the full TweaksUI addon!")
+        partOfText:SetTextColor(0.8, 0.8, 0.8)
+        yPos = yPos - partOfText:GetStringHeight() - 20
+        
+        -- Discord Section
+        local discordTitle = content:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        discordTitle:SetPoint("TOPLEFT", 0, yPos)
+        discordTitle:SetText("|cff5865F2Join the Community!|r")
+        yPos = yPos - 22
+        
+        local discordLabel = content:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        discordLabel:SetPoint("TOPLEFT", 0, yPos)
+        discordLabel:SetText("|cff5865F2Discord:|r")
+        
+        -- Copyable Discord link EditBox
+        local discordEditBox = CreateFrame("EditBox", nil, content, "InputBoxTemplate")
+        discordEditBox:SetPoint("TOPLEFT", 55, yPos + 3)
+        discordEditBox:SetSize(220, 20)
+        discordEditBox:SetAutoFocus(false)
+        discordEditBox:SetText("https://discord.gg/mYuggs3zwT")
+        discordEditBox:SetCursorPosition(0)
+        discordEditBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+        discordEditBox:SetScript("OnEditFocusGained", function(self) self:HighlightText() end)
+        discordEditBox:SetScript("OnEditFocusLost", function(self) self:HighlightText(0, 0) end)
+        discordEditBox:SetScript("OnTextChanged", function(self)
+            self:SetText("https://discord.gg/mYuggs3zwT")
+        end)
+        yPos = yPos - 24
+        
+        local copyHint = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        copyHint:SetPoint("TOPLEFT", 0, yPos)
+        copyHint:SetText("|cff888888(Click to select, Ctrl+C to copy)|r")
+        
+        moduleSettingsPanels.about = panel
     end
     
-    local frame = CreateFrame("Frame", "TUICD_PatchNotesFrame", UIParent, "BackdropTemplate")
-    frame:SetSize(520, 550)
-    frame:SetPoint("CENTER")
-    frame:SetFrameStrata("DIALOG")
-    frame:SetMovable(true)
-    frame:EnableMouse(true)
-    frame:RegisterForDrag("LeftButton")
-    frame:SetScript("OnDragStart", frame.StartMoving)
-    frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
-    frame:SetBackdrop({
-        bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
-        edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
-        tile = true, tileSize = 32, edgeSize = 32,
-        insets = { left = 8, right = 8, top = 8, bottom = 8 }
-    })
-    frame:SetBackdropColor(0, 0, 0, 1)
-    
-    -- Title
-    local title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    title:SetPoint("TOP", 0, -15)
-    title:SetText("|cff00ccffTweaksUI: Cooldowns - Patch Notes|r")
-    
-    -- Version
-    local version = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    version:SetPoint("TOP", title, "BOTTOM", 0, -5)
-    version:SetText("|cff00ff00v" .. TUICD.VERSION .. "|r")
-    
-    -- Scroll frame for notes
-    local scrollFrame = CreateFrame("ScrollFrame", nil, frame, "UIPanelScrollFrameTemplate")
-    scrollFrame:SetPoint("TOPLEFT", 15, -55)
-    scrollFrame:SetPoint("BOTTOMRIGHT", -35, 50)
-    
-    local content = CreateFrame("Frame", nil, scrollFrame)
-    content:SetSize(460, 1200)
-    scrollFrame:SetScrollChild(content)
-    
-    local notesText = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    notesText:SetPoint("TOPLEFT", 5, -5)
-    notesText:SetWidth(450)
-    notesText:SetJustifyH("LEFT")
-    notesText:SetSpacing(2)
-    
-    -- Patch notes content
-    local notes = [[
-|cffffcc00Version 2.0.0|r - Midnight Pre-Patch Release
-
-|cffff6600IMPORTANT:|r Requires WoW 12.0.0 (Midnight)
-For The War Within, use version 1.5.x
-
-
-|cffffcc00>>> DYNAMIC DOCKS <<<|r
-
-The biggest feature in TUI:CD history!
-Create custom icon groups from ANY tracker.
-
-|cff00ff00What are Docks?|r
-• Separate containers that hold icons from multiple trackers
-• Mix Essential, Utility, Buffs, and Custom icons together
-• Create up to 10 independent docks
-• Position anywhere via Layout Mode
-
-|cff00ff00How to Use:|r
-• Open any tracker's Individual Icons tab
-• Select an icon and find "Move to Dock" dropdown
-• Choose Dock 1-10 to assign that icon
-• Icon moves from tracker to dock automatically
-
-|cff00ff00Dock Settings:|r
-• Independent size, columns, spacing, grow direction
-• Center-out growth for symmetrical layouts
-• Full visibility: Combat, Group, Target, Mounted
-
-
-|cffffcc00Visual Override System|r
-
-Override how docked icons look without changing source:
-• Custom icon size and opacity
-• Border width and color
-• Desaturation when inactive
-• Countdown text: scale, color, position offset
-• Toggle proc glow per icon
-
-
-|cffffcc00Individual Icons Settings Expanded|r
-
-New options in Individual Icons tabs for all trackers:
-• "Move to Dock" dropdown to assign icons
-• "Show Proc Glow" toggle per icon
-• All existing per-icon customization preserved
-
-
-|cffffcc00New Visibility States|r
-
-• Target / No Target - show based on target status
-• Mounted / Dismounted - show based on mount status
-• Available for all trackers AND docks
-
-
-|cffffcc00Other Improvements|r
-
-• Setup Wizard for new users
-• Global Scale (50-200%) for settings panels
-• LibFlyPaper snap-to-grid in Layout Mode
-• 60-80% CPU reduction in raids
-• Midnight Duration Object API support
-• Docks now saved in profiles
-
-
-|cff888888Slash Commands:|r
-• /tuicd - Open settings
-• /tuicd patchnotes - Show this window
-• /tuicdscale - Set UI scale
-]]
-    
-    notesText:SetText(notes)
-    content:SetHeight(notesText:GetStringHeight() + 20)
-    
-    -- Close button
-    local closeBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-    closeBtn:SetSize(100, 24)
-    closeBtn:SetPoint("BOTTOM", 0, 15)
-    closeBtn:SetText("Close")
-    closeBtn:SetScript("OnClick", function() frame:Hide() end)
-    
-    -- X button
-    local xBtn = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
-    xBtn:SetPoint("TOPRIGHT", -5, -5)
-    
-    tinsert(UISpecialFrames, "TUICD_PatchNotesFrame")
-    frame:Show()
+    OpenPanel(moduleSettingsPanels.about)
 end
 
--- ============================================================================
--- PUBLIC API
--- ============================================================================
+-- ============================================================
+-- OPEN PANEL SCALE PANEL
+-- ============================================================
+function Settings:OpenPanelScalePanel()
+    if not moduleSettingsPanels.panelScale then
+        local panel = CreateDockedPanel("TUICD_PanelScalePanel", PANEL_WIDTH, 280, "Panel Scale")
+        
+        local content = CreateFrame("Frame", nil, panel)
+        content:SetPoint("TOPLEFT", 15, -40)
+        content:SetPoint("BOTTOMRIGHT", -15, 15)
+        
+        -- Description
+        local desc = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        desc:SetPoint("TOPLEFT", 0, 0)
+        desc:SetWidth(PANEL_WIDTH - 40)
+        desc:SetJustifyH("LEFT")
+        desc:SetText("|cffffffffPanel Scale|r adjusts the size of all TUI:CD settings panels.\n\nUseful for high-DPI displays or if you prefer larger/smaller UI elements.")
+        desc:SetTextColor(0.8, 0.8, 0.8)
+        
+        local yPos = -desc:GetStringHeight() - 30
+        
+        -- Current scale display
+        local scaleLabel = content:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        scaleLabel:SetPoint("TOPLEFT", 0, yPos)
+        scaleLabel:SetText("Current Scale:")
+        
+        local scaleValue = content:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        scaleValue:SetPoint("LEFT", scaleLabel, "RIGHT", 10, 0)
+        panel.scaleValue = scaleValue
+        
+        yPos = yPos - 40
+        
+        -- Slider
+        local slider = CreateFrame("Slider", "TUICD_PanelScaleSlider", content, "OptionsSliderTemplate")
+        slider:SetPoint("TOPLEFT", 10, yPos)
+        slider:SetWidth(PANEL_WIDTH - 120)
+        slider:SetMinMaxValues(0.5, 2.0)
+        slider:SetValueStep(0.05)
+        slider:SetObeyStepOnDrag(true)
+        slider.Low:SetText("50%")
+        slider.High:SetText("200%")
+        slider.Text:SetText("")
+        panel.slider = slider
+        
+        -- Edit box
+        local editBox = CreateFrame("EditBox", nil, content, "InputBoxTemplate")
+        editBox:SetSize(50, 20)
+        editBox:SetPoint("LEFT", slider, "RIGHT", 15, 0)
+        editBox:SetAutoFocus(false)
+        panel.editBox = editBox
+        
+        local percentLabel = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        percentLabel:SetPoint("LEFT", editBox, "RIGHT", 2, 0)
+        percentLabel:SetText("%")
+        
+        -- Update function (display only, doesn't apply)
+        local function UpdateDisplay(value)
+            local colorCode = "|cffffd100"
+            if value < 1.0 then
+                colorCode = "|cffffff88"  -- Yellow-ish for decrease
+            elseif value > 1.0 then
+                colorCode = "|cff88ff88"  -- Green-ish for increase
+            end
+            scaleValue:SetText(string.format("%s%.0f%%|r", colorCode, value * 100))
+            editBox:SetText(string.format("%.0f", value * 100))
+        end
+        
+        -- Apply function (actually changes the scale)
+        local function ApplyScale(value)
+            if TUICD.GlobalScale then
+                TUICD.GlobalScale:SetSettingsScale(value)
+            end
+            -- Update the hub button text
+            if hubPanel and hubPanel.UpdatePanelScaleBtnText then
+                hubPanel.UpdatePanelScaleBtnText()
+            end
+        end
+        
+        -- Initialize with current value
+        local currentScale = TUICD.GlobalScale and TUICD.GlobalScale:GetSettingsScale() or 1.0
+        slider:SetValue(currentScale)
+        UpdateDisplay(currentScale)
+        
+        -- While dragging, only update display (don't apply scale)
+        slider:SetScript("OnValueChanged", function(self, value)
+            UpdateDisplay(value)
+        end)
+        
+        -- Apply scale only when mouse is released
+        slider:SetScript("OnMouseUp", function(self)
+            ApplyScale(self:GetValue())
+        end)
+        
+        editBox:SetScript("OnEnterPressed", function(self)
+            local value = tonumber(self:GetText())
+            if value then
+                value = value / 100
+                value = math.max(0.5, math.min(2.0, value))
+                slider:SetValue(value)
+                ApplyScale(value)  -- Apply immediately for manual entry
+            end
+            self:ClearFocus()
+        end)
+        
+        editBox:SetScript("OnEscapePressed", function(self)
+            self:SetText(string.format("%.0f", slider:GetValue() * 100))
+            self:ClearFocus()
+        end)
+        
+        yPos = yPos - 50
+        
+        -- Reset to 100% button
+        local resetBtn = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
+        resetBtn:SetPoint("TOP", 0, yPos)
+        resetBtn:SetSize(120, 25)
+        resetBtn:SetText("Reset to 100%")
+        resetBtn:SetScript("OnClick", function()
+            slider:SetValue(1.0)
+            ApplyScale(1.0)  -- Apply immediately for button click
+        end)
+        
+        -- Register with GlobalScale for scaling (this panel gets scaled too!)
+        if TUICD.GlobalScale then
+            TUICD.GlobalScale:RegisterSettingsPanel(panel, 1.0)
+        end
+        
+        moduleSettingsPanels.panelScale = panel
+    end
+    
+    -- Update slider to current value when opening
+    if moduleSettingsPanels.panelScale.slider then
+        local currentScale = TUICD.GlobalScale and TUICD.GlobalScale:GetSettingsScale() or 1.0
+        moduleSettingsPanels.panelScale.slider:SetValue(currentScale)
+    end
+    
+    OpenPanel(moduleSettingsPanels.panelScale)
+end
 
+-- ============================================================
+-- PUBLIC: Get Hub Panel Reference
+-- ============================================================
+function Settings:GetHubPanel()
+    return hubPanel
+end
+
+-- ============================================================
+-- TOGGLE / SHOW / HIDE
+-- ============================================================
 function Settings:Toggle()
-    if not settingsHub then
-        CreateSettingsHub()
+    if not hubPanel then
+        self:CreatePanel()
     end
     
-    if settingsHub:IsShown() then
-        settingsHub:Hide()
-        if currentOpenPanel and settingsPanels[currentOpenPanel] then
-            settingsPanels[currentOpenPanel]:Hide()
-        end
+    if hubPanel:IsShown() then
+        HideAllPanels()
+        hubPanel:Hide()
     else
-        self:RefreshHub()
-        settingsHub:Show()
+        hubPanel:Show()
     end
 end
 
 function Settings:Show()
-    if not settingsHub then
-        CreateSettingsHub()
+    if not hubPanel then
+        self:CreatePanel()
     end
-    self:RefreshHub()
-    settingsHub:Show()
+    hubPanel:Show()
 end
 
 function Settings:Hide()
-    if settingsHub then
-        settingsHub:Hide()
+    if hubPanel then
+        HideAllPanels()
+        hubPanel:Hide()
     end
-    if currentOpenPanel and settingsPanels[currentOpenPanel] then
-        settingsPanels[currentOpenPanel]:Hide()
-    end
-end
-
-function Settings:Initialize()
-    initialized = true
-    TUICD:PrintDebug("Settings UI initialized")
 end

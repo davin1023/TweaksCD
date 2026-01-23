@@ -1,5 +1,5 @@
 -- ============================================================================
--- TweaksUI BuffHighlights.lua
+-- TUICD BuffHighlights.lua
 -- Creates positionable highlight clones for tracked buffs
 -- Detects active/inactive state via auraInstanceID (no secret value math)
 -- ============================================================================
@@ -19,6 +19,7 @@ local DurationAPI = TUICD.DurationAPI
 -- CONSTANTS
 -- ============================================================================
 
+local UPDATE_INTERVAL = 0.05  -- 20 Hz update rate for responsive per-icon tracking
 local DEFAULT_SIZE = 48
 local FRAME_PREFIX = "TweaksUI_BuffHighlight_"
 
@@ -1177,38 +1178,64 @@ local function UpdateHighlightFrame(slotIndex)
     frame:SetAlpha(opacity)
     
     -- =========================================================================
-    -- COUNT AND COOLDOWN - mirror directly from Blizzard's source icon
-    -- This avoids the lag from API queries by reading what Blizzard already computed
+    -- COUNT - Use Midnight API or pass through from source icon
+    -- CRITICAL: No conditionals on returned values - they may be secret
+    -- Just pass directly to SetText and let Blizzard handle it
     -- =========================================================================
     
-    -- Use Midnight API for count (handles secret values properly)
-    -- C_UnitAuras.GetAuraApplicationDisplayCount returns empty string for count=1
-    if sourceIcon and sourceIcon.auraInstanceID then
-        local countText = ""
-        if C_UnitAuras and C_UnitAuras.GetAuraApplicationDisplayCount then
+    -- Method 1: Use C_UnitAuras.GetAuraApplicationDisplayCount API (Midnight)
+    -- Pass directly to SetText - NO conditionals on the result
+    if auraInstanceID and C_UnitAuras and C_UnitAuras.GetAuraApplicationDisplayCount then
+        pcall(function()
+            -- minDisplayCount of 2 means don't show "1" (only show 2+)
+            frame.count:SetText(C_UnitAuras.GetAuraApplicationDisplayCount("player", auraInstanceID, 2))
+            frame.count:Show()
+        end)
+    elseif sourceIcon then
+        -- Method 2: Source icon's Count FontString pass-through (fallback)
+        local sourceCountFS = sourceIcon.Count or sourceIcon.count
+        
+        -- Try icon's children if not found directly
+        if not sourceCountFS and sourceIcon.GetChildren then
             pcall(function()
-                -- minDisplayCount=2 means don't show "1", only show 2+
-                countText = C_UnitAuras.GetAuraApplicationDisplayCount("player", sourceIcon.auraInstanceID, 2) or ""
+                for i = 1, sourceIcon:GetNumChildren() do
+                    local child = select(i, sourceIcon:GetChildren())
+                    if child then
+                        local childCount = child.Count or child.count
+                        if childCount then
+                            sourceCountFS = childCount
+                            break
+                        end
+                    end
+                end
             end)
         end
-        frame.count:SetText(countText)
-    elseif sourceIcon then
-        -- Fallback: try to read from source icon's Count fontstring
-        local countText = ""
-        pcall(function()
-            local countObj = sourceIcon.Count or sourceIcon.count
-            if countObj and countObj.GetText then
-                countText = countObj:GetText() or ""
+        
+        -- Pass through from source FontString - NO conditionals on GetText result
+        if sourceCountFS and sourceCountFS.GetText then
+            pcall(function()
+                frame.count:SetText(sourceCountFS:GetText())
+            end)
+            -- Use SetAlphaFromBoolean for visibility (handles secret booleans)
+            if sourceCountFS.IsShown and frame.count.SetAlphaFromBoolean then
+                pcall(function()
+                    frame.count:SetAlphaFromBoolean(sourceCountFS:IsShown(), 1, 0)
+                end)
             end
-        end)
-        frame.count:SetText(countText)
+            frame.count:Show()
+        else
+            frame.count:SetText("")
+            frame.count:Hide()
+        end
     else
         frame.count:SetText("")
+        frame.count:Hide()
     end
-    frame.count:Show()
     
-    -- Mirror cooldown directly from source icon's Cooldown frame
+    -- =========================================================================
+    -- COOLDOWN - Mirror directly from source icon's Cooldown frame
     -- This is the key - Blizzard's cooldown frame is already showing correctly
+    -- =========================================================================
     if sourceIcon and frame.cooldown then
         -- Update the slot index on source cooldown so global hooks target the right frame
         local sourceCooldown = sourceIcon.Cooldown or sourceIcon.cooldown
@@ -1607,7 +1634,7 @@ local function CreateLayoutWrapper(slotIndex)
             tolerance = tolerance or 15
             local point, relFrame, relPoint, x, y = FlyPaper.GetBestAnchorForGroup(
                 frame,
-                "TweaksUI",
+                "TUICD",
                 tolerance
             )
             if point and relFrame then
@@ -1657,7 +1684,7 @@ local function CreateLayoutWrapper(slotIndex)
     -- Register with FlyPaper for snap highlighting
     local FlyPaper = LibStub and LibStub("LibFlyPaper-2.0", true)
     if FlyPaper and FlyPaper.AddFrame then
-        FlyPaper.AddFrame("TweaksUI", wrapperId, frame)
+        FlyPaper.AddFrame("TUICD", wrapperId, frame)
     end
     
     return wrapper
@@ -1687,7 +1714,7 @@ local function RegisterWithLayout(slotIndex)
     -- Register with FlyPaper if available
     local FlyPaper = LibStub and LibStub("LibFlyPaper-2.0", true)
     if FlyPaper then
-        FlyPaper.AddFrame("TweaksUI", wrapperId, frame)
+        FlyPaper.AddFrame("TUICD", wrapperId, frame)
     end
     
     -- Register with Layout
@@ -1713,7 +1740,7 @@ local function UnregisterFromLayout(slotIndex)
     -- Remove from FlyPaper
     local FlyPaper = LibStub and LibStub("LibFlyPaper-2.0", true)
     if FlyPaper and FlyPaper.RemoveFrame then
-        FlyPaper.RemoveFrame("TweaksUI", wrapperId)
+        FlyPaper.RemoveFrame("TUICD", wrapperId)
     end
     
     layoutWrappers[slotIndex] = nil
@@ -1734,34 +1761,43 @@ local function RegisterAllWithLayout()
 end
 
 -- ============================================================================
--- UPDATE SYSTEM - Simple OnUpdate for reliable updates
+-- UPDATE SYSTEM - Uses unified system from CooldownHighlights
 -- ============================================================================
 
-local updateFrame = nil
-local UPDATE_INTERVAL = 0.1  -- Update 10x per second, not 60+!
-local updateElapsed = 0
+local isActive = false  -- Whether any buff highlights are enabled
 
 local function StartUpdateTicker()
-    if updateFrame then return end
+    if isActive then return end
     
-    updateFrame = CreateFrame("Frame")
-    updateElapsed = 0
-    updateFrame:SetScript("OnUpdate", function(self, elapsed)
-        updateElapsed = updateElapsed + elapsed
-        if updateElapsed >= UPDATE_INTERVAL then
-            updateElapsed = 0
-            pcall(UpdateAllHighlights)
-        end
-    end)
+    isActive = true
     
-    dprint("Update OnUpdate started (throttled to 10 Hz)")
+    -- Register with the unified update system in CooldownHighlights
+    if TUICD.CooldownHighlights and TUICD.CooldownHighlights.RegisterExternalTracker then
+        TUICD.CooldownHighlights:RegisterExternalTracker("buffs", UpdateAllHighlights)
+        dprint("BuffHighlights: Registered with unified update system")
+    else
+        dprint("BuffHighlights: WARNING - CooldownHighlights not available for unified updates")
+    end
 end
 
 local function StopUpdateTicker()
-    if updateFrame then
-        updateFrame:SetScript("OnUpdate", nil)
-        updateFrame = nil
-        dprint("Update OnUpdate stopped")
+    -- Check if any highlights still enabled
+    local hasEnabled = false
+    local db = GetDB()
+    if db and db.enabled then
+        for _, enabled in pairs(db.enabled) do
+            if enabled then hasEnabled = true break end
+        end
+    end
+    
+    if not hasEnabled then
+        isActive = false
+        
+        -- Unregister from unified update system
+        if TUICD.CooldownHighlights and TUICD.CooldownHighlights.UnregisterExternalTracker then
+            TUICD.CooldownHighlights:UnregisterExternalTracker("buffs")
+            dprint("BuffHighlights: Unregistered from unified update system")
+        end
     end
 end
 
@@ -2083,6 +2119,13 @@ end
 function BuffHighlights:RefreshAllHighlights()
     -- Refresh all highlight frames (used when tracker-level settings change)
     UpdateAllHighlights()
+end
+
+function BuffHighlights:MarkDirty()
+    -- Mark as needing update (uses unified system from CooldownHighlights)
+    if TUICD.CooldownHighlights and TUICD.CooldownHighlights.MarkDirty then
+        TUICD.CooldownHighlights:MarkDirty("buffs")
+    end
 end
 
 function BuffHighlights:IsTrackerHidden()
@@ -2434,15 +2477,20 @@ function BuffHighlights:Initialize()
             container:EnableMouse(true)
         end
         
-        -- Show all enabled highlight frames during layout mode
+        -- Show enabled highlight frames during layout mode (skip docked icons)
         local db = GetDB()
+        local Docks = TUICD.Docks
         for slotIndex, enabled in pairs(db.enabled) do
             if enabled then
-                local frame = highlightFrames[slotIndex]
-                if frame then
-                    frame:Show()
-                    -- Update appearance
-                    UpdateHighlightFrame(slotIndex)
+                -- Skip icons that are assigned to a dock (dock handles their display)
+                local isDocked = Docks and Docks.IsIconDocked and Docks:IsIconDocked("buffs", slotIndex)
+                if not isDocked then
+                    local frame = highlightFrames[slotIndex]
+                    if frame then
+                        frame:Show()
+                        -- Update appearance
+                        UpdateHighlightFrame(slotIndex)
+                    end
                 end
             end
         end

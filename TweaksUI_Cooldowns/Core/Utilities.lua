@@ -1,510 +1,738 @@
--- ============================================================================
 -- TweaksUI: Cooldowns - Utilities
--- Shared utility functions
--- ============================================================================
+-- Common utility functions used across modules
 
 local ADDON_NAME, TUICD = ...
 
 TUICD.Utilities = {}
 local Utils = TUICD.Utilities
 
--- ============================================================================
--- ICON SIZE CALCULATIONS
--- ============================================================================
-
--- Parse aspect ratio string to get multipliers
-function Utils:ParseAspectRatio(aspectStr)
-    if not aspectStr or aspectStr == "1:1" then
-        return 1, 1
+-- Safe call wrapper (handles combat lockdown and errors)
+function Utils:SafeCall(func, ...)
+    local success, err = pcall(func, ...)
+    if not success then
+        TUICD:PrintError("Error: " .. tostring(err))
     end
-    
-    local w, h = aspectStr:match("(%d+):(%d+)")
-    if w and h then
-        return tonumber(w), tonumber(h)
-    end
-    
-    return 1, 1
+    return success, err
 end
 
--- Calculate icon dimensions from base size and aspect ratio
-function Utils:CalculateIconDimensions(settings)
-    local baseSize = settings.iconSize or 36
-    
-    -- Check for explicit width/height first
-    if settings.iconWidth and settings.iconHeight then
-        return settings.iconWidth, settings.iconHeight
+-- Defer execution until out of combat
+local combatQueue = {}
+local combatFrame = CreateFrame("Frame")
+
+function Utils:AfterCombat(func)
+    if InCombatLockdown() then
+        table.insert(combatQueue, func)
+        combatFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
+    else
+        func()
     end
-    
-    -- Use aspect ratio
-    local aspectRatio = settings.aspectRatio or "1:1"
-    local aspectW, aspectH = self:ParseAspectRatio(aspectRatio)
-    
-    -- Base size is the larger dimension
-    local maxAspect = math.max(aspectW, aspectH)
-    local width = baseSize * (aspectW / maxAspect)
-    local height = baseSize * (aspectH / maxAspect)
-    
-    return math.floor(width + 0.5), math.floor(height + 0.5)
 end
 
--- ============================================================================
--- LAYOUT CALCULATIONS
--- ============================================================================
-
--- Parse custom layout string "4,4,2" into array {4, 4, 2}
-function Utils:ParseCustomLayout(layoutStr)
-    if not layoutStr or layoutStr == "" then
-        return nil
-    end
-    
-    local pattern = {}
-    for num in layoutStr:gmatch("%d+") do
-        table.insert(pattern, tonumber(num))
-    end
-    
-    return #pattern > 0 and pattern or nil
-end
-
--- Calculate grid positions for icons
-function Utils:CalculateGridPositions(count, settings)
-    local positions = {}
-    
-    local columns = settings.columns or 8
-    local customLayout = self:ParseCustomLayout(settings.customLayout)
-    local growDirection = settings.growDirection or "RIGHT"
-    local growSecondary = settings.growSecondary or "DOWN"
-    local alignment = settings.alignment or "LEFT"
-    local spacingH = settings.spacingH or 2
-    local spacingV = settings.spacingV or 2
-    local iconWidth, iconHeight = self:CalculateIconDimensions(settings)
-    
-    -- Determine horizontal/vertical primary
-    local horizontalPrimary = (growDirection == "LEFT" or growDirection == "RIGHT")
-    
-    -- Calculate positions
-    local currentRow = 0
-    local currentCol = 0
-    local rowLimit = customLayout and customLayout[1] or columns
-    local rowIndex = 1
-    
-    for i = 1, count do
-        -- Calculate x/y based on grow direction
-        local x, y
-        
-        if horizontalPrimary then
-            x = currentCol * (iconWidth + spacingH)
-            y = currentRow * (iconHeight + spacingV)
-            
-            if growDirection == "LEFT" then x = -x end
-            if growSecondary == "UP" then y = -y else y = -y end
-        else
-            x = currentRow * (iconWidth + spacingH)
-            y = currentCol * (iconHeight + spacingV)
-            
-            if growSecondary == "LEFT" then x = -x end
-            if growDirection == "UP" then y = -y else y = -y end
+combatFrame:SetScript("OnEvent", function(self, event)
+    if event == "PLAYER_REGEN_ENABLED" then
+        self:UnregisterEvent("PLAYER_REGEN_ENABLED")
+        for _, func in ipairs(combatQueue) do
+            Utils:SafeCall(func)
         end
-        
-        positions[i] = { x = x, y = y }
-        
-        -- Advance position
-        currentCol = currentCol + 1
-        if currentCol >= rowLimit then
-            currentCol = 0
-            currentRow = currentRow + 1
-            rowIndex = rowIndex + 1
-            rowLimit = customLayout and (customLayout[rowIndex] or customLayout[#customLayout]) or columns
+        wipe(combatQueue)
+    end
+end)
+
+-- Throttle function execution
+function Utils:Throttle(func, delay)
+    local lastCall = 0
+    return function(...)
+        local now = GetTime()
+        if now - lastCall >= delay then
+            lastCall = now
+            return func(...)
         end
     end
-    
-    -- Apply alignment offset if needed
-    if alignment ~= "LEFT" and horizontalPrimary then
-        -- Group by row and apply alignment
-        local rows = {}
-        local maxRowWidth = 0
-        
-        -- Group positions by row
-        local rowNum = 0
-        local colNum = 0
-        local rowItems = {}
-        rowLimit = customLayout and customLayout[1] or columns
-        rowIndex = 1
-        
-        for i = 1, count do
-            table.insert(rowItems, positions[i])
-            colNum = colNum + 1
-            
-            if colNum >= rowLimit or i == count then
-                local rowWidth = colNum * (iconWidth + spacingH) - spacingH
-                maxRowWidth = math.max(maxRowWidth, rowWidth)
-                
-                rows[rowNum] = {
-                    items = rowItems,
-                    width = rowWidth,
-                }
-                
-                rowItems = {}
-                colNum = 0
-                rowNum = rowNum + 1
-                rowIndex = rowIndex + 1
-                rowLimit = customLayout and (customLayout[rowIndex] or customLayout[#customLayout]) or columns
-            end
+end
+
+-- Debounce function execution
+function Utils:Debounce(func, delay)
+    local timer = nil
+    return function(...)
+        local args = {...}
+        if timer then
+            timer:Cancel()
         end
-        
-        -- Apply offsets based on alignment
-        local posIndex = 1
-        for r = 0, rowNum - 1 do
-            local row = rows[r]
-            if row then
-                local offset = 0
-                if alignment == "CENTER" then
-                    offset = (maxRowWidth - row.width) / 2
-                elseif alignment == "RIGHT" then
-                    offset = maxRowWidth - row.width
-                end
-                
-                for _, pos in ipairs(row.items) do
-                    if growDirection == "LEFT" then
-                        positions[posIndex].x = positions[posIndex].x - offset
-                    else
-                        positions[posIndex].x = positions[posIndex].x + offset
-                    end
-                    posIndex = posIndex + 1
-                end
-            end
+        timer = C_Timer.NewTimer(delay, function()
+            func(unpack(args))
+            timer = nil
+        end)
+    end
+end
+
+-- Deep copy a table
+function Utils:DeepCopy(orig)
+    local copy
+    if type(orig) == "table" then
+        copy = {}
+        for k, v in pairs(orig) do
+            copy[Utils:DeepCopy(k)] = Utils:DeepCopy(v)
         end
-    end
-    
-    return positions
-end
-
--- ============================================================================
--- VISIBILITY CHECKS
--- ============================================================================
-
-function Utils:ShouldShowTracker(settings)
-    if not settings.visibilityEnabled then
-        return true  -- No visibility restrictions
-    end
-    
-    local shouldShow = false
-    
-    -- Combat check
-    local inCombat = InCombatLockdown()
-    if inCombat and settings.showInCombat then
-        shouldShow = true
-    elseif not inCombat and settings.showOutOfCombat then
-        shouldShow = true
-    end
-    
-    if not shouldShow then
-        return false, settings.fadeAlpha or 0.3
-    end
-    
-    -- Group check
-    local inRaid = IsInRaid()
-    local inParty = IsInGroup() and not inRaid
-    local solo = not IsInGroup()
-    
-    if solo and not settings.showSolo then
-        return false, settings.fadeAlpha or 0.3
-    end
-    if inParty and not settings.showInParty then
-        return false, settings.fadeAlpha or 0.3
-    end
-    if inRaid and not settings.showInRaid then
-        return false, settings.fadeAlpha or 0.3
-    end
-    
-    -- Target check
-    local hasTarget = UnitExists("target")
-    if hasTarget and not settings.showHasTarget then
-        return false, settings.fadeAlpha or 0.3
-    end
-    if not hasTarget and not settings.showNoTarget then
-        return false, settings.fadeAlpha or 0.3
-    end
-    
-    -- Instance check
-    local _, instanceType = IsInInstance()
-    if instanceType == "arena" and not settings.showInArena then
-        return false, settings.fadeAlpha or 0.3
-    end
-    if instanceType == "pvp" and not settings.showInBattleground then
-        return false, settings.fadeAlpha or 0.3
-    end
-    if (instanceType == "party" or instanceType == "raid") and not settings.showInInstance then
-        return false, settings.fadeAlpha or 0.3
-    end
-    
-    return true, 1.0
-end
-
--- ============================================================================
--- SPELL/ITEM HELPERS
--- ============================================================================
-
--- Get spell info safely (Midnight API)
-function Utils:GetSpellInfo(spellID)
-    if C_Spell and C_Spell.GetSpellInfo then
-        local info = C_Spell.GetSpellInfo(spellID)
-        if info then
-            return info.name, nil, info.iconID, nil, nil, nil, spellID
-        end
-    end
-    return nil
-end
-
--- Get spell texture safely (Midnight API)
-function Utils:GetSpellTexture(spellID)
-    if C_Spell and C_Spell.GetSpellTexture then
-        return C_Spell.GetSpellTexture(spellID)
-    end
-    return nil
-end
-
--- Get spell cooldown safely (Midnight API with Duration Object support)
-function Utils:GetSpellCooldown(spellID)
-    if TUICD.HAS_SPELL_COOLDOWN_DURATION then
-        -- Midnight API
-        local cooldownInfo = C_Spell.GetSpellCooldown(spellID)
-        if cooldownInfo then
-            local duration
-            if cooldownInfo.duration then
-                -- Duration might be a Duration Object
-                if type(cooldownInfo.duration) == "table" and cooldownInfo.duration.GetValue then
-                    duration = cooldownInfo.duration:GetValue()
-                else
-                    duration = cooldownInfo.duration
-                end
-            else
-                duration = 0
-            end
-            return cooldownInfo.startTime or 0, duration, cooldownInfo.isEnabled and 1 or 0
-        end
-    end
-    return 0, 0, 0
-end
-
--- Get item cooldown safely (Midnight API)
-function Utils:GetItemCooldown(itemID)
-    if C_Container and C_Container.GetItemCooldown then
-        local startTime, duration, enable = C_Container.GetItemCooldown(itemID)
-        return startTime or 0, duration or 0, enable or 0
-    end
-    return 0, 0, 0
-end
-
--- ============================================================================
--- TABLE UTILITIES
--- ============================================================================
-
--- Check if table contains value
-function Utils:TableContains(tbl, value)
-    if not tbl then return false end
-    for _, v in pairs(tbl) do
-        if v == value then return true end
-    end
-    return false
-end
-
--- Get table length (works for non-sequential tables too)
-function Utils:TableCount(tbl)
-    if not tbl then return 0 end
-    local count = 0
-    for _ in pairs(tbl) do
-        count = count + 1
-    end
-    return count
-end
-
--- Shallow copy
-function Utils:ShallowCopy(tbl)
-    if type(tbl) ~= "table" then return tbl end
-    local copy = {}
-    for k, v in pairs(tbl) do
-        copy[k] = v
+        setmetatable(copy, Utils:DeepCopy(getmetatable(orig)))
+    else
+        copy = orig
     end
     return copy
 end
 
+-- Merge tables (source into target)
+function Utils:MergeTables(target, source)
+    for k, v in pairs(source) do
+        if type(v) == "table" and type(target[k]) == "table" then
+            Utils:MergeTables(target[k], v)
+        else
+            target[k] = v
+        end
+    end
+    return target
+end
+
+-- Format number with commas
+function Utils:FormatNumber(num)
+    if num >= 1000000 then
+        return string.format("%.1fM", num / 1000000)
+    elseif num >= 1000 then
+        return string.format("%.1fK", num / 1000)
+    else
+        return tostring(num)
+    end
+end
+
+-- Format time (seconds to MM:SS or SS)
+function Utils:FormatTime(seconds)
+    if seconds >= 60 then
+        return string.format("%d:%02d", math.floor(seconds / 60), seconds % 60)
+    elseif seconds >= 10 then
+        return string.format("%d", seconds)
+    else
+        return string.format("%.1f", seconds)
+    end
+end
+
+-- Get class color
+function Utils:GetClassColor(class)
+    local color = RAID_CLASS_COLORS[class]
+    if color then
+        return color.r, color.g, color.b
+    end
+    return 1, 1, 1
+end
+
+-- Get unit class color
+function Utils:GetUnitClassColor(unit)
+    if UnitIsPlayer(unit) then
+        local _, class = UnitClass(unit)
+        if class then
+            return Utils:GetClassColor(class)
+        end
+    end
+    return 1, 1, 1
+end
+
+-- Get reaction color
+function Utils:GetReactionColor(unit)
+    local reaction = UnitReaction(unit, "player")
+    if reaction then
+        if reaction >= 5 then
+            return 0, 1, 0 -- Friendly
+        elseif reaction == 4 then
+            return 1, 1, 0 -- Neutral
+        else
+            return 1, 0, 0 -- Hostile
+        end
+    end
+    return 1, 1, 1
+end
+
+-- Create a color string
+function Utils:ColorText(text, r, g, b)
+    return string.format("|cff%02x%02x%02x%s|r", r * 255, g * 255, b * 255, text)
+end
+
+-- RGB hex to color values
+function Utils:HexToRGB(hex)
+    hex = hex:gsub("#", "")
+    return tonumber("0x" .. hex:sub(1, 2)) / 255,
+           tonumber("0x" .. hex:sub(3, 4)) / 255,
+           tonumber("0x" .. hex:sub(5, 6)) / 255
+end
+
+-- RGB to hex
+function Utils:RGBToHex(r, g, b)
+    return string.format("%02x%02x%02x", r * 255, g * 255, b * 255)
+end
+
 -- ============================================================================
--- UI HELPERS
+-- UI HELPER: SLIDER WITH NUMERIC INPUT
 -- ============================================================================
 
--- Create a slider with an editable input box
+-- Create a slider with an editable numeric input field
+-- This replaces the standard value display with an EditBox that allows direct input
+-- Parameters:
+--   parent: Parent frame to attach to
+--   options: {
+--       label = "Label Text",         -- Optional label text
+--       min = 0,                       -- Minimum value
+--       max = 100,                     -- Maximum value
+--       step = 1,                      -- Step increment
+--       value = 50,                    -- Initial value
+--       isFloat = false,               -- If true, shows decimals
+--       decimals = 2,                  -- Number of decimal places (if isFloat)
+--       width = 140,                   -- Slider width
+--       labelWidth = 85,               -- Label width (if label provided)
+--       valueWidth = 45,               -- Value input width
+--       onValueChanged = function(value) end,  -- Callback when value changes
+--   }
+-- Returns: container frame, slider, valueBox
 function Utils:CreateSliderWithInput(parent, options)
-    local label = options.label or "Slider"
+    options = options or {}
+    
     local min = options.min or 0
     local max = options.max or 100
     local step = options.step or 1
-    local value = options.value or min
+    local initialValue = options.value or min
     local isFloat = options.isFloat or false
-    local decimals = options.decimals or 0
-    local width = options.width or 140
-    local labelWidth = options.labelWidth or 130
+    local decimals = options.decimals or 2
+    local sliderWidth = options.width or 140
+    local labelWidth = options.labelWidth or 85
     local valueWidth = options.valueWidth or 45
-    local onValueChanged = options.onValueChanged
+    local callback = options.onValueChanged
     
+    -- Create container
     local container = CreateFrame("Frame", nil, parent)
-    container:SetSize(labelWidth + width + valueWidth + 20, 26)
+    container:SetHeight(20)
     
-    -- Label
-    local labelText = container:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    labelText:SetPoint("LEFT", 0, 0)
-    labelText:SetWidth(labelWidth)
-    labelText:SetJustifyH("LEFT")
-    labelText:SetText(label)
-    labelText:SetTextColor(0.8, 0.8, 0.8)
+    local currentX = 0
     
-    -- Slider
+    -- Create label if provided
+    if options.label then
+        local label = container:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        label:SetPoint("LEFT", 0, 0)
+        label:SetText(options.label)
+        label:SetWidth(labelWidth)
+        label:SetJustifyH("LEFT")
+        container.label = label
+        currentX = labelWidth + 3
+    end
+    
+    -- Create slider
     local slider = CreateFrame("Slider", nil, container, "OptionsSliderTemplate")
-    slider:SetPoint("LEFT", labelText, "RIGHT", 10, 0)
-    slider:SetWidth(width)
-    slider:SetHeight(17)
+    slider:SetPoint("LEFT", currentX, 0)
+    slider:SetSize(sliderWidth, 16)
     slider:SetMinMaxValues(min, max)
     slider:SetValueStep(step)
     slider:SetObeyStepOnDrag(true)
-    slider:SetValue(value)
-    
-    -- Hide default text
+    slider:SetValue(initialValue)
     slider.Low:SetText("")
     slider.High:SetText("")
-    slider.Text:SetText("")
+    slider.Text:SetText("")  -- Hide default text
     
-    -- Value edit box
-    local editBox = CreateFrame("EditBox", nil, container, "InputBoxTemplate")
-    editBox:SetPoint("LEFT", slider, "RIGHT", 10, 0)
-    editBox:SetSize(valueWidth, 20)
-    editBox:SetAutoFocus(false)
-    editBox:SetJustifyH("CENTER")
+    currentX = currentX + sliderWidth + 6
     
-    local function FormatValue(val)
+    -- Create value EditBox
+    local valueBox = CreateFrame("EditBox", nil, container, "InputBoxTemplate")
+    valueBox:SetPoint("LEFT", currentX, 0)
+    valueBox:SetSize(valueWidth, 18)
+    valueBox:SetAutoFocus(false)
+    valueBox:SetJustifyH("CENTER")
+    valueBox:SetFontObject("GameFontHighlightSmall")
+    
+    -- Format function
+    local function FormatValue(value)
         if isFloat then
-            return string.format("%." .. decimals .. "f", val)
+            return string.format("%." .. decimals .. "f", value)
         else
-            return string.format("%d", val)
+            return string.format("%.0f", value)
         end
     end
     
-    editBox:SetText(FormatValue(value))
+    -- Set initial value text
+    valueBox:SetText(FormatValue(initialValue))
     
-    -- Slider changed
-    slider:SetScript("OnValueChanged", function(self, val)
-        editBox:SetText(FormatValue(val))
-        if onValueChanged then
-            onValueChanged(val)
+    -- Calculate container width
+    container:SetWidth(currentX + valueWidth)
+    
+    -- Flag to prevent recursive updates
+    local isUpdating = false
+    
+    -- Slider updates EditBox
+    slider:SetScript("OnValueChanged", function(self, value)
+        if isUpdating then return end
+        isUpdating = true
+        
+        -- Snap to step
+        value = math.floor(value / step + 0.5) * step
+        
+        -- Clamp
+        value = math.max(min, math.min(max, value))
+        
+        valueBox:SetText(FormatValue(value))
+        
+        if callback then
+            callback(value)
         end
+        
+        isUpdating = false
     end)
     
-    -- Edit box changed
-    editBox:SetScript("OnEnterPressed", function(self)
-        local val = tonumber(self:GetText())
-        if val then
-            val = math.max(min, math.min(max, val))
-            slider:SetValue(val)
+    -- EditBox updates Slider on Enter
+    valueBox:SetScript("OnEnterPressed", function(self)
+        local text = self:GetText()
+        local value = tonumber(text)
+        
+        if value then
+            -- Clamp to range
+            value = math.max(min, math.min(max, value))
+            
+            -- Snap to step
+            value = math.floor(value / step + 0.5) * step
+            
+            isUpdating = true
+            slider:SetValue(value)
+            self:SetText(FormatValue(value))
+            isUpdating = false
+            
+            if callback then
+                callback(value)
+            end
+        else
+            -- Invalid input, revert to slider value
+            self:SetText(FormatValue(slider:GetValue()))
         end
+        
         self:ClearFocus()
     end)
     
-    editBox:SetScript("OnEscapePressed", function(self)
+    -- Revert on Escape
+    valueBox:SetScript("OnEscapePressed", function(self)
         self:SetText(FormatValue(slider:GetValue()))
         self:ClearFocus()
     end)
     
-    container.slider = slider
-    container.editBox = editBox
-    container.label = labelText
-    
-    return container
-end
-
--- ============================================================================
--- SERIALIZATION
--- ============================================================================
-
--- Serialize a table to a string (for export)
-function Utils:TableToString(tbl)
-    if type(tbl) ~= "table" then
-        return nil
-    end
-    
-    local function serialize(val, depth)
-        depth = depth or 0
-        if depth > 50 then return "nil" end
+    -- Also update on focus lost (tab away)
+    valueBox:SetScript("OnEditFocusLost", function(self)
+        local text = self:GetText()
+        local value = tonumber(text)
         
-        local t = type(val)
-        if t == "nil" then
-            return "nil"
-        elseif t == "boolean" then
-            return val and "true" or "false"
-        elseif t == "number" then
-            return tostring(val)
-        elseif t == "string" then
-            return string.format("%q", val)
-        elseif t == "table" then
-            local parts = {}
+        if value then
+            value = math.max(min, math.min(max, value))
+            value = math.floor(value / step + 0.5) * step
             
-            -- Handle array part
-            local arrayPart = {}
-            local maxIndex = 0
-            for i, v in ipairs(val) do
-                arrayPart[i] = serialize(v, depth + 1)
-                maxIndex = i
-            end
-            
-            -- Handle hash part
-            for k, v in pairs(val) do
-                if type(k) ~= "number" or k > maxIndex or k < 1 or math.floor(k) ~= k then
-                    local keyStr
-                    if type(k) == "string" and k:match("^[%a_][%w_]*$") then
-                        keyStr = k
-                    else
-                        keyStr = "[" .. serialize(k, depth + 1) .. "]"
-                    end
-                    table.insert(parts, keyStr .. "=" .. serialize(v, depth + 1))
+            if math.abs(value - slider:GetValue()) > 0.001 then
+                isUpdating = true
+                slider:SetValue(value)
+                isUpdating = false
+                
+                if callback then
+                    callback(value)
                 end
             end
             
-            -- Combine array and hash parts
-            local arrayStr = table.concat(arrayPart, ",")
-            local hashStr = table.concat(parts, ",")
-            
-            if arrayStr ~= "" and hashStr ~= "" then
-                return "{" .. arrayStr .. "," .. hashStr .. "}"
-            elseif arrayStr ~= "" then
-                return "{" .. arrayStr .. "}"
-            else
-                return "{" .. hashStr .. "}"
+            self:SetText(FormatValue(value))
+        else
+            self:SetText(FormatValue(slider:GetValue()))
+        end
+    end)
+    
+    -- Store references
+    container.slider = slider
+    container.valueBox = valueBox
+    
+    -- Helper to update value programmatically
+    function container:SetValue(value)
+        isUpdating = true
+        slider:SetValue(value)
+        valueBox:SetText(FormatValue(value))
+        isUpdating = false
+    end
+    
+    function container:GetValue()
+        return slider:GetValue()
+    end
+    
+    function container:SetEnabled(enabled)
+        if enabled then
+            slider:Enable()
+            valueBox:Enable()
+            if container.label then
+                container.label:SetTextColor(1, 1, 1)
             end
         else
-            return "nil"  -- Unsupported type
+            slider:Disable()
+            valueBox:Disable()
+            if container.label then
+                container.label:SetTextColor(0.5, 0.5, 0.5)
+            end
         end
     end
     
-    return serialize(tbl)
+    return container, slider, valueBox
 end
 
--- Deserialize a string back to a table (for import)
-function Utils:StringToTable(str)
-    if type(str) ~= "string" then
+-- Check if in combat
+function Utils:InCombat()
+    return InCombatLockdown() or UnitAffectingCombat("player")
+end
+
+-- Get current spec ID
+function Utils:GetSpecID()
+    local specIndex = GetSpecialization()
+    if specIndex then
+        return GetSpecializationInfo(specIndex)
+    end
+    return nil
+end
+
+-- Round number
+function Utils:Round(num, decimals)
+    local mult = 10 ^ (decimals or 0)
+    return math.floor(num * mult + 0.5) / mult
+end
+
+-- Clamp number
+function Utils:Clamp(num, min, max)
+    return math.max(min, math.min(max, num))
+end
+
+-- Linear interpolation
+function Utils:Lerp(a, b, t)
+    return a + (b - a) * t
+end
+
+-- Create frame with backdrop
+function Utils:CreateBackdropFrame(parent, name, template)
+    local frame = CreateFrame("Frame", name, parent, template or "BackdropTemplate")
+    frame:SetBackdrop({
+        bgFile = "Interface\\Buttons\\WHITE8x8",
+        edgeFile = "Interface\\Buttons\\WHITE8x8",
+        edgeSize = 1,
+    })
+    frame:SetBackdropColor(0.1, 0.1, 0.1, 0.9)
+    frame:SetBackdropBorderColor(0, 0, 0, 1)
+    return frame
+end
+
+-- Hook function safely
+function Utils:SecureHook(object, method, hookFunc)
+    if type(object) == "string" then
+        -- Global function
+        hooksecurefunc(object, method)
+    else
+        -- Object method
+        hooksecurefunc(object, method, hookFunc)
+    end
+end
+
+-- ============================================================================
+-- MIDNIGHT API COMPATIBILITY LAYER
+-- ============================================================================
+-- Provides wrapper functions for Duration Object APIs introduced in Midnight.
+-- These helpers detect API availability at runtime and use the correct method,
+-- ensuring TweaksUI works on both Live (11.x) and Midnight without Lua errors.
+--
+-- REMOVED APIs (will cause errors in Midnight):
+--   C_Spell.GetSpellCooldownRemaining / GetSpellCooldownRemainingPercent
+--   C_ActionBar.GetActionCooldownRemaining / GetActionCooldownRemainingPercent
+--   C_UnitAuras.GetAuraDurationRemaining / GetAuraDurationRemainingPercent
+--
+-- REPLACEMENT APIs (Duration Objects):
+--   C_Spell.GetSpellCooldownDuration() -> duration:EvaluateRemainingDuration()
+--   C_ActionBar.GetActionCooldownDuration() -> duration:EvaluateRemainingDuration()
+--   C_UnitAuras.GetUnitAuraDuration() -> duration:GetRemainingDuration()
+-- ============================================================================
+
+TUICD.API = TUICD.API or {}
+
+-- -----------------------------------------------------------------------------
+-- Feature Detection Flags
+-- -----------------------------------------------------------------------------
+-- These flags are evaluated once at load time to determine which API set is available
+-- Based on Midnight PTR 2 (December 2025) API structure
+
+-- Spell/Action cooldown Duration Objects (Midnight+)
+-- Returns Duration Object with :GetRemainingDuration(), :GetElapsedDuration(), etc.
+TUICD.API.HAS_DURATION_OBJECTS = C_Spell and C_Spell.GetSpellCooldownDuration ~= nil
+
+-- Aura Duration Objects (Midnight+)
+-- NOTE: The API is C_UnitAuras.GetAuraDuration (NOT GetUnitAuraDuration)
+TUICD.API.HAS_AURA_DURATION_OBJECTS = C_UnitAuras and C_UnitAuras.GetAuraDuration ~= nil
+
+-- Duration Object creation utility (Midnight+)
+TUICD.API.HAS_DURATION_UTIL = C_DurationUtil and C_DurationUtil.CreateDuration ~= nil
+
+-- CastBarID in UnitCastingInfo/UnitChannelInfo return values (Midnight PTR 2+)
+-- Can't reliably test at load time (player may not be casting), so use proxy detection
+-- If we have Duration Objects, we're on Midnight and castBarID should be available
+TUICD.API.HAS_CASTBAR_ID = TUICD.API.HAS_DURATION_OBJECTS
+
+-- Empowered cast stage APIs (non-secret in Midnight PTR 2+)
+-- UnitEmpoweredStagePercentages returns non-secret percentages for each stage
+TUICD.API.HAS_EMPOWERED_APIS = UnitEmpoweredStagePercentages ~= nil
+
+-- Self-updating timer bars (StatusBar:SetTimerDuration)
+-- NOTE: The API is SetTimerDuration (NOT SetTimer)
+TUICD.API.HAS_TIMER_BARS = (function()
+    local testBar = CreateFrame("StatusBar")
+    local hasAPI = testBar.SetTimerDuration ~= nil
+    return hasAPI
+end)()
+
+-- Secrecy testing APIs (Midnight PTR 2+)
+-- GetSpellAuraSecrecy, GetSpellCooldownSecrecy, GetSpellCastSecrecy, GetPowerTypeSecrecy
+TUICD.API.HAS_SECRECY_APIS = GetSpellAuraSecrecy ~= nil
+
+-- -----------------------------------------------------------------------------
+-- Spell Cooldown Helpers
+-- -----------------------------------------------------------------------------
+
+-- Get remaining cooldown time for a spell
+-- @param spellID number - The spell ID to check
+-- @return number - Remaining cooldown in seconds (0 if not on cooldown)
+function TUICD.API.GetSpellCooldownRemaining(spellID)
+    if not spellID then return 0 end
+    
+    -- New API (Midnight+): Duration Objects
+    if TUICD.API.HAS_DURATION_OBJECTS then
+        local duration = C_Spell.GetSpellCooldownDuration(spellID)
+        if duration and duration.GetRemainingDuration then
+            return duration:GetRemainingDuration() or 0
+        end
+        return 0
+    end
+    
+    -- Fallback (Live 11.x): Calculate from cooldown info
+    local info = C_Spell.GetSpellCooldown(spellID)
+    if info and info.startTime and info.duration and info.duration > 0 then
+        local remaining = (info.startTime + info.duration) - GetTime()
+        return remaining > 0 and remaining or 0
+    end
+    return 0
+end
+
+-- Set a cooldown frame from a spell's cooldown
+-- @param cooldown CooldownFrame - The cooldown frame to update
+-- @param spellID number - The spell ID
+-- @return boolean - True if cooldown was set successfully
+function TUICD.API.SetCooldownFromSpell(cooldown, spellID)
+    if not cooldown or not spellID then return false end
+    
+    -- New API (Midnight+): Use Duration Object directly
+    if TUICD.API.HAS_DURATION_OBJECTS then
+        local duration = C_Spell.GetSpellCooldownDuration(spellID)
+        if duration then
+            cooldown:SetCooldownFromDurationObject(duration)
+            return true
+        end
+        return false
+    end
+    
+    -- Fallback (Live 11.x): Use start time and duration
+    local info = C_Spell.GetSpellCooldown(spellID)
+    if info and info.startTime and info.duration then
+        cooldown:SetCooldown(info.startTime, info.duration)
+        return true
+    end
+    return false
+end
+
+-- -----------------------------------------------------------------------------
+-- Aura Duration Helpers
+-- -----------------------------------------------------------------------------
+
+-- Get remaining duration for an aura
+-- @param unit string - Unit token (e.g., "player", "target")
+-- @param auraInstanceID number - The aura instance ID
+-- @return number - Remaining duration in seconds (0 if expired or no duration)
+function TUICD.API.GetAuraDurationRemaining(unit, auraInstanceID)
+    if not unit or not auraInstanceID then return 0 end
+    
+    -- New API (Midnight+): Duration Objects
+    -- NOTE: API is C_UnitAuras.GetAuraDuration (NOT GetUnitAuraDuration)
+    if TUICD.API.HAS_AURA_DURATION_OBJECTS then
+        local duration = C_UnitAuras.GetAuraDuration(unit, auraInstanceID)
+        if duration and duration.GetRemainingDuration then
+            return duration:GetRemainingDuration() or 0
+        end
+        return 0
+    end
+    
+    -- Fallback (Live 11.x): Calculate from aura data
+    local aura = C_UnitAuras.GetAuraDataByAuraInstanceID(unit, auraInstanceID)
+    if aura and aura.expirationTime and aura.expirationTime > 0 then
+        local remaining = aura.expirationTime - GetTime()
+        return remaining > 0 and remaining or 0
+    end
+    return 0
+end
+
+-- Set a cooldown frame from an aura's duration
+-- @param cooldown CooldownFrame - The cooldown frame to update
+-- @param unit string - Unit token
+-- @param auraInstanceID number - The aura instance ID
+-- @return boolean - True if cooldown was set successfully
+function TUICD.API.SetCooldownFromAura(cooldown, unit, auraInstanceID)
+    if not cooldown or not unit or not auraInstanceID then return false end
+    
+    -- New API (Midnight+): Use Duration Object directly
+    -- NOTE: API is C_UnitAuras.GetAuraDuration (NOT GetUnitAuraDuration)
+    if TUICD.API.HAS_AURA_DURATION_OBJECTS then
+        local duration = C_UnitAuras.GetAuraDuration(unit, auraInstanceID)
+        if duration then
+            -- Second param = true indicates this is an aura (counts down)
+            cooldown:SetCooldownFromDurationObject(duration, true)
+            return true
+        end
+        return false
+    end
+    
+    -- Fallback (Live 11.x): Calculate start time from expiration
+    local aura = C_UnitAuras.GetAuraDataByAuraInstanceID(unit, auraInstanceID)
+    if aura and aura.duration and aura.duration > 0 and aura.expirationTime then
+        local startTime = aura.expirationTime - aura.duration
+        cooldown:SetCooldown(startTime, aura.duration)
+        return true
+    end
+    return false
+end
+
+-- Get aura duration remaining using AuraData directly (alternative method)
+-- Useful when you already have the aura data table
+-- @param auraData table - AuraData from GetAuraDataByAuraInstanceID or similar
+-- @return number - Remaining duration in seconds
+function TUICD.API.GetAuraDurationFromData(auraData)
+    if not auraData then return 0 end
+    
+    -- If the aura has no duration (permanent), return 0
+    if not auraData.duration or auraData.duration == 0 then
+        return 0
+    end
+    
+    -- Calculate remaining from expiration time
+    if auraData.expirationTime and auraData.expirationTime > 0 then
+        local remaining = auraData.expirationTime - GetTime()
+        return remaining > 0 and remaining or 0
+    end
+    
+    return 0
+end
+
+-- -----------------------------------------------------------------------------
+-- Action Bar Cooldown Helpers
+-- -----------------------------------------------------------------------------
+
+-- Get remaining cooldown for an action bar slot
+-- @param slot number - Action bar slot (1-120)
+-- @return number - Remaining cooldown in seconds (0 if not on cooldown)
+function TUICD.API.GetActionCooldownRemaining(slot)
+    if not slot then return 0 end
+    
+    -- New API (Midnight+): Duration Objects
+    if TUICD.API.HAS_DURATION_OBJECTS then
+        local duration = C_ActionBar.GetActionCooldownDuration(slot)
+        if duration and duration.GetRemainingDuration then
+            return duration:GetRemainingDuration() or 0
+        end
+        return 0
+    end
+    
+    -- Fallback (Live 11.x): Use GetActionCooldown
+    local start, duration = GetActionCooldown(slot)
+    if start and duration and duration > 0 then
+        local remaining = (start + duration) - GetTime()
+        return remaining > 0 and remaining or 0
+    end
+    return 0
+end
+
+-- Set a cooldown frame from an action slot's cooldown
+-- @param cooldown CooldownFrame - The cooldown frame to update
+-- @param slot number - Action bar slot
+-- @return boolean - True if cooldown was set successfully
+function TUICD.API.SetCooldownFromAction(cooldown, slot)
+    if not cooldown or not slot then return false end
+    
+    -- New API (Midnight+): Use Duration Object directly
+    if TUICD.API.HAS_DURATION_OBJECTS then
+        local duration = C_ActionBar.GetActionCooldownDuration(slot)
+        if duration then
+            cooldown:SetCooldownFromDurationObject(duration)
+            return true
+        end
+        return false
+    end
+    
+    -- Fallback (Live 11.x): Use start time and duration
+    local start, duration = GetActionCooldown(slot)
+    if start and duration then
+        cooldown:SetCooldown(start, duration)
+        return true
+    end
+    return false
+end
+
+-- -----------------------------------------------------------------------------
+-- Secrecy API Helpers (Midnight+)
+-- -----------------------------------------------------------------------------
+
+-- Check if an aura's timing data is secret
+-- @param spellID number - The spell ID to check
+-- @return string|nil - "AlwaysSecret", "NeverSecret", "ContextuallySecret", or nil if API unavailable
+function TUICD.API.GetAuraSecrecy(spellID)
+    if not TUICD.API.HAS_SECRECY_APIS or not spellID then
         return nil
     end
-    
-    -- Safely load the string as a Lua chunk
-    local func, err = loadstring("return " .. str)
-    if not func then
-        return nil, err
+    return GetSpellAuraSecrecy(spellID)
+end
+
+-- Check if a cooldown's timing data is secret
+-- @param spellID number - The spell ID to check
+-- @return string|nil - "AlwaysSecret", "NeverSecret", "ContextuallySecret", or nil if API unavailable
+function TUICD.API.GetCooldownSecrecy(spellID)
+    if not TUICD.API.HAS_SECRECY_APIS or not spellID then
+        return nil
+    end
+    return GetSpellCooldownSecrecy(spellID)
+end
+
+-- Check if timing data might be restricted in the current context
+-- @param spellID number - The spell ID to check
+-- @return boolean - True if data might be secret, false if definitely available
+function TUICD.API.MightBeSecret(spellID)
+    if not TUICD.API.HAS_SECRECY_APIS then
+        return false -- Pre-Midnight, nothing is secret
     end
     
-    -- Execute in a sandboxed environment
-    local env = {}
-    setfenv(func, env)
+    local auraSecrecy = GetSpellAuraSecrecy(spellID)
+    local cdSecrecy = GetSpellCooldownSecrecy(spellID)
     
-    local success, result = pcall(func)
-    if not success then
-        return nil, result
+    -- If either is not "NeverSecret", it might be restricted
+    return (auraSecrecy and auraSecrecy ~= "NeverSecret") or 
+           (cdSecrecy and cdSecrecy ~= "NeverSecret")
+end
+
+-- -----------------------------------------------------------------------------
+-- Debug/Diagnostic Helpers
+-- -----------------------------------------------------------------------------
+
+-- Print API availability status (useful for debugging)
+function TUICD.API.PrintStatus()
+    local status = {
+        "TweaksUI API Compatibility Status:",
+        "  Duration Objects (Cooldowns): " .. (TUICD.API.HAS_DURATION_OBJECTS and "YES" or "NO"),
+        "  Duration Objects (Auras): " .. (TUICD.API.HAS_AURA_DURATION_OBJECTS and "YES" or "NO"),
+        "  Duration Util (CreateDuration): " .. (TUICD.API.HAS_DURATION_UTIL and "YES" or "NO"),
+        "  CastBarID Available: " .. (TUICD.API.HAS_CASTBAR_ID and "YES" or "NO"),
+        "  Empowered Stage APIs: " .. (TUICD.API.HAS_EMPOWERED_APIS and "YES" or "NO"),
+        "  Timer Bar APIs (SetTimerDuration): " .. (TUICD.API.HAS_TIMER_BARS and "YES" or "NO"),
+        "  Secrecy APIs: " .. (TUICD.API.HAS_SECRECY_APIS and "YES" or "NO"),
+    }
+    
+    for _, line in ipairs(status) do
+        print(line)
     end
-    
-    return result
 end

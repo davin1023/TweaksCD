@@ -1,5 +1,5 @@
 -- ============================================================================
--- TweaksUI: Cooldowns - Aura API Wrapper
+-- TUICD: Aura API Wrapper
 -- Midnight-native aura API functions
 -- All functions use C_UnitAuras namespace directly - no fallbacks
 -- ============================================================================
@@ -24,8 +24,8 @@ function AuraAPI:GetAuraInstanceIDs(unit, filter, maxAuras, sortRule, sortDirect
     if not unit then return {} end
     
     local SORT, SORT_DIR = GetSortConstants()
-    sortRule = sortRule or (SORT and SORT.DEFAULT)
-    sortDirection = sortDirection or (SORT_DIR and SORT_DIR.NORMAL)
+    sortRule = sortRule or SORT.DEFAULT
+    sortDirection = sortDirection or SORT_DIR.NORMAL
     
     local success, result = pcall(C_UnitAuras.GetUnitAuraInstanceIDs, 
         unit, filter, maxAuras, sortRule, sortDirection)
@@ -64,8 +64,8 @@ function AuraAPI:GetUnitAuras(unit, filter, sortRule, sortDirection, maxAuras)
     if not unit then return {} end
     
     local SORT, SORT_DIR = GetSortConstants()
-    sortRule = sortRule or (SORT and SORT.DEFAULT)
-    sortDirection = sortDirection or (SORT_DIR and SORT_DIR.NORMAL)
+    sortRule = sortRule or SORT.DEFAULT
+    sortDirection = sortDirection or SORT_DIR.NORMAL
     
     -- Get instance IDs first
     local instanceIDs = self:GetAuraInstanceIDs(unit, filter, maxAuras, sortRule, sortDirection)
@@ -99,10 +99,7 @@ end
 -- Get aura duration as Duration Object
 function AuraAPI:GetAuraDuration(unit, auraInstanceID)
     if not unit or not auraInstanceID then return nil end
-    if C_UnitAuras.GetUnitAuraDuration then
-        return C_UnitAuras.GetUnitAuraDuration(unit, auraInstanceID)
-    end
-    return nil
+    return C_UnitAuras.GetUnitAuraDuration(unit, auraInstanceID)
 end
 
 -- Apply aura duration to a cooldown frame
@@ -147,10 +144,7 @@ end
 -- Takes unit and auraInstanceID (dispelType is secret in Midnight)
 function AuraAPI:GetDispelTypeColor(unit, auraInstanceID, colorCurve)
     if not unit or not auraInstanceID then return nil end
-    if C_UnitAuras.GetAuraDispelTypeColor then
-        return C_UnitAuras.GetAuraDispelTypeColor(unit, auraInstanceID, colorCurve)
-    end
-    return nil
+    return C_UnitAuras.GetAuraDispelTypeColor(unit, auraInstanceID, colorCurve)
 end
 
 -- Legacy: Get color from non-secret dispelType number (for static/cached values only)
@@ -168,19 +162,13 @@ end
 -- Get remaining duration as percentage (can accept curve)
 function AuraAPI:GetDurationRemainingPercent(unit, auraInstanceID, curve)
     if not unit or not auraInstanceID then return 0 end
-    if C_UnitAuras.GetAuraDurationRemainingPercent then
-        return C_UnitAuras.GetAuraDurationRemainingPercent(unit, auraInstanceID, curve)
-    end
-    return 0
+    return C_UnitAuras.GetAuraDurationRemainingPercent(unit, auraInstanceID, curve)
 end
 
 -- Get remaining duration color (requires color curve)
 function AuraAPI:GetDurationRemainingColor(unit, auraInstanceID, colorCurve)
     if not unit or not auraInstanceID or not colorCurve then return nil end
-    if C_UnitAuras.GetAuraDurationRemainingColor then
-        return C_UnitAuras.GetAuraDurationRemainingColor(unit, auraInstanceID, colorCurve)
-    end
-    return nil
+    return C_UnitAuras.GetAuraDurationRemainingColor(unit, auraInstanceID, colorCurve)
 end
 
 -- ============================================================================
@@ -293,17 +281,12 @@ end
 -- Check if aura data for a spell is secret
 function AuraAPI:GetAuraSecrecy(spellID)
     if not spellID then return nil end
-    if C_Secrets and C_Secrets.GetSpellAuraSecrecy then
-        return C_Secrets.GetSpellAuraSecrecy(spellID)
-    end
-    return nil
+    return C_Secrets.GetSpellAuraSecrecy(spellID)
 end
 
 -- Check if aura is never secret (whitelisted)
 function AuraAPI:IsAuraNeverSecret(spellID)
     if not spellID then return false end
-    if not C_Secrets or not C_Secrets.GetSpellAuraSecrecy then return false end
-    
     local secrecy = C_Secrets.GetSpellAuraSecrecy(spellID)
     return secrecy == Enum.SecrecyLevel.NeverSecret
 end

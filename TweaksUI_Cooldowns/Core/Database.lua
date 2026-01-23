@@ -1,83 +1,58 @@
--- ============================================================================
 -- TweaksUI: Cooldowns - Database
--- Character-specific settings storage
--- ============================================================================
+-- Character-specific settings storage (1.4.0+)
+-- All settings are now stored per-character in TweaksUI_Cooldowns_CharDB
 
 local ADDON_NAME, TUICD = ...
 
 TUICD.Database = {}
 local DB = TUICD.Database
 
--- ============================================================================
--- DEFAULT SETTINGS
--- ============================================================================
+-- Default database structure for account-wide data (minimal)
+local DATABASE_DEFAULTS = {
+    global = {
+        version = TUICD.VERSION,
+        lastSeenVersion = nil,
+        debugMode = false,
+        skipSetupValidation = false,  -- Don't show CDM setup popup (2.0.0+)
+    },
+    -- Legacy profiles preserved for future 1.5.0 profile system redux
+    -- These are READ-ONLY references that characters can copy from
+    legacyProfiles = {},
+}
 
--- Shared tracker defaults (used by all trackers)
-local TRACKER_DEFAULTS = {
-    enabled = true,  -- Default to disabled for new installs
-    -- Icon size
-    iconSize = 36,              -- Base size (used with aspect ratio)
-    iconWidth = nil,            -- Custom width (nil = use iconSize + aspect)
-    iconHeight = nil,           -- Custom height (nil = use iconSize + aspect)
-    aspectRatio = "1:1",        -- Preset or "custom"
-    -- Layout
-    columns = 8,
-    rows = 0,                   -- 0 = unlimited
-    customLayout = "",          -- Custom pattern like "4,4,2" (empty = use columns)
-    spacingH = 2,               -- Horizontal spacing between icons
-    spacingV = 2,               -- Vertical spacing between rows
-    growDirection = "RIGHT",    -- PRIMARY: LEFT, RIGHT, UP, or DOWN
-    growSecondary = "DOWN",     -- SECONDARY: LEFT, RIGHT, UP, or DOWN
-    alignment = "LEFT",         -- LEFT, CENTER, or RIGHT
-    reverseOrder = false,
-    -- Custom grid
-    useCustomGrid = false,      -- Use custom grid layout
-    customGridMode = "rowfirst",-- "rowfirst" or "colfirst"
-    customGridAlign = "topleft",-- Alignment within grid
-    -- Appearance
-    zoom = 0.08,                -- Texture inset (0 = full, higher = more zoom)
-    borderAlpha = 1.0,
-    iconOpacity = 1.0,
-    iconOpacityCombat = nil,    -- Opacity override for combat (nil = use iconOpacity)
-    inactiveAlpha = 0.5,        -- Alpha for inactive/on-cooldown icons
-    greyscaleInactive = false,  -- Desaturate inactive icons
-    useMasque = false,          -- Use Masque skinning (requires Masque addon)
-    showSweep = true,           -- Show cooldown sweep/spiral animation
-    showCountdownText = true,   -- Show countdown numbers on cooldown
-    -- Interaction
-    clickthrough = false,       -- Make icons click-through
-    showTooltip = true,         -- Show tooltips on mouseover
-    -- Cooldown Text
-    cooldownTextScale = 1.0,    -- Scale of countdown numbers
-    cooldownTextFont = "Default",
-    cooldownTextOffsetX = 0,
-    cooldownTextOffsetY = 0,
-    cooldownTextColorR = 1,
-    cooldownTextColorG = 1,
-    cooldownTextColorB = 1,
-    -- Count/Charge Text
-    countTextScale = 1.0,       -- Scale of stack counts
-    countTextFont = "Default",
-    countTextOffsetX = 0,
-    countTextOffsetY = 0,
-    countTextColorR = 1,
-    countTextColorG = 1,
-    countTextColorB = 1,
-    -- Visibility
-    visibilityEnabled = false,  -- Master toggle for visibility conditions
-    showInCombat = true,
-    showOutOfCombat = true,
-    showSolo = true,
-    showInParty = true,
-    showInRaid = true,
-    showInInstance = true,
-    showInArena = true,
-    showInBattleground = true,
-    showHasTarget = true,       -- Has a target selected
-    showNoTarget = true,        -- No target selected
-    fadeAlpha = 0.3,            -- Alpha when visibility conditions not met
-    -- Persistent icon order (saved by texture fileID)
-    savedIconOrder = {},        -- Array of texture fileIDs in desired order
+-- Default character database structure
+local CHAR_DATABASE_DEFAULTS = {
+    -- Module enable/disable states
+    -- TUI:CD modules are enabled by default
+    modules = {
+        cooldowns = true,
+        layout = true,
+    },
+    
+    -- All module settings
+    settings = {},
+    
+    -- Cooldown-specific data
+    cooldowns = {
+        customEntries = {},
+        trackerCache = {},
+    },
+    
+    -- Container positions (per-character, part of profile system)
+    uiFrameContainerPositions = {},
+    actionBarContainerPositions = {},
+    
+    -- Migration flags
+    migrated_1_4_0 = false,
+    
+    -- First run flag (for loading Basic profile on new characters)
+    firstRun = true,
+    
+    -- Setup validation state (2.0.0+)
+    setupValidated = false,   -- CDM settings have been validated
+    setupDismissed = false,   -- User dismissed setup popup without fixing
+    applyProfileOnReload = nil, -- Profile name to apply on next reload (from setup)
+    tuiProfileApplied = false,  -- A TUI profile has been loaded (skip Modern check after this)
 }
 
 -- Deep copy utility
@@ -94,64 +69,6 @@ local function DeepCopy(orig)
     end
     return copy
 end
-
--- Copy defaults for each tracker
-local function CreateTrackerDefaults()
-    return DeepCopy(TRACKER_DEFAULTS)
-end
-
--- Account-wide defaults (minimal)
-local DATABASE_DEFAULTS = {
-    global = {
-        version = TUICD.VERSION,
-        lastSeenVersion = nil,  -- Track last version user has seen patch notes for
-        debugMode = false,
-        showMinimapButton = true,
-        masqueEnabled = true,
-    },
-}
-
--- Character-specific defaults
-local CHAR_DATABASE_DEFAULTS = {
-    -- Tracker settings
-    trackers = {
-        essential = CreateTrackerDefaults(),
-        utility = CreateTrackerDefaults(),
-        buffs = CreateTrackerDefaults(),
-        customTrackers = CreateTrackerDefaults(),
-    },
-    
-    -- Custom tracker entries (per-spec)
-    customEntries = {},  -- [specID] = { {type="spell", id=123}, ... }
-    
-    -- Position data
-    containerPositions = {},  -- [trackerKey] = {point, x, y}
-    
-    -- Highlight settings (for alerts system)
-    buffHighlights = {},
-    essentialHighlights = {},
-    utilityHighlights = {},
-    customHighlights = {},
-    
-    -- Migration flags
-    cmtMigrationVersion = nil,
-    cmtMigrationDate = nil,
-}
-
--- Add buff-specific defaults
-CHAR_DATABASE_DEFAULTS.trackers.buffs.greyscaleInactive = true
-CHAR_DATABASE_DEFAULTS.trackers.buffs.inactiveAlpha = 0.5
-
--- Custom tracker defaults
-CHAR_DATABASE_DEFAULTS.trackers.customTrackers.enabled = true
-CHAR_DATABASE_DEFAULTS.trackers.customTrackers.columns = 4
-CHAR_DATABASE_DEFAULTS.trackers.customTrackers.point = "CENTER"
-CHAR_DATABASE_DEFAULTS.trackers.customTrackers.x = 0
-CHAR_DATABASE_DEFAULTS.trackers.customTrackers.y = -200
-
--- ============================================================================
--- MERGE HELPERS
--- ============================================================================
 
 -- Merge defaults into existing table (only adds missing keys)
 local function MergeDefaults(existing, defaults)
@@ -174,18 +91,15 @@ local function MergeDefaults(existing, defaults)
     return existing
 end
 
--- ============================================================================
--- INITIALIZATION
--- ============================================================================
-
+-- Initialize database
 function DB:Initialize()
-    -- Create or get account-wide saved variables
+    -- Create or update account-wide saved variables
     if not TweaksUI_Cooldowns_DB then
         TweaksUI_Cooldowns_DB = DeepCopy(DATABASE_DEFAULTS)
     end
     self.db = TweaksUI_Cooldowns_DB
     
-    -- Create or get per-character saved variables
+    -- Create or update per-character saved variables
     if not TweaksUI_Cooldowns_CharDB then
         TweaksUI_Cooldowns_CharDB = DeepCopy(CHAR_DATABASE_DEFAULTS)
     end
@@ -194,35 +108,369 @@ function DB:Initialize()
     -- Ensure all default keys exist
     self:EnsureDefaults()
     
-    TUICD:PrintDebug("Database initialized")
+    -- Run migrations if needed
+    self:RunMigrations()
+    
+    TUICD:PrintDebug("Database initialized (character-specific mode)")
 end
 
+-- Ensure all default values exist
 function DB:EnsureDefaults()
     -- Ensure global section exists
-    MergeDefaults(self.db, DATABASE_DEFAULTS)
+    if not self.db.global then
+        self.db.global = DeepCopy(DATABASE_DEFAULTS.global)
+    end
     
-    -- Ensure character database has all required fields
-    MergeDefaults(self.charDb, CHAR_DATABASE_DEFAULTS)
+    -- Ensure character database has required sections
+    if not self.charDb.modules then
+        self.charDb.modules = {}
+    end
     
-    -- Ensure each tracker has all settings
-    for trackerKey, defaults in pairs(CHAR_DATABASE_DEFAULTS.trackers) do
-        if not self.charDb.trackers[trackerKey] then
-            self.charDb.trackers[trackerKey] = DeepCopy(defaults)
+    -- TUI:CD CRITICAL: Ensure core modules are enabled by default
+    -- This handles existing installs that have an empty modules table
+    if self.charDb.modules.cooldowns == nil then
+        self.charDb.modules.cooldowns = true
+    end
+    if self.charDb.modules.layout == nil then
+        self.charDb.modules.layout = true
+    end
+    
+    if not self.charDb.settings then
+        self.charDb.settings = {}
+    end
+    if not self.charDb.cooldowns then
+        self.charDb.cooldowns = {
+            customEntries = {},
+            trackerCache = {},
+        }
+    end
+    -- Ensure container position tables exist (for profile system)
+    if not self.charDb.uiFrameContainerPositions then
+        self.charDb.uiFrameContainerPositions = {}
+    end
+    if not self.charDb.actionBarContainerPositions then
+        self.charDb.actionBarContainerPositions = {}
+    end
+end
+
+-- Run database migrations
+function DB:RunMigrations()
+    -- Migrate from profile-based to character-based storage
+    if not self.charDb.migrated_1_4_0 then
+        self:MigrateTo_1_4_0()
+    end
+    
+    -- Update version
+    if self.db.global then
+        self.db.global.version = TUICD.VERSION
+    end
+end
+
+-- Migration from 1.3.x profile system to 1.4.0 character-specific
+function DB:MigrateTo_1_4_0()
+    TUICD:PrintDebug("Running 1.4.0 migration: profile -> character-specific")
+    
+    local charKey = self:GetCharacterKey()
+    local migratedSomething = false
+    
+    -- Check if old profile system exists AND this character had a profile assignment
+    -- Only migrate if this character was actually using TweaksUI before
+    if self.db.profiles and self.db.profileAssignments and self.db.profileAssignments[charKey] then
+        -- Find this character's old profile
+        local oldProfileName = self.db.profileAssignments[charKey]
+        
+        -- Get the old profile data
+        local oldProfile = self.db.profiles[oldProfileName]
+        
+        -- Copy old profile settings to character settings
+        if oldProfile then
+            self.charDb.settings = self.charDb.settings or {}
+            
+            for moduleId, moduleSettings in pairs(oldProfile) do
+                -- Only copy if character doesn't already have settings for this module
+                if not self.charDb.settings[moduleId] or next(self.charDb.settings[moduleId]) == nil then
+                    self.charDb.settings[moduleId] = DeepCopy(moduleSettings)
+                    migratedSomething = true
+                end
+            end
+        end
+        
+        -- Migrate module enable states from global to charDb ONLY for existing users
+        if self.db.global and self.db.global.modules then
+            for moduleId, enabled in pairs(self.db.global.modules) do
+                -- Only migrate if charDb doesn't have this module state yet
+                if self.charDb.modules[moduleId] == nil then
+                    self.charDb.modules[moduleId] = enabled
+                    migratedSomething = true
+                end
+            end
+        end
+        
+        -- Preserve old profiles for potential future use (rename to legacyProfiles)
+        if self.db.profiles and not self.db.legacyProfiles then
+            self.db.legacyProfiles = DeepCopy(self.db.profiles)
+        end
+        
+        -- Note: We don't delete the old data, just stop using it
+    end
+    
+    -- Mark migration complete
+    self.charDb.migrated_1_4_0 = true
+    
+    if migratedSomething then
+        TUICD:Print("Settings migrated to character-specific storage.")
+    end
+end
+
+-- Compare version strings (returns -1, 0, or 1)
+function DB:CompareVersions(v1, v2)
+    local function parseVersion(v)
+        local major, minor, patch = v:match("(%d+)%.(%d+)%.(%d+)")
+        return tonumber(major) or 0, tonumber(minor) or 0, tonumber(patch) or 0
+    end
+    
+    local m1, n1, p1 = parseVersion(v1)
+    local m2, n2, p2 = parseVersion(v2)
+    
+    if m1 ~= m2 then return m1 < m2 and -1 or 1 end
+    if n1 ~= n2 then return n1 < n2 and -1 or 1 end
+    if p1 ~= p2 then return p1 < p2 and -1 or 1 end
+    return 0
+end
+
+-- Get character key for this character
+function DB:GetCharacterKey()
+    local name = UnitName("player")
+    local realm = GetRealmName()
+    return name .. "-" .. realm
+end
+
+-- ============================================================================
+-- MODULE SETTINGS (Character-Specific)
+-- ============================================================================
+
+-- Module enable/disable (per-character)
+function DB:IsModuleEnabled(moduleId)
+    if not self.charDb.modules then
+        self.charDb.modules = {}
+    end
+    return self.charDb.modules[moduleId] == true
+end
+
+function DB:SetModuleEnabled(moduleId, enabled, skipEvents)
+    if not self.charDb.modules then
+        self.charDb.modules = {}
+    end
+    self.charDb.modules[moduleId] = enabled
+    
+    -- Only fire events if requested (not for modules requiring reload)
+    if not skipEvents then
+        if enabled then
+            TUICD.Events:Fire(TUICD.EVENTS.MODULE_ENABLED, moduleId)
         else
-            MergeDefaults(self.charDb.trackers[trackerKey], defaults)
+            TUICD.Events:Fire(TUICD.EVENTS.MODULE_DISABLED, moduleId)
         end
     end
 end
 
+-- Get module-specific settings (from character database)
+function DB:GetModuleSettings(moduleId)
+    if not self.charDb.settings then
+        self.charDb.settings = {}
+    end
+    if not self.charDb.settings[moduleId] then
+        self.charDb.settings[moduleId] = {}
+    end
+    return self.charDb.settings[moduleId]
+end
+
+-- Set all module-specific settings at once (replaces entire settings table)
+function DB:SetModuleSettings(moduleId, settingsTable)
+    if not settingsTable then return end
+    if not self.charDb.settings then
+        self.charDb.settings = {}
+    end
+    self.charDb.settings[moduleId] = settingsTable
+    TUICD.Events:Fire(TUICD.EVENTS.SETTINGS_CHANGED, moduleId, nil, nil)
+end
+
+-- Set a specific module setting
+function DB:SetModuleSetting(moduleId, key, value)
+    if not self.charDb.settings then
+        self.charDb.settings = {}
+    end
+    if not self.charDb.settings[moduleId] then
+        self.charDb.settings[moduleId] = {}
+    end
+    self.charDb.settings[moduleId][key] = value
+    TUICD.Events:Fire(TUICD.EVENTS.SETTINGS_CHANGED, moduleId, key, value)
+end
+
+-- Get a specific module setting
+function DB:GetModuleSetting(moduleId, key)
+    if not self.charDb.settings or not self.charDb.settings[moduleId] then
+        return nil
+    end
+    return self.charDb.settings[moduleId][key]
+end
+
 -- ============================================================================
--- TRACKER SETTINGS
+-- GLOBAL SETTINGS (Account-Wide - Minimal)
+-- ============================================================================
+
+-- Get global setting
+function DB:GetGlobal(key)
+    if not self.db.global then return nil end
+    return self.db.global[key]
+end
+
+-- Set global setting
+function DB:SetGlobal(key, value)
+    if not self.db.global then
+        self.db.global = {}
+    end
+    self.db.global[key] = value
+end
+
+-- ============================================================================
+-- CHARACTER-SPECIFIC DATA (Direct Access)
+-- ============================================================================
+
+-- Get character database
+function DB:GetCharacterDB()
+    return self.charDb
+end
+
+-- Get character-specific data
+function DB:GetCharacterData(key)
+    return self.charDb[key]
+end
+
+-- Set character-specific data
+function DB:SetCharacterData(key, value)
+    self.charDb[key] = value
+end
+
+-- ============================================================================
+-- PROFILE SYSTEM (Disabled for 1.4.0 - Stubs for backwards compatibility)
+-- ============================================================================
+
+-- Get current "profile" name - now just returns character name
+function DB:GetProfileName()
+    return self:GetCharacterKey()
+end
+
+-- Profile functions disabled - print informational message
+function DB:SetProfile(profileName)
+    TUICD:Print("Profile switching is disabled. Settings are now character-specific.")
+    TUICD:Print("Profile system will be redesigned in a future update.")
+    return false
+end
+
+function DB:CreateProfile(profileName, copyFrom)
+    TUICD:Print("Profile creation is disabled. Settings are now character-specific.")
+    return false
+end
+
+function DB:DeleteProfile(profileName)
+    TUICD:Print("Profile deletion is disabled. Settings are now character-specific.")
+    return false
+end
+
+function DB:CopyProfile(sourceName, destName)
+    TUICD:Print("Profile copying is disabled. Use Import/Export instead.")
+    return false
+end
+
+function DB:RenameProfile(oldName, newName)
+    TUICD:Print("Profile renaming is disabled. Settings are now character-specific.")
+    return false
+end
+
+-- Get list of profiles - returns just current character for now
+function DB:GetProfileList()
+    return { self:GetCharacterKey() }
+end
+
+-- Profile exists check
+function DB:ProfileExists(profileName)
+    return profileName == self:GetCharacterKey()
+end
+
+-- Get profile (for backwards compatibility)
+function DB:GetProfile(profileName)
+    -- Always return character settings
+    return self.charDb.settings
+end
+
+-- ============================================================================
+-- SPEC PROFILES (Disabled for 1.4.0)
+-- ============================================================================
+
+function DB:GetSpecProfile(charKey, specIndex)
+    return nil
+end
+
+function DB:SetSpecProfile(charKey, specIndex, profileName)
+    -- No-op
+end
+
+function DB:IsSpecProfilesEnabled(charKey)
+    return false
+end
+
+function DB:ClearSpecProfiles(charKey)
+    -- No-op
+end
+
+function DB:GetAllSpecProfiles(charKey)
+    return {}
+end
+
+function DB:OnSpecChanged()
+    -- No-op - spec profiles disabled
+end
+
+-- ============================================================================
+-- EXPORT/IMPORT HELPERS
+-- ============================================================================
+
+-- Get all settings for export
+function DB:GetAllSettingsForExport()
+    return {
+        modules = DeepCopy(self.charDb.modules or {}),
+        settings = DeepCopy(self.charDb.settings or {}),
+    }
+end
+
+-- Import all settings
+function DB:ImportAllSettings(data)
+    if not data then return false end
+    
+    if data.modules then
+        self.charDb.modules = DeepCopy(data.modules)
+    end
+    
+    if data.settings then
+        self.charDb.settings = DeepCopy(data.settings)
+    end
+    
+    TUICD.Events:Fire(TUICD.EVENTS.SETTINGS_CHANGED, nil, nil, nil)
+    return true
+end
+
+-- ============================================================================
+-- TRACKER SETTINGS (for CooldownHighlights/BuffHighlights compatibility)
+-- These functions provide access to tracker settings stored in the cooldowns module
 -- ============================================================================
 
 function DB:GetTrackerSettings(trackerKey)
-    if not self.charDb.trackers[trackerKey] then
-        self.charDb.trackers[trackerKey] = CreateTrackerDefaults()
-    end
-    return self.charDb.trackers[trackerKey]
+    -- Get the cooldowns module settings
+    local cooldownSettings = self:GetModuleSettings("cooldowns")
+    if not cooldownSettings then return {} end
+    
+    -- Return the specific tracker's settings
+    return cooldownSettings[trackerKey] or {}
 end
 
 function DB:GetTrackerSetting(trackerKey, key)
@@ -231,160 +479,25 @@ function DB:GetTrackerSetting(trackerKey, key)
 end
 
 function DB:SetTrackerSetting(trackerKey, key, value)
-    local settings = self:GetTrackerSettings(trackerKey)
-    settings[key] = value
-    TUICD.Events:Fire(TUICD.EVENTS.TRACKER_SETTINGS_CHANGED, trackerKey, key, value)
-end
-
-function DB:SetTrackerSettings(trackerKey, settingsTable)
-    if not settingsTable then return end
-    self.charDb.trackers[trackerKey] = settingsTable
-    TUICD.Events:Fire(TUICD.EVENTS.TRACKER_SETTINGS_CHANGED, trackerKey, nil, nil)
-end
-
--- ============================================================================
--- GLOBAL SETTINGS
--- ============================================================================
-
-function DB:GetGlobal(key)
-    if not self.db then return nil end
-    if not self.db.global then return nil end
-    return self.db.global[key]
-end
-
-function DB:SetGlobal(key, value)
-    if not self.db then return end
-    if not self.db.global then
-        self.db.global = {}
+    -- Get the cooldowns module settings
+    local cooldownSettings = self:GetModuleSettings("cooldowns")
+    if not cooldownSettings then
+        cooldownSettings = {}
     end
-    self.db.global[key] = value
-end
-
--- ============================================================================
--- CUSTOM ENTRIES
--- ============================================================================
-
-function DB:GetCustomEntries(specID)
-    if not self.charDb.customEntries then
-        self.charDb.customEntries = {}
+    
+    -- Ensure the tracker table exists
+    if not cooldownSettings[trackerKey] then
+        cooldownSettings[trackerKey] = {}
     end
-    if not self.charDb.customEntries[specID] then
-        self.charDb.customEntries[specID] = {}
-    end
-    return self.charDb.customEntries[specID]
-end
-
-function DB:SetCustomEntries(specID, entries)
-    if not self.charDb.customEntries then
-        self.charDb.customEntries = {}
-    end
-    self.charDb.customEntries[specID] = entries
-    TUICD.Events:Fire(TUICD.EVENTS.CUSTOM_ENTRIES_CHANGED, specID)
-end
-
-function DB:AddCustomEntry(specID, entryType, entryID)
-    local entries = self:GetCustomEntries(specID)
-    table.insert(entries, { type = entryType, id = entryID })
-    TUICD.Events:Fire(TUICD.EVENTS.CUSTOM_ENTRIES_CHANGED, specID)
-end
-
-function DB:RemoveCustomEntry(specID, index)
-    local entries = self:GetCustomEntries(specID)
-    if entries[index] then
-        table.remove(entries, index)
-        TUICD.Events:Fire(TUICD.EVENTS.CUSTOM_ENTRIES_CHANGED, specID)
+    
+    -- Set the value
+    cooldownSettings[trackerKey][key] = value
+    
+    -- Save back to database
+    self:SetModuleSettings("cooldowns", cooldownSettings)
+    
+    -- Fire event
+    if TUICD.Events and TUICD.EVENTS then
+        TUICD.Events:Fire(TUICD.EVENTS.SETTINGS_CHANGED, "cooldowns", key, value)
     end
 end
-
--- ============================================================================
--- CONTAINER POSITIONS
--- ============================================================================
-
-function DB:GetContainerPosition(trackerKey)
-    if not self.charDb.containerPositions then
-        self.charDb.containerPositions = {}
-    end
-    return self.charDb.containerPositions[trackerKey]
-end
-
-function DB:SetContainerPosition(trackerKey, point, x, y)
-    if not self.charDb.containerPositions then
-        self.charDb.containerPositions = {}
-    end
-    self.charDb.containerPositions[trackerKey] = {
-        point = point,
-        x = x,
-        y = y,
-    }
-end
-
-function DB:ClearContainerPositions()
-    if self.charDb then
-        self.charDb.containerPositions = {}
-    end
-end
-
--- ============================================================================
--- HIGHLIGHT SETTINGS
--- ============================================================================
-
-function DB:GetHighlightSettings(highlightKey)
-    if not self.charDb[highlightKey] then
-        self.charDb[highlightKey] = {}
-    end
-    return self.charDb[highlightKey]
-end
-
-function DB:SetHighlightSettings(highlightKey, settings)
-    self.charDb[highlightKey] = settings
-end
-
--- ============================================================================
--- MIGRATION FLAGS
--- ============================================================================
-
-function DB:HasMigratedFromCMT()
-    if not self.charDb then return false end
-    return self.charDb.cmtMigrationVersion ~= nil
-end
-
-function DB:GetCMTMigrationVersion()
-    if not self.charDb then return 0 end
-    return self.charDb.cmtMigrationVersion or 0
-end
-
-function DB:SetCMTMigrated(version)
-    if not self.charDb then return end
-    self.charDb.cmtMigrationVersion = version
-    self.charDb.cmtMigrationDate = date("%Y-%m-%d %H:%M:%S")
-end
-
-function DB:ClearCMTMigration()
-    if not self.charDb then return end
-    self.charDb.cmtMigrationVersion = nil
-    self.charDb.cmtMigrationDate = nil
-end
-
--- ============================================================================
--- INITIALIZATION CHECK
--- ============================================================================
-
-function DB:IsInitialized()
-    return self.db ~= nil and self.charDb ~= nil
-end
-
--- ============================================================================
--- CHARACTER KEY
--- ============================================================================
-
-function DB:GetCharacterKey()
-    local name = UnitName("player")
-    local realm = GetRealmName()
-    return name .. "-" .. realm
-end
-
--- ============================================================================
--- DEEP COPY UTILITY (exposed for external use)
--- ============================================================================
-
-TUICD.DeepCopy = DeepCopy

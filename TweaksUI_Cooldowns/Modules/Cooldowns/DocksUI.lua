@@ -1,6 +1,7 @@
 -- ============================================================================
--- TweaksUI: Cooldowns - Docks Settings UI
+-- TUICD: Cooldowns - Docks Settings UI
 -- Configuration panel for dock containers
+-- Migrated from TUICD: Cooldowns (standalone) to TUICD suite
 -- ============================================================================
 
 local ADDON_NAME, TUICD = ...
@@ -18,6 +19,18 @@ local dockTabs = {}
 local contentFrame = nil
 local scrollChild = nil
 local initialized = false
+
+-- Panel dimensions
+local PANEL_WIDTH = 420
+local PANEL_HEIGHT = 700
+
+-- Standard dark backdrop (matching TUICD style)
+local BACKDROP_DARK = {
+    bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
+    edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+    tile = true, tileSize = 32, edgeSize = 32,
+    insets = { left = 8, right = 8, top = 8, bottom = 8 }
+}
 
 -- Helper: Set a VO setting and apply immediately if VO is enabled
 local function SetVOSettingAndApply(settingKey, value)
@@ -59,10 +72,10 @@ local ASPECT_OPTIONS = {
 
 local function CreateBackdrop(frame)
     if frame.SetBackdrop then
-        frame:SetBackdrop(TUICD.BACKDROP_DARK)
+        frame:SetBackdrop(BACKDROP_DARK)
     elseif BackdropTemplateMixin then
         Mixin(frame, BackdropTemplateMixin)
-        frame:SetBackdrop(TUICD.BACKDROP_DARK)
+        frame:SetBackdrop(BACKDROP_DARK)
     end
 end
 
@@ -355,8 +368,8 @@ local function CreateDockContent(parent)
         local enabled = self:GetChecked()
         if TUICD.Docks then
             TUICD.Docks:SetDockSetting(selectedDock, "enabled", enabled)
-            if TUICD.LayoutMode and TUICD.LayoutMode:IsUnlocked() then
-                TUICD.LayoutMode:RefreshDockOverlay(selectedDock)
+            if TUICD.Layout and TUICD.Layout:IsActive() then
+                TUICD.Layout:RefreshDockOverlay(selectedDock)
             end
         end
     end)
@@ -375,8 +388,8 @@ local function CreateDockContent(parent)
     nameEdit:SetScript("OnEnterPressed", function(self)
         if TUICD.Docks then
             TUICD.Docks:SetDockSetting(selectedDock, "name", self:GetText())
-            if TUICD.LayoutMode and TUICD.LayoutMode:IsUnlocked() then
-                TUICD.LayoutMode:RefreshDockOverlay(selectedDock)
+            if TUICD.Layout and TUICD.Layout:IsActive() then
+                TUICD.Layout:RefreshDockOverlay(selectedDock)
             end
         end
         self:ClearFocus()
@@ -411,7 +424,9 @@ local function CreateDockContent(parent)
     voApplyBtn:SetScript("OnClick", function()
         if TUICD.Docks then
             TUICD.Docks:ApplyVisualOverride(selectedDock)
-            TUICD:Print("Visual override applied to Dock " .. selectedDock)
+            if TUICD.Print then
+                TUICD:Print("Visual override applied to Dock " .. selectedDock)
+            end
         end
     end)
     content.voApplyBtn = voApplyBtn
@@ -1085,9 +1100,9 @@ end
 local function CreatePanel()
     if panel then return panel end
     
-    local frame = CreateFrame("Frame", "TUICD_DocksPanel", UIParent, "BackdropTemplate")
-    frame:SetSize(TUICD.UI.PANEL_WIDTH, 700)  -- Taller to accommodate scroll
-    frame:SetBackdrop(TUICD.BACKDROP_DARK)
+    local frame = CreateFrame("Frame", "TweaksUI_DocksPanel", UIParent, "BackdropTemplate")
+    frame:SetSize(PANEL_WIDTH, PANEL_HEIGHT)
+    frame:SetBackdrop(BACKDROP_DARK)
     frame:SetBackdropColor(0.08, 0.08, 0.08, 0.95)
     frame:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
     frame:SetFrameStrata("DIALOG")
@@ -1099,9 +1114,11 @@ local function CreatePanel()
     frame:SetClampedToScreen(true)
     frame:Hide()
     
-    -- Position next to hub if it exists
-    if _G["TUICD_SettingsHub"] then
-        frame:SetPoint("TOPLEFT", _G["TUICD_SettingsHub"], "TOPRIGHT", 5, 0)
+    -- Position next to Cooldowns hub (not main TUICD hub)
+    if _G["TweaksUI_Cooldowns_Hub"] then
+        frame:SetPoint("TOPLEFT", _G["TweaksUI_Cooldowns_Hub"], "TOPRIGHT", 0, 0)
+    elseif _G["TweaksUI_HubPanel"] then
+        frame:SetPoint("TOPLEFT", _G["TweaksUI_HubPanel"], "TOPRIGHT", 0, 0)
     else
         frame:SetPoint("CENTER", 100, 0)
     end
@@ -1171,11 +1188,6 @@ local function CreatePanel()
     
     -- Initialize first tab
     SelectDockTab(1)
-    
-    -- Register with GlobalScale
-    if TUICD.GlobalScale then
-        TUICD.GlobalScale:RegisterSettingsPanel(panel, 1.0)
-    end
     
     return frame
 end
@@ -1438,27 +1450,23 @@ function DocksUI:Toggle()
     if panel:IsShown() then
         panel:Hide()
     else
-        -- Close ALL other panels first (tracker panels + profiles panel)
-        -- Hide tracker settings panels
-        if TUICD.Cooldowns then
-            -- Hide all tracker panels directly
-            for _, trackerKey in ipairs({"essential", "utility", "buffs", "customTrackers"}) do
-                local trackerPanel = _G["TweaksUI_Cooldowns_" .. trackerKey .. "_Panel"]
-                if trackerPanel and trackerPanel:IsShown() then
-                    trackerPanel:Hide()
-                end
-            end
+        -- Close ALL other Cooldowns module panels first
+        if TUICD.Cooldowns and TUICD.Cooldowns.HideTrackerPanels then
+            TUICD.Cooldowns:HideTrackerPanels()
         end
         
-        -- Hide profiles panel
-        if _G["TUICD_ProfilesPanel"] and _G["TUICD_ProfilesPanel"]:IsShown() then
-            _G["TUICD_ProfilesPanel"]:Hide()
+        -- Hide profiles panel if it exists
+        if _G["TweaksUI_ProfilesPanel"] and _G["TweaksUI_ProfilesPanel"]:IsShown() then
+            _G["TweaksUI_ProfilesPanel"]:Hide()
         end
         
-        -- Position next to hub
-        if _G["TUICD_SettingsHub"] and _G["TUICD_SettingsHub"]:IsShown() then
+        -- Position next to Cooldowns hub
+        if _G["TweaksUI_Cooldowns_Hub"] and _G["TweaksUI_Cooldowns_Hub"]:IsShown() then
             panel:ClearAllPoints()
-            panel:SetPoint("TOPLEFT", _G["TUICD_SettingsHub"], "TOPRIGHT", 5, 0)
+            panel:SetPoint("TOPLEFT", _G["TweaksUI_Cooldowns_Hub"], "TOPRIGHT", 0, 0)
+        elseif _G["TweaksUI_HubPanel"] and _G["TweaksUI_HubPanel"]:IsShown() then
+            panel:ClearAllPoints()
+            panel:SetPoint("TOPLEFT", _G["TweaksUI_HubPanel"], "TOPRIGHT", 0, 0)
         end
         
         self:RefreshContent()
@@ -1470,6 +1478,13 @@ function DocksUI:Show()
     if not panel then
         CreatePanel()
     end
+    
+    -- Position next to Cooldowns hub
+    if _G["TweaksUI_Cooldowns_Hub"] and _G["TweaksUI_Cooldowns_Hub"]:IsShown() then
+        panel:ClearAllPoints()
+        panel:SetPoint("TOPLEFT", _G["TweaksUI_Cooldowns_Hub"], "TOPRIGHT", 0, 0)
+    end
+    
     self:RefreshContent()
     panel:Show()
 end
@@ -1486,5 +1501,7 @@ end
 
 function DocksUI:Initialize()
     initialized = true
-    TUICD:PrintDebug("DocksUI initialized")
+    if TUICD.PrintDebug then
+        TUICD:PrintDebug("DocksUI initialized")
+    end
 end
