@@ -505,6 +505,7 @@ local function HandleSlashCommand(msg)
         TUICD:Print("|cffffff00/tuicd showall|r - Toggle visibility bypass")
         TUICD:Print("|cffffff00/tuicd status|r - Show debug status info")
         TUICD:Print("|cffffff00/tuicd debug|r - Toggle debug mode")
+        TUICD:Print("|cffffff00/tuicd dock|r - Dock management commands")
         TUICD:Print("|cffffff00/tuicd remigrate|r - Re-import positions from TweaksUI")
         TUICD:Print("|cffffff00/tuicd migrateprofiles|r - Convert old profiles to 3.0 format")
         TUICD:Print("|cffffff00/tuicd version|r - Show version info")
@@ -536,6 +537,33 @@ local function HandleSlashCommand(msg)
         
     elseif cmd == "debug" then
         TUICD:SetDebugMode(not TUICD.debugMode)
+        
+    elseif cmd == "mounted" then
+        -- Debug mounted state detection
+        local isMounted = IsMounted()
+        local isMountedOrTravel = TUICD.UnitAPI and TUICD.UnitAPI:IsMountedOrTravelForm() or false
+        local _, playerClass = UnitClass("player")
+        local formID = GetShapeshiftForm()
+        local formSpellID = nil
+        local formName = nil
+        if formID and formID > 0 then
+            local _, _, _, spellID = GetShapeshiftFormInfo(formID)
+            formSpellID = spellID
+            if spellID and C_Spell and C_Spell.GetSpellInfo then
+                local info = C_Spell.GetSpellInfo(spellID)
+                if info then
+                    formName = info.name
+                end
+            end
+        end
+        
+        TUICD:Print("|cff00ccff=== Mounted State Debug ===|r")
+        TUICD:Print("IsMounted(): " .. tostring(isMounted))
+        TUICD:Print("IsMountedOrTravelForm(): " .. tostring(isMountedOrTravel))
+        TUICD:Print("Player Class: " .. tostring(playerClass))
+        TUICD:Print("Shapeshift Form ID: " .. tostring(formID))
+        TUICD:Print("Form Spell ID: " .. tostring(formSpellID))
+        TUICD:Print("Form Name: " .. tostring(formName))
         
     elseif cmd == "version" or cmd == "ver" then
         TUICD:Print("Version: |cff00ff00" .. TUICD.VERSION .. "|r")
@@ -745,6 +773,76 @@ local function HandleSlashCommand(msg)
             TUICD:Print("You can now switch profiles normally.")
         else
             TUICD:Print("No old-format profiles found to migrate. (" .. skippedCount .. " already in 3.0 format)")
+        end
+        
+    elseif cmd == "dock" then
+        -- Dock management commands
+        local subcmd, subargs = args:match("^(%S*)%s*(.*)$")
+        subcmd = (subcmd or ""):lower()
+        
+        if subcmd == "" or subcmd == "help" then
+            TUICD:Print("|cff00ccff=== Dock Commands ===|r")
+            TUICD:Print("|cffffff00/tuicd dock cleanup|r - Remove orphaned assignments (? icons)")
+            TUICD:Print("|cffffff00/tuicd dock cleanup <1-4>|r - Cleanup specific dock only")
+            TUICD:Print("|cffffff00/tuicd dock clear <1-4>|r - Clear all assignments from a dock")
+            TUICD:Print("|cffffff00/tuicd dock list|r - List all dock assignments")
+            
+        elseif subcmd == "cleanup" then
+            if not TUICD.Modules or not TUICD.Modules.Docks then
+                TUICD:PrintError("Docks module not available")
+                return
+            end
+            local dockNum = tonumber(subargs)
+            TUICD.Modules.Docks:CleanupOrphans(dockNum)
+            
+        elseif subcmd == "clear" then
+            if not TUICD.Modules or not TUICD.Modules.Docks then
+                TUICD:PrintError("Docks module not available")
+                return
+            end
+            local dockNum = tonumber(subargs)
+            if not dockNum then
+                TUICD:PrintError("Usage: /tuicd dock clear <1-4>")
+                return
+            end
+            TUICD.Modules.Docks:ClearDock(dockNum)
+            
+        elseif subcmd == "list" then
+            TUICD:Print("|cff00ccff=== Dock Assignments ===|r")
+            local totalCount = 0
+            
+            -- List BuffHighlights dock assignments
+            local buffDB = TweaksUI_Cooldowns_CharDB and TweaksUI_Cooldowns_CharDB.buffHighlights
+            if buffDB and buffDB.dockAssignment then
+                for slotIndex, dockIndex in pairs(buffDB.dockAssignment) do
+                    if dockIndex then
+                        TUICD:Print(string.format("  Dock %d: |cffffff00buffs|r slot %d", dockIndex, slotIndex))
+                        totalCount = totalCount + 1
+                    end
+                end
+            end
+            
+            -- List CooldownHighlights dock assignments
+            for _, trackerKey in ipairs({"essential", "utility", "customTrackers"}) do
+                local db = TweaksUI_Cooldowns_CharDB and TweaksUI_Cooldowns_CharDB[trackerKey .. "Highlights"]
+                if db and db.dockAssignment then
+                    for slotIndex, dockIndex in pairs(db.dockAssignment) do
+                        if dockIndex then
+                            TUICD:Print(string.format("  Dock %d: |cffffff00%s|r slot %d", dockIndex, trackerKey, slotIndex))
+                            totalCount = totalCount + 1
+                        end
+                    end
+                end
+            end
+            
+            if totalCount == 0 then
+                TUICD:Print("  (no dock assignments)")
+            else
+                TUICD:Print(string.format("Total: %d assignment(s)", totalCount))
+            end
+        else
+            TUICD:Print("Unknown dock command: " .. subcmd)
+            TUICD:Print("Type /tuicd dock help for commands")
         end
         
     else
