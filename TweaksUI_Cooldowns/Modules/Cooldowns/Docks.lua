@@ -38,6 +38,27 @@ local JUSTIFY = {
     BOTTOM = "bottom",
 }
 
+-- Helper: Get the appropriate WoW anchor point based on justify and orientation
+local function GetJustifyAnchorPoint(justify, orientation)
+    if orientation == ORIENTATION.HORIZONTAL then
+        if justify == JUSTIFY.LEFT then
+            return "LEFT"
+        elseif justify == JUSTIFY.RIGHT then
+            return "RIGHT"
+        else
+            return "CENTER"
+        end
+    else -- VERTICAL
+        if justify == JUSTIFY.TOP then
+            return "TOP"
+        elseif justify == JUSTIFY.BOTTOM then
+            return "BOTTOM"
+        else
+            return "CENTER"
+        end
+    end
+end
+
 -- ============================================================================
 -- STATE
 -- ============================================================================
@@ -194,6 +215,54 @@ local function GetHighlightFrame(trackerType, slotIndex)
     end
 end
 
+-- Check if a docked icon should actually be visible (has active buff/cooldown)
+-- This is more reliable than IsShown() since layout mode can force-show frames
+local function IsDockedIconActive(trackerType, slotIndex, frame)
+    if not frame then return false end
+    
+    -- Check if layout mode is active - if so, show all docked icons
+    local isLayoutMode = TUICD.Layout and TUICD.Layout:IsActive()
+    if isLayoutMode then
+        return true
+    end
+    
+    -- First check if the frame is hidden by the highlight module
+    -- (BuffHighlights/CooldownHighlights may hide inactive frames)
+    if not frame:IsShown() then
+        return false
+    end
+    
+    -- For buffs, check if the icon has a valid texture and is not desaturated
+    if trackerType == "buffs" then
+        local icon = frame.icon or frame.Icon
+        if icon then
+            local texture = nil
+            pcall(function() texture = icon:GetTexture() end)
+            if texture and texture ~= 134400 and texture ~= "Interface\\Icons\\INV_Misc_QuestionMark" then
+                -- Has a real texture - check desaturated state
+                -- Not desaturated = buff is active
+                local desaturated = icon:IsDesaturated()
+                if not desaturated then
+                    return true
+                end
+            end
+        end
+        return false
+    else
+        -- For cooldowns (essential, utility, customTrackers)
+        -- Check if the icon is desaturated (inactive) or not (active/on cooldown)
+        local icon = frame.icon or frame.Icon
+        if icon then
+            local desaturated = icon:IsDesaturated()
+            -- If not desaturated, it's on cooldown (active)
+            if not desaturated then
+                return true
+            end
+        end
+        return false
+    end
+end
+
 -- ============================================================================
 -- VISIBILITY EVALUATION
 -- ============================================================================
@@ -209,7 +278,7 @@ local function GetPlayerState()
         inBattleground = false,
         isSolo = not IsInGroup(),
         hasTarget = UnitExists("target"),
-        isMounted = IsMounted(),
+        isMounted = TUICD.UnitAPI:IsMountedOrTravelForm(),
     }
     
     -- Check instance type
@@ -309,18 +378,84 @@ local function CreateDockFrame(dockIndex)
     iconArrivalOrder[dockIndex] = {}
     layoutQueued[dockIndex] = false
     
+    -- Position dock using justify-appropriate anchor point
     local settings = GetDockSettings(dockIndex)
+    local anchorPoint = GetJustifyAnchorPoint(settings.justify or JUSTIFY.CENTER, settings.orientation or ORIENTATION.HORIZONTAL)
+    local savedPoint = settings.point or "CENTER"
+    local x = settings.x or 0
+    local y = settings.y or 0
+    
     dock:ClearAllPoints()
-    dock:SetPoint(settings.point or "CENTER", UIParent, settings.point or "CENTER", settings.x or 0, settings.y or 0)
+    dock:SetPoint(anchorPoint, UIParent, savedPoint, x, y)
     
     -- Apply background/border settings
     Docks:ApplyDockAppearance(dockIndex)
     
     dock:Hide()
     
-    dprint("Created dock frame:", dockIndex)
+    dprint("Created dock frame:", dockIndex, "with anchor:", anchorPoint)
     
     return dock
+end
+
+-- Update the dock's anchor point based on current justify setting
+-- When savePosition=true, recalculates and saves from current screen position
+-- When savePosition=false, just repositions using saved coordinates at the correct anchor
+local function UpdateDockAnchor(dockIndex, savePosition)
+    local dock = docks[dockIndex]
+    if not dock then return end
+    
+    local settings = GetDockSettings(dockIndex)
+    local newAnchor = GetJustifyAnchorPoint(settings.justify or JUSTIFY.CENTER, settings.orientation or ORIENTATION.HORIZONTAL)
+    
+    if savePosition then
+        -- Recalculate position from current screen location (used when justify changes)
+        local left, bottom, width, height = dock:GetRect()
+        if not left or not width then return end
+        
+        local screenWidth, screenHeight = UIParent:GetWidth(), UIParent:GetHeight()
+        local centerX = left + width / 2
+        local centerY = bottom + height / 2
+        
+        -- Calculate the position of the new anchor point relative to UIParent CENTER
+        local anchorX, anchorY
+        if newAnchor == "LEFT" then
+            anchorX = left - screenWidth / 2
+            anchorY = centerY - screenHeight / 2
+        elseif newAnchor == "RIGHT" then
+            anchorX = (left + width) - screenWidth / 2
+            anchorY = centerY - screenHeight / 2
+        elseif newAnchor == "TOP" then
+            anchorX = centerX - screenWidth / 2
+            anchorY = (bottom + height) - screenHeight / 2
+        elseif newAnchor == "BOTTOM" then
+            anchorX = centerX - screenWidth / 2
+            anchorY = bottom - screenHeight / 2
+        else -- CENTER
+            anchorX = centerX - screenWidth / 2
+            anchorY = centerY - screenHeight / 2
+        end
+        
+        dock:ClearAllPoints()
+        dock:SetPoint(newAnchor, UIParent, "CENTER", anchorX, anchorY)
+        
+        -- Save the new position data
+        SetDockSetting(dockIndex, "point", "CENTER")
+        SetDockSetting(dockIndex, "x", anchorX)
+        SetDockSetting(dockIndex, "y", anchorY)
+        
+        dprint("Updated dock", dockIndex, "anchor to", newAnchor, "and saved position")
+    else
+        -- Just reposition using saved x/y at the correct anchor point (used during layout)
+        local savedPoint = settings.point or "CENTER"
+        local savedX = settings.x or 0
+        local savedY = settings.y or 0
+        
+        dock:ClearAllPoints()
+        dock:SetPoint(newAnchor, UIParent, savedPoint, savedX, savedY)
+        
+        dprint("Repositioned dock", dockIndex, "at anchor", newAnchor, "using saved position")
+    end
 end
 
 -- Apply background/border/alpha settings to a dock
@@ -368,6 +503,12 @@ local function CreateDockLayoutWrapper(dockIndex)
         return dockLayoutWrappers[dockIndex]
     end
     
+    -- Helper to get current justify-based anchor
+    local function GetCurrentAnchor()
+        local s = GetDockSettings(dockIndex)
+        return GetJustifyAnchorPoint(s.justify or JUSTIFY.CENTER, s.orientation or ORIENTATION.HORIZONTAL)
+    end
+    
     -- Create TUIFrame-compatible wrapper object
     local wrapper = {
         id = wrapperId,
@@ -375,49 +516,53 @@ local function CreateDockLayoutWrapper(dockIndex)
         name = Docks:GetDockName(dockIndex),
         category = "Cooldowns",
         
-        -- Default position
+        -- Default position - uses justify-based anchor
         defaultPosition = {
-            point = "CENTER",
+            point = GetCurrentAnchor(),
             x = 0,
             y = -100 * dockIndex,  -- Stack docks vertically by default
         },
         
-        -- Position management
+        -- Get the anchor point this dock uses (based on justify setting)
+        GetAnchorPoint = function(self)
+            return GetCurrentAnchor()
+        end,
+        
+        -- Position management - always uses justify-based anchor
         SetPosition = function(self, point, relFrame, relPoint, x, y)
             if InCombatLockdown() then return end
             
-            point = point or "CENTER"
+            local anchor = GetCurrentAnchor()
             relFrame = relFrame or UIParent
-            relPoint = relPoint or point
+            relPoint = relPoint or point or "CENTER"
             x = x or 0
             y = y or 0
             
             dock:ClearAllPoints()
-            dock:SetPoint(point, relFrame, relPoint, x, y)
+            dock:SetPoint(anchor, relFrame, relPoint, x, y)
             
-            -- Save to dock settings
-            SetDockSetting(dockIndex, "point", point)
+            -- Save to dock settings (store the relative point and offsets)
+            SetDockSetting(dockIndex, "point", relPoint)
             SetDockSetting(dockIndex, "x", x)
             SetDockSetting(dockIndex, "y", y)
         end,
         
         GetSaveData = function(self)
-            local left = dock:GetLeft()
-            local bottom = dock:GetBottom()
+            local anchor = GetCurrentAnchor()
+            local point, relTo, relPoint, x, y = dock:GetPoint(1)
             
-            if not left or not bottom then
-                local point, _, _, x, y = dock:GetPoint(1)
+            if point then
                 return {
-                    point = point or "CENTER",
+                    point = relPoint or "CENTER",
                     x = x or 0,
                     y = y or 0,
                 }
             end
             
             return {
-                point = "BOTTOMLEFT",
-                x = left,
-                y = bottom,
+                point = "CENTER",
+                x = 0,
+                y = 0,
             }
         end,
         
@@ -425,15 +570,16 @@ local function CreateDockLayoutWrapper(dockIndex)
             if not data then return end
             if InCombatLockdown() then return end
             
-            local point = data.point or "CENTER"
+            local anchor = GetCurrentAnchor()
+            local relPoint = data.point or "CENTER"
             local x = data.x or 0
             local y = data.y or 0
             
             dock:ClearAllPoints()
-            dock:SetPoint(point, UIParent, point, x, y)
+            dock:SetPoint(anchor, UIParent, relPoint, x, y)
             
             -- Save to dock settings
-            SetDockSetting(dockIndex, "point", point)
+            SetDockSetting(dockIndex, "point", relPoint)
             SetDockSetting(dockIndex, "x", x)
             SetDockSetting(dockIndex, "y", y)
         end,
@@ -633,8 +779,12 @@ local function GetSortedVisibleIcons(dockIndex)
     
     for _, iconKey in ipairs(arrivalOrder) do
         local iconInfo = icons[iconKey]
-        if iconInfo and iconInfo.frame and iconInfo.frame:IsShown() then
-            table.insert(visible, iconInfo)
+        if iconInfo and iconInfo.frame then
+            -- Use IsDockedIconActive instead of just IsShown()
+            -- This properly handles layout mode exit by checking actual icon state
+            if IsDockedIconActive(iconInfo.trackerType, iconInfo.slotIndex, iconInfo.frame) then
+                table.insert(visible, iconInfo)
+            end
         end
     end
     
@@ -694,6 +844,39 @@ function Docks:LayoutDock(dockIndex)
     local visible = GetSortedVisibleIcons(dockIndex)
     local n = #visible
     
+    -- Hide inactive icons (not in layout mode)
+    -- This ensures icons that were shown during layout mode get hidden when exiting
+    if not isLayoutMode then
+        local allIcons = dockedIcons[dockIndex] or {}
+        local visibleKeys = {}
+        for _, iconInfo in ipairs(visible) do
+            local key = MakeIconKey(iconInfo.trackerType, iconInfo.slotIndex)
+            visibleKeys[key] = true
+        end
+        
+        for iconKey, iconInfo in pairs(allIcons) do
+            if not visibleKeys[iconKey] and iconInfo.frame then
+                -- This icon is not active - hide it using alpha to avoid taint
+                iconInfo.frame:SetAlpha(0)
+            end
+        end
+        
+        -- Restore alpha for visible icons
+        for _, iconInfo in ipairs(visible) do
+            if iconInfo.frame then
+                iconInfo.frame:SetAlpha(1)
+            end
+        end
+    else
+        -- In layout mode, show all icons
+        local allIcons = dockedIcons[dockIndex] or {}
+        for _, iconInfo in pairs(allIcons) do
+            if iconInfo.frame then
+                iconInfo.frame:SetAlpha(1)
+            end
+        end
+    end
+    
     -- Settings
     local size = settings.iconSize or DEFAULT_ICON_SIZE
     local spacing = settings.spacing or DEFAULT_SPACING
@@ -717,6 +900,15 @@ function Docks:LayoutDock(dockIndex)
             minW = size + 10
             minH = size * 3 + spacing * 2
         end
+        
+        -- Set anchor point before sizing (same as with icons)
+        local anchorPoint = GetJustifyAnchorPoint(justify, orientation)
+        local savedPoint = settings.point or "CENTER"
+        local savedX = settings.x or 0
+        local savedY = settings.y or 0
+        
+        dock:ClearAllPoints()
+        dock:SetPoint(anchorPoint, UIParent, savedPoint, savedX, savedY)
         dock:SetSize(minW, minH)
         
         local dockName = Docks:GetDockName(dockIndex)
@@ -779,10 +971,23 @@ function Docks:LayoutDock(dockIndex)
         dockW = maxW + 8
         dockH = totalH + (n - 1) * spacing + 8
     end
+    
+    -- CRITICAL: Set anchor point BEFORE changing size
+    -- This ensures the dock expands/contracts around the correct point
+    local anchorPoint = GetJustifyAnchorPoint(justify, orientation)
+    local savedPoint = settings.point or "CENTER"
+    local savedX = settings.x or 0
+    local savedY = settings.y or 0
+    
+    dock:ClearAllPoints()
+    dock:SetPoint(anchorPoint, UIParent, savedPoint, savedX, savedY)
     dock:SetSize(dockW, dockH)
     
     -- Position each icon (DO NOT resize - let per-icon settings control size)
-    -- Use linear positioning (first visible = first position)
+    -- Icons are always placed linearly (left-to-right for horizontal, top-to-bottom for vertical)
+    -- Justify affects CROSS-AXIS alignment only:
+    --   Horizontal dock: justify affects vertical alignment (TOP/BOTTOM/CENTER)
+    --   Vertical dock: justify affects horizontal alignment (LEFT/RIGHT/CENTER)
     local xOffset = 4
     local yOffset = -4
     
@@ -799,23 +1004,27 @@ function Docks:LayoutDock(dockIndex)
             frame:ClearAllPoints()
             
             if orientation == ORIENTATION.HORIZONTAL then
+                -- Horizontal dock: place left-to-right, justify affects vertical position
                 local y
                 if justify == JUSTIFY.TOP or justify == JUSTIFY.LEFT then
                     y = -4
                 elseif justify == JUSTIFY.BOTTOM or justify == JUSTIFY.RIGHT then
                     y = -(dockH - frameH - 4)
                 else
+                    -- CENTER
                     y = -(dockH - frameH) / 2
                 end
                 frame:SetPoint("TOPLEFT", dock, "TOPLEFT", xOffset, y)
                 xOffset = xOffset + frameW + spacing
             else
+                -- Vertical dock: place top-to-bottom, justify affects horizontal position
                 local x
                 if justify == JUSTIFY.LEFT or justify == JUSTIFY.TOP then
                     x = 4
                 elseif justify == JUSTIFY.RIGHT or justify == JUSTIFY.BOTTOM then
                     x = dockW - frameW - 4
                 else
+                    -- CENTER
                     x = (dockW - frameW) / 2
                 end
                 frame:SetPoint("TOPLEFT", dock, "TOPLEFT", x, yOffset)
@@ -1031,6 +1240,12 @@ function Docks:SetDockSetting(dockIndex, key, value)
         QueueLayout(dockIndex)
     end
     
+    -- When justify or orientation changes, update the dock's anchor point
+    -- Pass true to save the position (recalculate from current screen location)
+    if key == "justify" or key == "orientation" then
+        UpdateDockAnchor(dockIndex, true)
+    end
+    
     -- Appearance keys trigger ApplyDockAppearance
     local appearanceKeys = {
         showBackground = true, bgColor = true,
@@ -1078,6 +1293,21 @@ end
 
 function Docks:GetDockCount()
     return NUM_DOCKS
+end
+
+-- Get the anchor point for a dock based on its justify and orientation settings
+function Docks:GetDockAnchorPoint(dockIndex)
+    local settings = GetDockSettings(dockIndex)
+    return GetJustifyAnchorPoint(settings.justify or JUSTIFY.CENTER, settings.orientation or ORIENTATION.HORIZONTAL)
+end
+
+-- Update a dock's anchor point
+-- savePosition: if true (default), recalculates from current position and saves
+--               if false, just repositions using saved coordinates
+function Docks:UpdateDockAnchor(dockIndex, savePosition)
+    -- Default to false for the common case of just repositioning
+    if savePosition == nil then savePosition = false end
+    UpdateDockAnchor(dockIndex, savePosition)
 end
 
 -- Apply visual override settings to all icons in a dock
@@ -1376,10 +1606,32 @@ function Docks:Initialize()
     eventFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
     eventFrame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
     eventFrame:RegisterEvent("PLAYER_MOUNT_DISPLAY_CHANGED")
+    eventFrame:RegisterEvent("UPDATE_SHAPESHIFT_FORM")  -- For druid travel form
     eventFrame:RegisterEvent("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW")
     eventFrame:RegisterEvent("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE")
     eventFrame:SetScript("OnEvent", function(self, event)
         Docks:RefreshAllDocks()
+    end)
+    
+    -- Register for aura/cooldown events (throttled and deferred to allow highlight modules to update first)
+    local auraEventFrame = CreateFrame("Frame")
+    local pendingAuraRefresh = false
+    local AURA_REFRESH_DELAY = 0.1  -- Delay to let highlight modules update icon states first
+    
+    auraEventFrame:RegisterEvent("UNIT_AURA")
+    auraEventFrame:RegisterEvent("SPELL_UPDATE_COOLDOWN")
+    auraEventFrame:SetScript("OnEvent", function(self, event, unit)
+        -- Only care about player auras
+        if event == "UNIT_AURA" and unit ~= "player" then return end
+        
+        -- Always defer refresh slightly so highlight modules can update icon states first
+        if not pendingAuraRefresh then
+            pendingAuraRefresh = true
+            C_Timer.After(AURA_REFRESH_DELAY, function()
+                pendingAuraRefresh = false
+                Docks:RefreshAllDocks()
+            end)
+        end
     end)
     
     -- Register for layout mode events (TUICD.Events system)
@@ -1466,6 +1718,168 @@ function Docks:Cleanup()
             wipe(iconArrivalOrder[i])
         end
     end
+end
+
+-- ============================================================================
+-- ORPHAN CLEANUP
+-- ============================================================================
+
+-- Clean up orphaned dock assignments (icons that no longer exist)
+function Docks:CleanupOrphans(specificDock)
+    local cleanedCount = 0
+    local checkedCount = 0
+    
+    print("|cff00ccff[TUI:CD Docks]|r Scanning for orphaned dock assignments...")
+    
+    -- Helper to check if a frame exists and has valid texture
+    local function IsValidDockedIcon(trackerType, slotIndex)
+        local frame = GetHighlightFrame(trackerType, slotIndex)
+        if not frame then return false end
+        
+        -- Check if frame has a valid icon texture
+        local icon = frame.icon or frame.Icon
+        if not icon then return false end
+        
+        local texture = nil
+        pcall(function() texture = icon:GetTexture() end)
+        
+        -- Consider it orphaned if no texture or it's the question mark
+        if not texture then return false end
+        if texture == "Interface\\Icons\\INV_Misc_QuestionMark" then return false end
+        if type(texture) == "number" and texture == 134400 then return false end  -- Question mark fileID
+        
+        return true
+    end
+    
+    -- Clean BuffHighlights dock assignments
+    local buffDB = TweaksUI_Cooldowns_CharDB and TweaksUI_Cooldowns_CharDB.buffHighlights
+    if buffDB and buffDB.dockAssignment then
+        local toRemove = {}
+        for slotIndex, dockIndex in pairs(buffDB.dockAssignment) do
+            if dockIndex and (not specificDock or dockIndex == specificDock) then
+                checkedCount = checkedCount + 1
+                if not IsValidDockedIcon("buffs", slotIndex) then
+                    table.insert(toRemove, slotIndex)
+                    print(string.format("  |cffff8888Orphan found:|r buffs slot %d in dock %d", slotIndex, dockIndex))
+                end
+            end
+        end
+        for _, slotIndex in ipairs(toRemove) do
+            local dockIndex = buffDB.dockAssignment[slotIndex]
+            buffDB.dockAssignment[slotIndex] = nil
+            -- Also remove from runtime state
+            if dockIndex then
+                local iconKey = MakeIconKey("buffs", slotIndex)
+                if dockedIcons[dockIndex] then
+                    dockedIcons[dockIndex][iconKey] = nil
+                end
+                if iconArrivalOrder[dockIndex] then
+                    for i = #iconArrivalOrder[dockIndex], 1, -1 do
+                        if iconArrivalOrder[dockIndex][i] == iconKey then
+                            table.remove(iconArrivalOrder[dockIndex], i)
+                            break
+                        end
+                    end
+                end
+            end
+            cleanedCount = cleanedCount + 1
+        end
+    end
+    
+    -- Clean CooldownHighlights dock assignments for each tracker
+    for _, trackerKey in ipairs({"essential", "utility", "customTrackers"}) do
+        local db = TweaksUI_Cooldowns_CharDB and TweaksUI_Cooldowns_CharDB[trackerKey .. "Highlights"]
+        if db and db.dockAssignment then
+            local toRemove = {}
+            for slotIndex, dockIndex in pairs(db.dockAssignment) do
+                if dockIndex and (not specificDock or dockIndex == specificDock) then
+                    checkedCount = checkedCount + 1
+                    if not IsValidDockedIcon(trackerKey, slotIndex) then
+                        table.insert(toRemove, slotIndex)
+                        print(string.format("  |cffff8888Orphan found:|r %s slot %d in dock %d", trackerKey, slotIndex, dockIndex))
+                    end
+                end
+            end
+            for _, slotIndex in ipairs(toRemove) do
+                local dockIndex = db.dockAssignment[slotIndex]
+                db.dockAssignment[slotIndex] = nil
+                -- Also remove from runtime state
+                if dockIndex then
+                    local iconKey = MakeIconKey(trackerKey, slotIndex)
+                    if dockedIcons[dockIndex] then
+                        dockedIcons[dockIndex][iconKey] = nil
+                    end
+                    if iconArrivalOrder[dockIndex] then
+                        for i = #iconArrivalOrder[dockIndex], 1, -1 do
+                            if iconArrivalOrder[dockIndex][i] == iconKey then
+                                table.remove(iconArrivalOrder[dockIndex], i)
+                                break
+                            end
+                        end
+                    end
+                end
+                cleanedCount = cleanedCount + 1
+            end
+        end
+    end
+    
+    -- Refresh dock layouts
+    if cleanedCount > 0 then
+        self:RefreshAllDocks()
+        print(string.format("|cff00ccff[TUI:CD Docks]|r Cleaned %d orphaned assignment(s) (checked %d total)", cleanedCount, checkedCount))
+    else
+        print(string.format("|cff00ccff[TUI:CD Docks]|r No orphans found (checked %d assignments)", checkedCount))
+    end
+    
+    return cleanedCount
+end
+
+-- Clear all assignments from a specific dock
+function Docks:ClearDock(dockIndex)
+    if not dockIndex or dockIndex < 1 or dockIndex > NUM_DOCKS then
+        print("|cff00ccff[TUI:CD Docks]|r Invalid dock number. Use 1-4.")
+        return 0
+    end
+    
+    local clearedCount = 0
+    
+    -- Clear from BuffHighlights
+    local buffDB = TweaksUI_Cooldowns_CharDB and TweaksUI_Cooldowns_CharDB.buffHighlights
+    if buffDB and buffDB.dockAssignment then
+        for slotIndex, assignedDock in pairs(buffDB.dockAssignment) do
+            if assignedDock == dockIndex then
+                buffDB.dockAssignment[slotIndex] = nil
+                clearedCount = clearedCount + 1
+            end
+        end
+    end
+    
+    -- Clear from CooldownHighlights
+    for _, trackerKey in ipairs({"essential", "utility", "customTrackers"}) do
+        local db = TweaksUI_Cooldowns_CharDB and TweaksUI_Cooldowns_CharDB[trackerKey .. "Highlights"]
+        if db and db.dockAssignment then
+            for slotIndex, assignedDock in pairs(db.dockAssignment) do
+                if assignedDock == dockIndex then
+                    db.dockAssignment[slotIndex] = nil
+                    clearedCount = clearedCount + 1
+                end
+            end
+        end
+    end
+    
+    -- Clear runtime state
+    if dockedIcons[dockIndex] then
+        wipe(dockedIcons[dockIndex])
+    end
+    if iconArrivalOrder[dockIndex] then
+        wipe(iconArrivalOrder[dockIndex])
+    end
+    
+    -- Refresh
+    self:RefreshAllDocks()
+    
+    print(string.format("|cff00ccff[TUI:CD Docks]|r Cleared %d assignment(s) from Dock %d", clearedCount, dockIndex))
+    return clearedCount
 end
 
 -- Restore all dock assignments from saved variables

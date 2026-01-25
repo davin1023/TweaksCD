@@ -4209,7 +4209,7 @@ local function GetPlayerState()
         inBattleground = false,
         isSolo = not IsInGroup(),
         hasTarget = UnitExists("target"),
-        isMounted = IsMounted(),
+        isMounted = TUICD.UnitAPI and TUICD.UnitAPI:IsMountedOrTravelForm() or IsMounted(),
     }
     
     -- Check instance type
@@ -4490,16 +4490,17 @@ local function HookViewer(viewer, trackerKey)
                 -- Skip if we started applying in the meantime
                 if viewerRef._TUI_applying then return end
                 
-                -- CRITICAL: Skip during restricted scenarios to avoid secret value errors
-                if IsRestricted() then return end
+                -- Check if restricted (combat, M+, etc.)
+                local restricted = IsRestricted()
                 
-                dprint(string.format("Layout hook fired for [%s] (deferred)", trackerKey))
+                dprint(string.format("Layout hook fired for [%s] (deferred, restricted=%s)", trackerKey, tostring(restricted)))
                 
-                -- Capture order from Blizzard positions when Cooldown Manager changes (all trackers)
-                -- (Already checked IsRestricted() above which includes combat check)
-                local icons = CollectIcons(viewerRef)
-                local shown = {}
-                local hasValidPositions = false
+                -- ORDER CAPTURE: Only during non-restricted periods to avoid secret value errors
+                -- This detects when player uses Blizzard's Cooldown Manager to reorder icons
+                if not restricted then
+                    local icons = CollectIcons(viewerRef)
+                    local shown = {}
+                    local hasValidPositions = false
                     
                     for _, icon in ipairs(icons) do
                         if icon:IsShown() then
@@ -4566,8 +4567,11 @@ local function HookViewer(viewer, trackerKey)
                             end
                         end
                     end
+                end
                 
-                -- Apply our layout
+                -- APPLY LAYOUT: Always apply our layout to fix icon sizes
+                -- This runs even during restricted periods to prevent Blizzard from
+                -- leaving icons at inconsistent sizes
                 pcall(ApplyGridLayout, viewerRef, trackerKey)
             end)
         end)
@@ -4779,6 +4783,10 @@ local function OnEvent(self, event, arg1, ...)
         -- Mount state changed - update visibility
         UpdateAllVisibility()
         
+    elseif event == "UPDATE_SHAPESHIFT_FORM" then
+        -- Druid form changed - update visibility (for travel form "mounted" state)
+        UpdateAllVisibility()
+        
     elseif event == "EDIT_MODE_LAYOUTS_UPDATED" then
         -- Edit Mode has applied positions - now apply our grid layouts
         dprint("EDIT_MODE_LAYOUTS_UPDATED fired")
@@ -4828,16 +4836,18 @@ local function OnUpdate(self, elapsed)
     
     -- Aggressive layout enforcement (5x per second like CMT)
     -- This catches Blizzard resetting layouts during combat
-    -- Only enforce when customLayout is actually defined (non-empty string)
+    -- IMPORTANT: Now enforces for ALL trackers to prevent size inconsistencies
+    -- when Blizzard's Layout() resizes icons during restricted periods
     if layoutEnforceTimer >= LAYOUT_ENFORCE_INTERVAL then
         layoutEnforceTimer = 0
-        -- Only enforce layout on visible trackers with actual custom layouts
+        -- Enforce layout on ALL visible trackers (not just custom layouts)
+        -- This is necessary because the Layout hook skips during combat/restricted content,
+        -- allowing Blizzard to resize icons inconsistently
         for _, tracker in ipairs(TRACKERS) do
             local viewer = _G[tracker.name]
             if viewer and viewer:IsShown() and not viewer._TUI_applying then
                 local trackerSettings = settings[tracker.key]
-                -- Check for non-empty customLayout string
-                if trackerSettings and trackerSettings.customLayout and trackerSettings.customLayout ~= "" then
+                if trackerSettings and trackerSettings.enabled then
                     pcall(ApplyGridLayout, viewer, tracker.key)
                 end
             end
@@ -11469,6 +11479,7 @@ function Cooldowns:OnEnable()
     eventFrame:RegisterEvent("UNIT_AURA")               -- Buff changes (for activity)
     eventFrame:RegisterEvent("PLAYER_TARGET_CHANGED")   -- Target changes
     eventFrame:RegisterEvent("PLAYER_MOUNT_DISPLAY_CHANGED")  -- Mount changes
+    eventFrame:RegisterEvent("UPDATE_SHAPESHIFT_FORM")  -- Druid travel form
     eventFrame:RegisterEvent("EDIT_MODE_LAYOUTS_UPDATED")  -- Edit Mode positions applied
     eventFrame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")  -- Gear changes for equipped items tracker
     eventFrame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")  -- Spec changes for per-spec entries
