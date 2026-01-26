@@ -1,8 +1,8 @@
 ## Interface: 120000
 ## Title: TweaksUI: Cooldowns
-## Notes: Enhanced cooldown tracking with custom layouts, visibility controls, and proc alerts.|n|cff00ccffv3.0.7:|r Unified architecture - shared codebase with TweaksUI
+## Notes: Enhanced cooldown tracking with custom layouts, visibility controls, and proc alerts.
 ## Author: Meltheran
-## Version: 3.0.7
+## Version: 3.0.20
 ## SavedVariables: TweaksUI_Cooldowns_DB
 ## SavedVariablesPerCharacter: TweaksUI_Cooldowns_CharDB
 ## OptionalDeps: Masque, LibSharedMedia-3.0, CMT, !TweaksUI
@@ -82,6 +82,11 @@ Modules\Cooldowns\BuffHighlights.lua
 # Modules - Profiles UI
 # ============================================================================
 Modules\Profiles\ProfilesUI.lua
+
+# ============================================================================
+# Modules - Personal Resources
+# ============================================================================
+Modules\PersonalResources\PersonalResources.lua
 
 # ============================================================================
 # Core - Main (must be last)

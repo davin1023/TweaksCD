@@ -24,9 +24,11 @@ local DATABASE_DEFAULTS = {
 local CHAR_DATABASE_DEFAULTS = {
     -- Module enable/disable states
     -- TUI:CD modules are enabled by default
+    -- Personal Resources is disabled by default (opt-in for ElvUI users)
     modules = {
         cooldowns = true,
         layout = true,
+        personalResources = false,
     },
     
     -- All module settings
@@ -133,6 +135,10 @@ function DB:EnsureDefaults()
     end
     if self.charDb.modules.layout == nil then
         self.charDb.modules.layout = true
+    end
+    -- Personal Resources defaults to disabled (opt-in feature)
+    if self.charDb.modules.personalResources == nil then
+        self.charDb.modules.personalResources = false
     end
     
     if not self.charDb.settings then

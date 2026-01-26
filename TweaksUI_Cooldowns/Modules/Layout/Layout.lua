@@ -24,12 +24,9 @@ local FlyPaper = LibStub and LibStub("LibFlyPaper-2.0", true)
 -- ============================================================================
 
 local ELEMENT_CATEGORIES = {
-    -- TUI:CD only uses the Cooldowns category
-    -- Full TweaksUI has additional categories like ACTION_BARS, UNIT_FRAMES, etc.
+    -- TUI:CD categories
     COOLDOWNS = "Cooldowns",
-    -- Kept for future expansion:
-    -- RESOURCE_BARS = "Resource Bars",  -- For Personal Resources
-    -- MISC = "Miscellaneous",
+    RESOURCE_BARS = "Resource Bars",
 }
 Layout.CATEGORIES = ELEMENT_CATEGORIES
 
@@ -50,7 +47,8 @@ local DEFAULT_SETTINGS = {
     -- v1: Original coordinate system
     -- v2: CENTER-relative coordinates (1.6.2+)
     -- v3: Fixed cooldown tracker coords to CENTER (was still BOTTOMLEFT in v2)
-    dataVersion = 3,
+    -- v4: Back to BOTTOMLEFT absolute (working)
+    dataVersion = 4,
     -- Grid settings
     grid = {
         enabled = true,
@@ -116,7 +114,7 @@ function Layout:OnInitialize()
     local savedVersion = settings.dataVersion or 1
     
     if savedVersion < CURRENT_DATA_VERSION then
-        -- Old data version - coordinate system has changed
+        -- Old data version - coordinate system was broken
         -- Clear Layout-managed positions to prevent frames appearing in wrong places
         print("|cffFFFF00TweaksUI:|r Layout data format updated. Resetting frame positions to defaults.")
         print("|cffFFFF00TweaksUI:|r Use /tui layout to reposition your frames.")
@@ -137,9 +135,6 @@ function Layout:OnInitialize()
                     TweaksUI_Cooldowns_CharDB.settings.general.minimap.customPosition = nil
                 end
             end
-            
-            -- Note: We don't clear PersonalResources or CastBars internal position settings
-            -- because those modules have fallback defaults and will use them when nil
         end
         
         -- Update to current version
@@ -237,6 +232,82 @@ function Layout:OnDisable()
 end
 
 -- ============================================================================
+-- ANCHOR MODE (Per-Element)
+-- Allows switching between BOTTOMLEFT (default) and CENTER anchoring
+-- CENTER mode makes frames expand/contract from their center when size changes
+-- ============================================================================
+
+function Layout:SetElementAnchorMode(id, mode)
+    local element = elementRegistry[id]
+    if not element or not element.tuiFrame then return end
+    
+    mode = mode or "BOTTOMLEFT"
+    
+    -- Try calling the method if it exists
+    if element.tuiFrame.SetAnchorMode then
+        element.tuiFrame:SetAnchorMode(mode)
+    else
+        -- Set the property directly if method doesn't exist
+        element.tuiFrame.anchorMode = mode
+    end
+    
+    -- Update saved data with anchor mode
+    local settings = self:GetSettings()
+    if not settings.elements[id] then
+        settings.elements[id] = {}
+    end
+    settings.elements[id].anchorMode = mode
+    
+    if TUICD.debugMode then
+        print("|cff00ff00TweaksUI:|r Set anchor mode for " .. id .. " to " .. mode)
+    end
+end
+
+function Layout:GetElementAnchorMode(id)
+    local element = elementRegistry[id]
+    if not element or not element.tuiFrame then return "BOTTOMLEFT" end
+    
+    -- Try calling the method if it exists
+    if element.tuiFrame.GetAnchorMode then
+        return element.tuiFrame:GetAnchorMode()
+    end
+    
+    -- Fall back to checking the tuiFrame's anchorMode property directly
+    if element.tuiFrame.anchorMode then
+        return element.tuiFrame.anchorMode
+    end
+    
+    -- Fall back to saved data
+    local settings = self:GetSettings()
+    if settings.elements[id] and settings.elements[id].anchorMode then
+        return settings.elements[id].anchorMode
+    end
+    
+    return "BOTTOMLEFT"
+end
+
+function Layout:ToggleElementAnchorMode(id)
+    local currentMode = self:GetElementAnchorMode(id)
+    local newMode = (currentMode == "CENTER") and "BOTTOMLEFT" or "CENTER"
+    
+    -- Warn user that position will need adjustment
+    if newMode == "CENTER" then
+        print("|cffFFFF00TweaksUI:|r Switched " .. id .. " to CENTER anchor mode.")
+        print("|cffFFFF00TweaksUI:|r The frame will now expand/contract from its center when icon count changes.")
+        print("|cffFFFF00TweaksUI:|r You may need to reposition this element.")
+    else
+        print("|cffFFFF00TweaksUI:|r Switched " .. id .. " to BOTTOMLEFT anchor mode (default).")
+    end
+    
+    self:SetElementAnchorMode(id, newMode)
+    
+    -- Re-save position with new anchor mode
+    self:SaveElementPosition(id)
+    
+    return newMode
+end
+
+-- ============================================================================
 -- ELEMENT REGISTRATION API
 -- ============================================================================
 
@@ -324,7 +395,44 @@ function Layout:SaveElementPosition(id)
     if not element or not element.tuiFrame then return end
     
     local settings = self:GetSettings()
-    local saveData = element.tuiFrame:GetSaveData()
+    local saveData
+    
+    -- Try calling GetSaveData method if it exists
+    if element.tuiFrame.GetSaveData then
+        saveData = element.tuiFrame:GetSaveData()
+    else
+        -- Fallback: manually construct save data from frame
+        local frame = element.tuiFrame.frame or element.tuiFrame
+        if frame and frame.GetLeft then
+            local left = frame:GetLeft()
+            local bottom = frame:GetBottom()
+            local width = frame:GetWidth()
+            local height = frame:GetHeight()
+            local anchorMode = element.tuiFrame.anchorMode or "BOTTOMLEFT"
+            
+            if left and bottom then
+                if anchorMode == "CENTER" and width and height then
+                    saveData = {
+                        point = "CENTER",
+                        x = left + (width / 2),
+                        y = bottom + (height / 2),
+                        scale = frame:GetScale() or 1,
+                        anchorMode = "CENTER",
+                    }
+                else
+                    saveData = {
+                        point = "BOTTOMLEFT",
+                        x = left,
+                        y = bottom,
+                        scale = frame:GetScale() or 1,
+                        anchorMode = "BOTTOMLEFT",
+                    }
+                end
+            end
+        end
+    end
+    
+    if not saveData then return end
     
     settings.elements[id] = saveData
     
@@ -775,16 +883,18 @@ function Layout:ApplyPositionsFromImport(positions)
             local bottomLeftX = absX - halfWidth
             local bottomLeftY = absY - halfHeight
             
-            -- Save in BOTTOMLEFT format
+            -- Save in BOTTOMLEFT format (default anchor mode)
             settings.elements[id] = {
                 point = "BOTTOMLEFT",
                 x = bottomLeftX,
                 y = bottomLeftY,
+                anchorMode = "BOTTOMLEFT",
             }
             count = count + 1
             
             -- Apply immediately if element exists
             if element and element.tuiFrame then
+                element.tuiFrame:SetAnchorMode("BOTTOMLEFT")
                 element.tuiFrame:SetPosition("BOTTOMLEFT", UIParent, "BOTTOMLEFT", bottomLeftX, bottomLeftY)
             end
         end
@@ -793,13 +903,13 @@ function Layout:ApplyPositionsFromImport(positions)
     return count
 end
 
--- Get raw saved positions (BOTTOMLEFT format) - for internal use
+-- Get raw saved positions (CENTER format) - for internal use
 function Layout:GetRawPositions()
     local settings = self:GetSettings()
     return settings.elements or {}
 end
 
--- Set raw positions (BOTTOMLEFT format) - for internal use
+-- Set raw positions (CENTER format) - for internal use
 function Layout:SetRawPositions(positions)
     if not positions then return end
     local settings = self:GetSettings()
@@ -916,33 +1026,21 @@ function Layout:ImportPositions(importString)
                 x = tonumber(x)
                 y = tonumber(y)
                 if x and y then
-                    -- Convert CENTER-relative to BOTTOMLEFT absolute
+                    -- Convert CENTER-relative to screen absolute (this gives us the frame center position)
                     local absX, absY = CenterToScreen(x, y)
                     
-                    -- Need to adjust for frame size to get bottom-left corner
-                    -- Use a reasonable default size estimate (most frames are ~100-200px)
-                    local element = elementRegistry[id]
-                    local halfWidth, halfHeight = 50, 25  -- Default estimate
-                    if element and element.tuiFrame and element.tuiFrame.frame then
-                        local frame = element.tuiFrame.frame
-                        halfWidth = (frame:GetWidth() or 100) / 2
-                        halfHeight = (frame:GetHeight() or 50) / 2
-                    end
-                    
-                    -- Convert from center position to bottom-left position
-                    local bottomLeftX = absX - halfWidth
-                    local bottomLeftY = absY - halfHeight
-                    
+                    -- Save in CENTER format (absX, absY is already the center position)
                     settings.elements[id] = {
-                        point = "BOTTOMLEFT",
-                        x = bottomLeftX,
-                        y = bottomLeftY,
+                        point = "CENTER",
+                        x = absX,
+                        y = absY,
                     }
                     count = count + 1
                     
                     -- Apply immediately if element exists
+                    local element = elementRegistry[id]
                     if element and element.tuiFrame then
-                        element.tuiFrame:SetPosition("BOTTOMLEFT", UIParent, "BOTTOMLEFT", bottomLeftX, bottomLeftY)
+                        element.tuiFrame:SetPosition("CENTER", UIParent, "CENTER", absX, absY)
                     end
                 end
             end

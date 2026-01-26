@@ -704,6 +704,23 @@ function LayoutUI:StopDrag(elementId)
                             -- Update the offset in the attachment
                             attachment.offsetX = childLeft - parentLeft
                             attachment.offsetY = childBottom - parentBottom
+                            
+                            -- For docks, also update the centerOffset (used for proper resize behavior)
+                            local isDock = frameId:match("^Dock_")
+                            if isDock then
+                                local childCenterX = childLeft + childFrame:GetWidth() / 2
+                                local childCenterY = childBottom + childFrame:GetHeight() / 2
+                                local parentCenterX = parentLeft + parentFrame:GetWidth() / 2
+                                local parentCenterY = parentBottom + parentFrame:GetHeight() / 2
+                                
+                                attachment.centerOffsetX = childCenterX - parentCenterX
+                                attachment.centerOffsetY = childCenterY - parentCenterY
+                                
+                                if TUICD.debugMode then
+                                    TUICD:PrintDebug(string.format("StopDrag: Updated dock %s centerOffset to %.1f, %.1f",
+                                        frameId, attachment.centerOffsetX, attachment.centerOffsetY))
+                                end
+                            end
                         end
                     end
                 end
@@ -1255,8 +1272,28 @@ function LayoutUI:NudgeSelected(dx, dy)
             local parentFrame = parentTUI.frame
             local parentLeft, parentBottom = parentFrame:GetLeft(), parentFrame:GetBottom()
             if parentLeft and parentBottom then
+                -- Update original offset (for non-dock elements)
                 attachment.offsetX = (left + dx) - parentLeft
                 attachment.offsetY = (bottom + dy) - parentBottom
+                
+                -- For docks, also update the centerOffset (used for proper resize behavior)
+                local isDock = selectedId:match("^Dock_")
+                if isDock then
+                    -- Calculate new center offset
+                    local newCenterX = (left + dx) + frame:GetWidth() / 2
+                    local newCenterY = (bottom + dy) + frame:GetHeight() / 2
+                    local parentCenterX = parentLeft + parentFrame:GetWidth() / 2
+                    local parentCenterY = parentBottom + parentFrame:GetHeight() / 2
+                    
+                    attachment.centerOffsetX = newCenterX - parentCenterX
+                    attachment.centerOffsetY = newCenterY - parentCenterY
+                    
+                    if TUICD.debugMode then
+                        TUICD:PrintDebug(string.format("NudgeSelected: Updated dock centerOffset to %.1f, %.1f",
+                            attachment.centerOffsetX, attachment.centerOffsetY))
+                    end
+                end
+                
                 SnapLocking:SaveAttachments()
             end
         end
@@ -1349,7 +1386,7 @@ function LayoutUI:CreateCoordPanel()
     if coordPanel then return coordPanel end
     
     coordPanel = CreateFrame("Frame", "TweaksUI_LayoutCoordPanel", containerFrame, "BackdropTemplate")
-    coordPanel:SetSize(220, 750)  -- Increased height for auto-snap section
+    coordPanel:SetSize(220, 880)  -- Height for all sections including anchor mode
     coordPanel:SetPoint("RIGHT", UIParent, "RIGHT", -20, 0)
     coordPanel:SetBackdrop({
         bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
@@ -1874,30 +1911,30 @@ function LayoutUI:CreateCoordPanel()
     -- END COLOR LEGEND SECTION
     -- ========================================================================
     
-    -- Size display
-    local sizeLabel = coordPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    sizeLabel:SetPoint("BOTTOM", coordPanel, "BOTTOM", 0, 100)
-    sizeLabel:SetText("Size: -- x --")
-    sizeLabel:SetTextColor(0.6, 0.6, 0.6)
-    coordPanel.sizeLabel = sizeLabel
-    
-    -- Arrow key hints (two lines)
+    -- Arrow key hints (two lines) - positioned after legend
     local arrowHint1 = coordPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    arrowHint1:SetPoint("BOTTOM", coordPanel, "BOTTOM", 0, 130)
+    arrowHint1:SetPoint("TOP", childLegend, "BOTTOM", 0, -12)
     arrowHint1:SetText("Arrow Keys: Nudge 1px")
     arrowHint1:SetTextColor(0.5, 0.7, 0.5)
     coordPanel.arrowHint1 = arrowHint1
     
     local arrowHint2 = coordPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    arrowHint2:SetPoint("BOTTOM", coordPanel, "BOTTOM", 0, 115)
+    arrowHint2:SetPoint("TOP", arrowHint1, "BOTTOM", 0, -2)
     arrowHint2:SetText("Shift+Arrows: Nudge 10px")
     arrowHint2:SetTextColor(0.5, 0.7, 0.5)
     coordPanel.arrowHint2 = arrowHint2
     
+    -- Size display
+    local sizeLabel = coordPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    sizeLabel:SetPoint("TOP", arrowHint2, "BOTTOM", 0, -4)
+    sizeLabel:SetText("Size: -- x --")
+    sizeLabel:SetTextColor(0.6, 0.6, 0.6)
+    coordPanel.sizeLabel = sizeLabel
+    
     -- Clear All Locks button (removes attachments but keeps positions)
     local clearLocksBtn = CreateFrame("Button", nil, coordPanel, "UIPanelButtonTemplate")
     clearLocksBtn:SetSize(180, 22)
-    clearLocksBtn:SetPoint("BOTTOM", coordPanel, "BOTTOM", 0, 70)
+    clearLocksBtn:SetPoint("TOP", sizeLabel, "BOTTOM", 0, -10)
     clearLocksBtn:SetText("Clear All Locks")
     clearLocksBtn:GetFontString():SetTextColor(1, 0.7, 0.3)
     clearLocksBtn:SetScript("OnClick", function()
@@ -1936,10 +1973,129 @@ function LayoutUI:CreateCoordPanel()
     end)
     coordPanel.clearLocksBtn = clearLocksBtn
     
+    -- ========================================================================
+    -- ANCHOR MODE SECTION (Per-Element)
+    -- ========================================================================
+    
+    -- Anchor mode separator
+    local anchorModeSeparator = coordPanel:CreateTexture(nil, "ARTWORK")
+    anchorModeSeparator:SetSize(190, 1)
+    anchorModeSeparator:SetPoint("TOP", clearLocksBtn, "BOTTOM", 0, -10)
+    anchorModeSeparator:SetColorTexture(0.4, 0.4, 0.4, 0.8)
+    
+    -- Anchor mode title
+    local anchorModeTitle = coordPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    anchorModeTitle:SetPoint("TOP", anchorModeSeparator, "BOTTOM", 0, -6)
+    anchorModeTitle:SetText("Resize Anchor Point")
+    anchorModeTitle:SetTextColor(0.8, 0.6, 1.0)  -- Light purple
+    
+    -- Anchor mode explanation
+    local anchorModeHelp = coordPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    anchorModeHelp:SetPoint("TOP", anchorModeTitle, "BOTTOM", 0, -2)
+    anchorModeHelp:SetText("|cff888888Controls how frame grows/shrinks|nwhen icon count changes|r")
+    anchorModeHelp:SetWidth(190)
+    anchorModeHelp:SetJustifyH("CENTER")
+    
+    -- Anchor mode status
+    local anchorModeStatus = coordPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    anchorModeStatus:SetPoint("TOP", anchorModeHelp, "BOTTOM", 0, -6)
+    anchorModeStatus:SetText("|cffffd100Current: Bottom-Left Corner|r")
+    anchorModeStatus:SetWidth(190)
+    coordPanel.anchorModeStatus = anchorModeStatus
+    
+    -- Toggle button
+    local anchorModeBtn = CreateFrame("Button", nil, coordPanel, "UIPanelButtonTemplate")
+    anchorModeBtn:SetSize(180, 22)
+    anchorModeBtn:SetPoint("TOP", anchorModeStatus, "BOTTOM", 0, -4)
+    anchorModeBtn:SetText("Use Center Anchor")
+    anchorModeBtn:SetScript("OnClick", function()
+        local selectedId = Layout:GetSelectedElement()
+        if not selectedId then return end
+        
+        local currentMode = Layout:GetElementAnchorMode(selectedId)
+        local newMode = (currentMode == "CENTER") and "BOTTOMLEFT" or "CENTER"
+        
+        -- Show confirmation popup
+        local modeText = (newMode == "CENTER") and "CENTER" or "BOTTOM-LEFT CORNER"
+        local desc = (newMode == "CENTER") 
+            and "Frame will expand/contract from its center when icon count changes.\n\nBest for: Cooldown trackers you want to stay centered."
+            or "Frame will grow from bottom-left corner (default behavior).\n\nBest for: Most UI elements."
+        
+        StaticPopupDialogs["TWEAKSUI_CHANGE_ANCHOR_MODE"] = {
+            text = "Switch to " .. modeText .. " anchor?\n\n" .. desc .. "\n\n|cffff8888You will need to reposition this element.|r",
+            button1 = "Switch & Reset Position",
+            button2 = "Cancel",
+            OnAccept = function()
+                -- Switch anchor mode
+                Layout:SetElementAnchorMode(selectedId, newMode)
+                
+                -- Reset position to center of screen
+                local element = Layout:GetElement(selectedId)
+                if element and element.tuiFrame then
+                    local tuiFrame = element.tuiFrame
+                    local frame = tuiFrame.frame or tuiFrame
+                    
+                    if frame and frame.ClearAllPoints then
+                        frame:ClearAllPoints()
+                        if newMode == "CENTER" then
+                            frame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+                        else
+                            -- Reset to a reasonable default
+                            local screenWidth = GetScreenWidth()
+                            local screenHeight = GetScreenHeight()
+                            frame:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", screenWidth/2 - 100, screenHeight/2 - 50)
+                        end
+                    end
+                    
+                    Layout:SaveElementPosition(selectedId)
+                end
+                
+                -- Update UI immediately
+                C_Timer.After(0.1, function()
+                    LayoutUI:UpdateAnchorModeDisplay()
+                    LayoutUI:UpdateCoordDisplay()
+                    local el = Layout:GetElement(selectedId)
+                    if el then
+                        LayoutUI:UpdateOverlayPosition(el)
+                    end
+                end)
+                print("|cff00ff00TweaksUI:|r Switched " .. selectedId .. " to " .. modeText .. " anchor mode.")
+            end,
+            OnShow = function(self)
+                self:SetFrameStrata("TOOLTIP")
+                self:Raise()
+            end,
+            timeout = 0,
+            whileDead = true,
+            hideOnEscape = true,
+            preferredIndex = 3,
+        }
+        StaticPopup_Show("TWEAKSUI_CHANGE_ANCHOR_MODE")
+    end)
+    anchorModeBtn:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+        GameTooltip:SetText("Resize Anchor Point", 1, 1, 1)
+        GameTooltip:AddLine(" ", 1, 1, 1)
+        GameTooltip:AddLine("BOTTOM-LEFT CORNER (default):", 1, 0.82, 0)
+        GameTooltip:AddLine("Frame grows from bottom-left corner.", 0.8, 0.8, 0.8, true)
+        GameTooltip:AddLine("Adding icons extends frame to the right/up.", 0.6, 0.6, 0.6, true)
+        GameTooltip:AddLine(" ", 1, 1, 1)
+        GameTooltip:AddLine("CENTER:", 0, 1, 0.5)
+        GameTooltip:AddLine("Frame expands equally in all directions.", 0.8, 0.8, 0.8, true)
+        GameTooltip:AddLine("Keeps tracker centered when icons change.", 0.6, 0.6, 0.6, true)
+        GameTooltip:AddLine(" ", 1, 1, 1)
+        GameTooltip:AddLine("|cffff8888Changing this resets position!|r", 1, 1, 1)
+        GameTooltip:Show()
+    end)
+    anchorModeBtn:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+    coordPanel.anchorModeBtn = anchorModeBtn
+    
     -- Clear All Positions button (for debugging position issues)
     local clearPosBtn = CreateFrame("Button", nil, coordPanel, "UIPanelButtonTemplate")
     clearPosBtn:SetSize(180, 22)
-    clearPosBtn:SetPoint("BOTTOM", coordPanel, "BOTTOM", 0, 40)
+    clearPosBtn:SetPoint("TOP", anchorModeBtn, "BOTTOM", 0, -15)  -- Anchor to anchor mode button
     clearPosBtn:SetText("Clear All Positions")
     clearPosBtn:GetFontString():SetTextColor(1, 0.5, 0.5)
     clearPosBtn:SetScript("OnClick", function()
@@ -1989,7 +2145,7 @@ function LayoutUI:CreateCoordPanel()
     -- Exit Layout Mode button
     local exitBtn = CreateFrame("Button", nil, coordPanel, "UIPanelButtonTemplate")
     exitBtn:SetSize(180, 26)
-    exitBtn:SetPoint("BOTTOM", coordPanel, "BOTTOM", 0, 12)
+    exitBtn:SetPoint("TOP", clearPosBtn, "BOTTOM", 0, -8)  -- Anchor to clear positions button
     exitBtn:SetText("Exit Layout Mode")
     exitBtn:SetScript("OnClick", function()
         if TUICD.Layout then
@@ -2168,6 +2324,36 @@ function LayoutUI:OnElementSelected(id)
         end
         self:UpdateCoordDisplay()
         self:UpdateAttachmentDisplay()
+        self:UpdateAnchorModeDisplay()
+    end
+end
+
+-- ============================================================================
+-- ANCHOR MODE UI FUNCTIONS
+-- ============================================================================
+
+function LayoutUI:UpdateAnchorModeDisplay()
+    if not coordPanel then return end
+    
+    local selectedId = Layout:GetSelectedElement()
+    if not selectedId then
+        -- No selection - show default state
+        coordPanel.anchorModeStatus:SetText("|cff888888Select an element|r")
+        coordPanel.anchorModeBtn:SetText("N/A")
+        coordPanel.anchorModeBtn:Disable()
+        return
+    end
+    
+    coordPanel.anchorModeBtn:Enable()
+    
+    local currentMode = Layout:GetElementAnchorMode(selectedId)
+    
+    if currentMode == "CENTER" then
+        coordPanel.anchorModeStatus:SetText("|cff00ff88Current: Center|r")
+        coordPanel.anchorModeBtn:SetText("Use Corner Anchor")
+    else
+        coordPanel.anchorModeStatus:SetText("|cffffd100Current: Bottom-Left Corner|r")
+        coordPanel.anchorModeBtn:SetText("Use Center Anchor")
     end
 end
 
@@ -2509,6 +2695,25 @@ function LayoutUI:ConfirmAttachment()
                 local offsetX = childLeft - parentLeft
                 local offsetY = childBottom - parentBottom
                 
+                -- For docks, also calculate centerOffset for proper resize behavior
+                local isDock = selectedId:match("^Dock_")
+                local centerOffsetX, centerOffsetY
+                
+                if isDock then
+                    local childCenterX = childLeft + childFrame:GetWidth() / 2
+                    local childCenterY = childBottom + childFrame:GetHeight() / 2
+                    local parentCenterX = parentLeft + parentFrame:GetWidth() / 2
+                    local parentCenterY = parentBottom + parentFrame:GetHeight() / 2
+                    
+                    centerOffsetX = childCenterX - parentCenterX
+                    centerOffsetY = childCenterY - parentCenterY
+                    
+                    if TUICD.debugMode then
+                        TUICD:PrintDebug(string.format("LockAttachment: Dock %s CENTER offset = %.1f, %.1f",
+                            selectedId, centerOffsetX, centerOffsetY))
+                    end
+                end
+                
                 -- Create attachment directly using options table
                 success = SnapLocking:CreateAttachment(selectedId, coordPanel.selectedParentId, {
                     point = "BOTTOMLEFT",
@@ -2517,6 +2722,8 @@ function LayoutUI:ConfirmAttachment()
                     offsetY = offsetY,
                     matchWidth = coordPanel.matchWidthCheck:GetChecked(),
                     matchHeight = coordPanel.matchHeightCheck:GetChecked(),
+                    centerOffsetX = centerOffsetX,
+                    centerOffsetY = centerOffsetY,
                 })
             end
         end
@@ -2687,42 +2894,46 @@ function LayoutUI:FindNearbyElementDuringDrag(draggingElementId, tolerance)
     
     for id, elem in pairs(allElements) do
         if id ~= draggingElementId and elem.tuiFrame and elem.tuiFrame.frame then
-            local frame = elem.tuiFrame.frame
-            if frame:IsVisible() then
-                local l, b, w, h = frame:GetRect()
-                if l and b and w and h then
-                    local r = l + w
-                    local t = b + h
-                    local cx = l + w / 2
-                    local cy = b + h / 2
-                    
-                    -- Anchor points on this target frame (9 points)
-                    local targetPoints = {
-                        { l, t, "TOPLEFT", "corner" },
-                        { cx, t, "TOP", "edge" },
-                        { r, t, "TOPRIGHT", "corner" },
-                        { l, cy, "LEFT", "edge" },
-                        { cx, cy, "CENTER", "center" },
-                        { r, cy, "RIGHT", "edge" },
-                        { l, b, "BOTTOMLEFT", "corner" },
-                        { cx, b, "BOTTOM", "edge" },
-                        { r, b, "BOTTOMRIGHT", "corner" },
-                    }
-                    
-                    -- Find minimum weighted anchor distance for this frame
-                    for _, dp in ipairs(dragPoints) do
-                        for _, tp in ipairs(targetPoints) do
-                            local rawDist = math.sqrt((dp[1] - tp[1])^2 + (dp[2] - tp[2])^2)
-                            local penalty = GetPreferencePenalty(dp[4], tp[4])
-                            local weightedDist = rawDist + penalty
-                            
-                            if weightedDist < closestWeightedDist then
-                                closestWeightedDist = weightedDist
-                                closestRawDist = rawDist
-                                closestElementId = id
-                                closestFrame = frame
-                                closestDragAnchor = dp[3]
-                                closestTargetAnchor = tp[3]
+            -- Skip docked elements - they shouldn't be snap targets
+            local dockIndex = IsElementDocked(id)
+            if not dockIndex then
+                local frame = elem.tuiFrame.frame
+                if frame:IsVisible() then
+                    local l, b, w, h = frame:GetRect()
+                    if l and b and w and h then
+                        local r = l + w
+                        local t = b + h
+                        local cx = l + w / 2
+                        local cy = b + h / 2
+                        
+                        -- Anchor points on this target frame (9 points)
+                        local targetPoints = {
+                            { l, t, "TOPLEFT", "corner" },
+                            { cx, t, "TOP", "edge" },
+                            { r, t, "TOPRIGHT", "corner" },
+                            { l, cy, "LEFT", "edge" },
+                            { cx, cy, "CENTER", "center" },
+                            { r, cy, "RIGHT", "edge" },
+                            { l, b, "BOTTOMLEFT", "corner" },
+                            { cx, b, "BOTTOM", "edge" },
+                            { r, b, "BOTTOMRIGHT", "corner" },
+                        }
+                        
+                        -- Find minimum weighted anchor distance for this frame
+                        for _, dp in ipairs(dragPoints) do
+                            for _, tp in ipairs(targetPoints) do
+                                local rawDist = math.sqrt((dp[1] - tp[1])^2 + (dp[2] - tp[2])^2)
+                                local penalty = GetPreferencePenalty(dp[4], tp[4])
+                                local weightedDist = rawDist + penalty
+                                
+                                if weightedDist < closestWeightedDist then
+                                    closestWeightedDist = weightedDist
+                                    closestRawDist = rawDist
+                                    closestElementId = id
+                                    closestFrame = frame
+                                    closestDragAnchor = dp[3]
+                                    closestTargetAnchor = tp[3]
+                                end
                             end
                         end
                     end
@@ -2922,6 +3133,26 @@ function LayoutUI:PerformAutoSnap(draggedElementId, targetElementId)
             local offsetX = newL - targetL
             local offsetY = newB - targetB
             
+            -- For docks, also calculate centerOffset for proper resize behavior
+            local isDock = draggedElementId:match("^Dock_")
+            local centerOffsetX, centerOffsetY
+            
+            if isDock then
+                -- Calculate center-to-center offset from the snapped position
+                local dragCenterX = newL + dragW / 2
+                local dragCenterY = newB + dragH / 2
+                local targetCenterX = targetL + targetFrame:GetWidth() / 2
+                local targetCenterY = targetB + targetFrame:GetHeight() / 2
+                
+                centerOffsetX = dragCenterX - targetCenterX
+                centerOffsetY = dragCenterY - targetCenterY
+                
+                if TUICD.debugMode then
+                    TUICD:PrintDebug(string.format("PerformAutoSnap: Dock %s CENTER offset = %.1f, %.1f",
+                        draggedElementId, centerOffsetX, centerOffsetY))
+                end
+            end
+            
             -- Create the attachment directly (locked, not pending)
             local success = SnapLocking:CreateAttachment(draggedElementId, targetElementId, {
                 point = "BOTTOMLEFT",
@@ -2930,6 +3161,8 @@ function LayoutUI:PerformAutoSnap(draggedElementId, targetElementId)
                 offsetY = offsetY,
                 matchWidth = false,
                 matchHeight = false,
+                centerOffsetX = centerOffsetX,
+                centerOffsetY = centerOffsetY,
             })
             
             if success then

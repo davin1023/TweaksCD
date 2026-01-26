@@ -228,7 +228,11 @@ local function IsDockedIconActive(trackerType, slotIndex, frame)
     
     -- First check if the frame is hidden by the highlight module
     -- (BuffHighlights/CooldownHighlights may hide inactive frames)
-    if not frame:IsShown() then
+    local isShown = frame:IsShown()
+    if not isShown then
+        if TUICD.debugMode and trackerType == "custom" then
+            print(string.format("[TUI:CD Dock] IsDockedIconActive: %s:%d IsShown=false, returning false", trackerType, slotIndex))
+        end
         return false
     end
     
@@ -254,9 +258,20 @@ local function IsDockedIconActive(trackerType, slotIndex, frame)
         local icon = frame.icon or frame.Icon
         if icon then
             local desaturated = icon:IsDesaturated()
-            -- If not desaturated, it's on cooldown (active)
+            -- If not desaturated, it's ready (should show)
             if not desaturated then
+                if TUICD.debugMode and trackerType == "custom" then
+                    print(string.format("[TUI:CD Dock] IsDockedIconActive: %s:%d IsShown=true, desaturated=false -> VISIBLE", trackerType, slotIndex))
+                end
                 return true
+            else
+                if TUICD.debugMode and trackerType == "custom" then
+                    print(string.format("[TUI:CD Dock] IsDockedIconActive: %s:%d IsShown=true, desaturated=true -> HIDDEN (on cooldown)", trackerType, slotIndex))
+                end
+            end
+        else
+            if TUICD.debugMode and trackerType == "custom" then
+                print(string.format("[TUI:CD Dock] IsDockedIconActive: %s:%d no icon found", trackerType, slotIndex))
             end
         end
         return false
@@ -782,8 +797,12 @@ local function GetSortedVisibleIcons(dockIndex)
         if iconInfo and iconInfo.frame then
             -- Use IsDockedIconActive instead of just IsShown()
             -- This properly handles layout mode exit by checking actual icon state
-            if IsDockedIconActive(iconInfo.trackerType, iconInfo.slotIndex, iconInfo.frame) then
+            local isActive = IsDockedIconActive(iconInfo.trackerType, iconInfo.slotIndex, iconInfo.frame)
+            if isActive then
                 table.insert(visible, iconInfo)
+                if TUICD.debugMode then
+                    print(string.format("[TUI:CD Dock] Dock %d visible: %s", dockIndex, iconKey))
+                end
             end
         end
     end
@@ -817,6 +836,12 @@ function Docks:LayoutDock(dockIndex)
     local settings = GetDockSettings(dockIndex)
     local isLayoutMode = TUICD.Layout and TUICD.Layout:IsActive()
     
+    -- DEBUG: Trace LayoutDock calls
+    if TUICD.debugMode then
+        print(string.format("[TUI:CD] LayoutDock(%d) called - dock=%s, enabled=%s, layoutMode=%s", 
+            dockIndex, dock and "exists" or "nil", tostring(settings.enabled), tostring(isLayoutMode)))
+    end
+    
     -- Create dock frame on demand if enabled OR if in layout mode
     if not dock and (settings.enabled or isLayoutMode) then
         dock = CreateDockFrame(dockIndex)
@@ -843,6 +868,11 @@ function Docks:LayoutDock(dockIndex)
     -- Get visible icons
     local visible = GetSortedVisibleIcons(dockIndex)
     local n = #visible
+    
+    -- DEBUG: Show visible icon count
+    if TUICD.debugMode then
+        print(string.format("[TUI:CD] Dock %d: %d visible icons", dockIndex, n))
+    end
     
     -- Hide inactive icons (not in layout mode)
     -- This ensures icons that were shown during layout mode get hidden when exiting
@@ -907,9 +937,22 @@ function Docks:LayoutDock(dockIndex)
         local savedX = settings.x or 0
         local savedY = settings.y or 0
         
-        dock:ClearAllPoints()
-        dock:SetPoint(anchorPoint, UIParent, savedPoint, savedX, savedY)
-        dock:SetSize(minW, minH)
+        -- Check if this dock is snap-locked
+        local wrapperId = "Dock_" .. dockIndex
+        local SnapLocking = TUICD.SnapLocking
+        local isSnapLocked = SnapLocking and SnapLocking:IsAttached(wrapperId)
+        
+        if isSnapLocked then
+            -- For snap-locked docks: clear points, apply attachment (sets anchor), then resize
+            dock:ClearAllPoints()
+            SnapLocking:ApplyAttachment(wrapperId)
+            dock:SetSize(minW, minH)
+        else
+            -- Free positioning
+            dock:ClearAllPoints()
+            dock:SetPoint(anchorPoint, UIParent, savedPoint, savedX, savedY)
+            dock:SetSize(minW, minH)
+        end
         
         local dockName = Docks:GetDockName(dockIndex)
         if settings.enabled then
@@ -979,17 +1022,140 @@ function Docks:LayoutDock(dockIndex)
     local savedX = settings.x or 0
     local savedY = settings.y or 0
     
-    dock:ClearAllPoints()
-    dock:SetPoint(anchorPoint, UIParent, savedPoint, savedX, savedY)
-    dock:SetSize(dockW, dockH)
+    -- Check if this dock is snap-locked - if so, let SnapLocking handle position
+    local wrapperId = "Dock_" .. dockIndex
+    local SnapLocking = TUICD.SnapLocking
+    local isSnapLocked = SnapLocking and SnapLocking:IsAttached(wrapperId)
+    
+    -- DEBUG: Show snap state
+    if TUICD.debugMode then
+        local att = SnapLocking and SnapLocking:GetAttachment(wrapperId)
+        if att then
+            print(string.format("[TUI:CD] Dock %d: snap-locked=%s, point=%s->%s, offset=%.1f,%.1f", 
+                dockIndex, tostring(isSnapLocked), att.point, att.relPoint, att.offsetX or 0, att.offsetY or 0))
+        else
+            print(string.format("[TUI:CD] Dock %d: snap-locked=%s (no attachment data)", dockIndex, tostring(isSnapLocked)))
+        end
+    end
+    
+    if isSnapLocked then
+        -- For snap-locked docks: we need special handling to keep the dock centered
+        -- when the attachment is NOT CENTER-to-CENTER
+        local att = SnapLocking:GetAttachment(wrapperId)
+        local parentTUI = att and SnapLocking:GetTUIFrame(att.parentId)
+        local parentFrame = parentTUI and parentTUI.frame
+        
+        -- If we have the parent frame and attachment, calculate CENTER position
+        if parentFrame and att then
+            -- Size dock first (needed for center calculations)
+            dock:SetSize(dockW, dockH)
+            
+            -- Calculate where the dock's CENTER should be relative to parent's CENTER
+            -- The attachment might be BOTTOMLEFT->BOTTOMLEFT, but we want the dock to
+            -- visually stay centered relative to the parent
+            
+            -- Get the saved center offset (calculated at snap time)
+            local centerOffsetX = att.centerOffsetX
+            local centerOffsetY = att.centerOffsetY
+            
+            if centerOffsetX and centerOffsetY then
+                -- Use saved CENTER offset for proper centering during resize
+                dock:ClearAllPoints()
+                dock:SetPoint("CENTER", parentFrame, "CENTER", centerOffsetX, centerOffsetY)
+                
+                if TUICD.debugMode then
+                    print(string.format("[TUI:CD] Dock %d: Using saved CENTER offset %.1f,%.1f", 
+                        dockIndex, centerOffsetX, centerOffsetY))
+                end
+            else
+                -- No saved center offset - calculate it from the original attachment
+                -- First, temporarily apply the original attachment to get the intended position
+                dock:ClearAllPoints()
+                dock:SetPoint(
+                    att.point or "BOTTOMLEFT",
+                    parentFrame,
+                    att.relPoint or "BOTTOMLEFT",
+                    att.offsetX or 0,
+                    att.offsetY or 0
+                )
+                
+                -- Now calculate where the center SHOULD be (for proper centering)
+                -- Get current dock center position
+                local dockCenterX = dock:GetLeft() + dockW / 2
+                local dockCenterY = dock:GetBottom() + dockH / 2
+                
+                -- Get parent center position
+                local parentCenterX = parentFrame:GetLeft() + parentFrame:GetWidth() / 2
+                local parentCenterY = parentFrame:GetBottom() + parentFrame:GetHeight() / 2
+                
+                -- Calculate center offset
+                centerOffsetX = dockCenterX - parentCenterX
+                centerOffsetY = dockCenterY - parentCenterY
+                
+                -- Save it for future use
+                att.centerOffsetX = centerOffsetX
+                att.centerOffsetY = centerOffsetY
+                SnapLocking:SaveAttachments()
+                
+                -- Re-apply with CENTER anchor for proper resize behavior
+                dock:ClearAllPoints()
+                dock:SetPoint("CENTER", parentFrame, "CENTER", centerOffsetX, centerOffsetY)
+                
+                if TUICD.debugMode then
+                    print(string.format("[TUI:CD] Dock %d: Calculated CENTER offset %.1f,%.1f (saved for future)", 
+                        dockIndex, centerOffsetX, centerOffsetY))
+                end
+            end
+        else
+            -- Fallback: just apply attachment normally
+            dock:ClearAllPoints()
+            SnapLocking:ApplyAttachment(wrapperId)
+            dock:SetSize(dockW, dockH)
+        end
+    else
+        -- Free positioning - set anchor first, then size
+        dock:ClearAllPoints()
+        dock:SetPoint(anchorPoint, UIParent, savedPoint, savedX, savedY)
+        dock:SetSize(dockW, dockH)
+    end
     
     -- Position each icon (DO NOT resize - let per-icon settings control size)
     -- Icons are always placed linearly (left-to-right for horizontal, top-to-bottom for vertical)
+    -- Icons are CENTERED on the main axis within the dock
     -- Justify affects CROSS-AXIS alignment only:
     --   Horizontal dock: justify affects vertical alignment (TOP/BOTTOM/CENTER)
     --   Vertical dock: justify affects horizontal alignment (LEFT/RIGHT/CENTER)
-    local xOffset = 4
-    local yOffset = -4
+    
+    -- Calculate total size of icons for centering on main axis
+    local totalIconsW = 0
+    local totalIconsH = 0
+    for _, iconInfo in ipairs(visible) do
+        if iconInfo.frame then
+            local w, h = iconInfo.frame:GetSize()
+            if w < 1 then w = 40 end
+            if h < 1 then h = 40 end
+            totalIconsW = totalIconsW + w
+            totalIconsH = totalIconsH + h
+        end
+    end
+    
+    -- Add spacing between icons
+    if n > 1 then
+        totalIconsW = totalIconsW + (n - 1) * spacing
+        totalIconsH = totalIconsH + (n - 1) * spacing
+    end
+    
+    -- Calculate starting offset to center icons on main axis
+    local xOffset, yOffset
+    if orientation == ORIENTATION.HORIZONTAL then
+        -- Center horizontally: start offset = (dockW - totalIconsW) / 2
+        xOffset = (dockW - totalIconsW) / 2
+        yOffset = -4  -- Will be calculated per-icon based on justify
+    else
+        -- Center vertically: start offset = -(dockH - totalIconsH) / 2
+        xOffset = 4  -- Will be calculated per-icon based on justify
+        yOffset = -(dockH - totalIconsH) / 2
+    end
     
     for i, iconInfo in ipairs(visible) do
         if iconInfo and iconInfo.frame then
@@ -1545,12 +1711,13 @@ function Docks:SaveDockPosition(dockIndex)
     local dock = docks[dockIndex]
     if not dock then return end
     
-    local point, _, _, x, y = dock:GetPoint(1)
-    SetDockSetting(dockIndex, "point", point)
+    local point, relativeTo, relPoint, x, y = dock:GetPoint(1)
+    SetDockSetting(dockIndex, "point", point)           -- The dock's anchor point
+    SetDockSetting(dockIndex, "relPoint", relPoint)     -- The parent's anchor point
     SetDockSetting(dockIndex, "x", x)
     SetDockSetting(dockIndex, "y", y)
     
-    dprint("Saved position for dock", dockIndex, ":", point, x, y)
+    dprint("Saved position for dock", dockIndex, ":", point, "->", relPoint, "at", x, y)
 end
 
 function Docks:IsIconDocked(trackerType, slotIndex)

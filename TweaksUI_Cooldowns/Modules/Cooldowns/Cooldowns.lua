@@ -1157,8 +1157,17 @@ local function ApplyCooldownTextScale(icon, scale, offsetX, offsetY, r, g, b, fo
             
             -- Apply font and scale
             if fs._TUI_origFontSize then
-                local useFont = fontPath or fs._TUI_origFont
-                fs:SetFont(useFont, fs._TUI_origFontSize * scale, fs._TUI_origFlags)
+                -- Always use custom font if specified, otherwise use current font
+                local useFont
+                if fontPath then
+                    useFont = fontPath
+                else
+                    local currentFont = fs:GetFont()
+                    useFont = currentFont or fs._TUI_origFont
+                end
+                pcall(function()
+                    fs:SetFont(useFont, fs._TUI_origFontSize * scale, fs._TUI_origFlags)
+                end)
             end
             
             -- Apply color if specified
@@ -1205,27 +1214,98 @@ local function ApplyCountTextScale(icon, scale, offsetX, offsetY, r, g, b, fontN
     -- Get custom font path if specified
     local customFontPath = nil
     if fontName and fontName ~= "Default" and TUICD.Media then
-        customFontPath = TUICD.Media:GetFontPath(fontName)
+        customFontPath = TUICD.Media:GetFont(fontName)
+        if TUICD.debugMode then
+            print(string.format("[TUI:CD] ApplyCountTextScale: fontName='%s' -> customFontPath='%s'", 
+                tostring(fontName), tostring(customFontPath)))
+        end
     end
     
     -- Helper to apply all text properties to a fontstring
     local function ApplyTextProperties(fs)
         if not fs or not fs.GetFont then return end
         
-        -- Store original values
+        -- Store original values ONCE (on first ever application)
         if not fs._TUI_origFontSize then
             local font, size, flags = fs:GetFont()
             if font and size then
                 fs._TUI_origFontSize = size
-                fs._TUI_origFont = font
+                fs._TUI_origFont = font  -- This is the TRUE original Blizzard font
                 fs._TUI_origFlags = flags or ""
             end
         end
         
         -- Apply scale and font
         if fs._TUI_origFontSize then
-            local fontToUse = customFontPath or fs._TUI_origFont
-            fs:SetFont(fontToUse, fs._TUI_origFontSize * scale, fs._TUI_origFlags)
+            -- Determine which font to use:
+            -- - If customFontPath is set, use it (user selected a specific font)
+            -- - Otherwise use the ORIGINAL font (not current, which might be our last custom font)
+            local fontToUse
+            if customFontPath then
+                fontToUse = customFontPath
+            else
+                -- "Default" selected - use the original Blizzard font
+                fontToUse = fs._TUI_origFont
+            end
+            
+            local targetSize = fs._TUI_origFontSize * scale
+            
+            -- Store our desired settings BEFORE applying (so hooks use new values)
+            fs._TUI_desiredFont = fontToUse
+            fs._TUI_desiredSize = targetSize
+            fs._TUI_desiredFlags = fs._TUI_origFlags
+            
+            local success, err = pcall(function()
+                fs:SetFont(fontToUse, targetSize, fs._TUI_origFlags)
+            end)
+            
+            -- Note: Font debug disabled to reduce spam - uncomment if debugging font issues
+            -- if TUICD.debugMode then
+            --     local newFont = fs:GetFont()
+            --     print(string.format("[TUI:CD] ApplyTextProperties: customPath='%s', using='%s', success=%s", 
+            --         tostring(customFontPath), tostring(fontToUse), tostring(success)))
+            -- end
+            
+            -- Hook SetFontObject to reapply our settings (Blizzard uses this to reset fonts)
+            if not fs._TUI_FontHooked and fs.SetFontObject then
+                fs._TUI_FontHooked = true
+                hooksecurefunc(fs, "SetFontObject", function(self)
+                    if self._TUI_desiredFont and self._TUI_desiredSize then
+                        C_Timer.After(0, function()
+                            pcall(function()
+                                self:SetFont(self._TUI_desiredFont, self._TUI_desiredSize, self._TUI_desiredFlags or "")
+                            end)
+                        end)
+                    end
+                end)
+            end
+            
+            -- Also hook SetText - Blizzard often resets font when setting text
+            if not fs._TUI_SetTextHooked and fs.SetText then
+                fs._TUI_SetTextHooked = true
+                hooksecurefunc(fs, "SetText", function(self)
+                    if self._TUI_desiredFont and self._TUI_desiredSize then
+                        C_Timer.After(0, function()
+                            pcall(function()
+                                self:SetFont(self._TUI_desiredFont, self._TUI_desiredSize, self._TUI_desiredFlags or "")
+                            end)
+                        end)
+                    end
+                end)
+            end
+            
+            -- Force immediate visual update by re-setting the text
+            if fs.GetText and fs.SetText then
+                local currentText = fs:GetText()
+                if currentText then
+                    -- Use C_Timer to break the execution chain and let our SetFont stick
+                    C_Timer.After(0, function()
+                        pcall(function()
+                            fs:SetFont(fontToUse, targetSize, fs._TUI_origFlags)
+                        end)
+                    end)
+                end
+            end
         end
         
         -- Apply offset
@@ -1323,7 +1403,24 @@ local function ApplyCountTextScale(icon, scale, offsetX, offsetY, r, g, b, fontN
             ApplyTextProperties(countText)
         end
         
-        -- Method 2: Check cooldown frame for charge display (but NOT cooldown text)
+        -- Method 2: Check ChargeCount frame (Midnight cooldown viewer uses this)
+        if icon.ChargeCount then
+            -- ChargeCount is a frame - search inside it for FontStrings
+            if icon.ChargeCount.GetRegions then
+                for _, region in ipairs({icon.ChargeCount:GetRegions()}) do
+                    if region:GetObjectType() == "FontString" and not region._TUI_isCooldownText then
+                        ApplyTextProperties(region)
+                    end
+                end
+            end
+            -- Also check direct fields
+            if icon.ChargeCount.Text then ApplyTextProperties(icon.ChargeCount.Text) end
+            if icon.ChargeCount.text then ApplyTextProperties(icon.ChargeCount.text) end
+            if icon.ChargeCount.Count then ApplyTextProperties(icon.ChargeCount.Count) end
+            if icon.ChargeCount.count then ApplyTextProperties(icon.ChargeCount.count) end
+        end
+        
+        -- Method 3: Check cooldown frame for charge display (but NOT cooldown text)
         local cooldown = icon.Cooldown or icon.cooldown
         if cooldown then
             -- Some cooldown frames have a charges fontstring (separate from countdown)
@@ -1342,7 +1439,7 @@ local function ApplyCountTextScale(icon, scale, offsetX, offsetY, r, g, b, fontN
             -- DO NOT search inside cooldown frame - that's where countdown text lives
         end
         
-        -- Method 3: Recursive search of icon frame (skips Cooldown frames)
+        -- Method 4: Recursive search of icon frame (skips Cooldown frames)
         SearchFrame(icon, 0)
     end)
 end
@@ -2168,10 +2265,13 @@ local function ApplyGridLayout(viewer, trackerKey)
             icon:SetSize(iconWidth, iconHeight)
             
             -- Apply opacity (per-icon hide is applied after visual slots are assigned)
-            if trackerKey ~= "buffs" or not GetSetting("buffs", "greyscaleInactive") then
-                -- Only set alpha here if not buffs with greyscale enabled
-                -- (buff state ticker handles alpha for buffs with greyscale)
-                icon:SetAlpha(iconOpacity)
+            -- Skip alpha if icon is hidden by per-icon settings
+            if not icon._TUI_hiddenByPerIcon then
+                if trackerKey ~= "buffs" or not GetSetting("buffs", "greyscaleInactive") then
+                    -- Only set alpha here if not buffs with greyscale enabled
+                    -- (buff state ticker handles alpha for buffs with greyscale)
+                    icon:SetAlpha(iconOpacity)
+                end
             end
             
             -- Check if Masque is handling appearance
@@ -2430,7 +2530,10 @@ local function ApplyBuffVisualState(icon, isActive, trackerKey, iconIndex)
             if textureObj and textureObj.SetDesaturated then
                 textureObj:SetDesaturated(false)
             end
-            icon:SetAlpha(baseOpacity)
+            -- Skip alpha if icon is hidden by per-icon settings
+            if not icon._TUI_hiddenByPerIcon then
+                icon:SetAlpha(baseOpacity)
+            end
         end)
         return
     end
@@ -2453,13 +2556,19 @@ local function ApplyBuffVisualState(icon, isActive, trackerKey, iconIndex)
             if textureObj and textureObj.SetDesaturated then
                 textureObj:SetDesaturated(false)
             end
-            icon:SetAlpha(baseOpacity)
+            -- Skip alpha if icon is hidden by per-icon settings
+            if not icon._TUI_hiddenByPerIcon then
+                icon:SetAlpha(baseOpacity)
+            end
         else
             -- Inactive buff - desaturate and fade
             if textureObj and textureObj.SetDesaturated then
                 textureObj:SetDesaturated(true)
             end
-            icon:SetAlpha(inactiveAlpha)
+            -- Skip alpha if icon is hidden by per-icon settings
+            if not icon._TUI_hiddenByPerIcon then
+                icon:SetAlpha(inactiveAlpha)
+            end
         end
     end)
 end
@@ -3040,6 +3149,8 @@ local function UpdateCustomTrackerCooldown(iconFrame)
                 if chargeDuration then
                     iconFrame.cooldown:SetCooldownFromDurationObject(chargeDuration, true)
                     cooldownSet = true
+                    -- Store the duration object for later desaturation check
+                    iconFrame._lastDurationObj = chargeDuration
                 end
             end)
         end
@@ -3051,6 +3162,7 @@ local function UpdateCustomTrackerCooldown(iconFrame)
                 if duration then
                     iconFrame.cooldown:SetCooldownFromDurationObject(duration, true)
                     cooldownSet = true
+                    iconFrame._lastDurationObj = duration
                 end
             end)
         end
@@ -3064,12 +3176,18 @@ local function UpdateCustomTrackerCooldown(iconFrame)
                 if info and info.duration and info.startTime then
                     if info.duration > 0 then
                         iconFrame.cooldown:SetCooldown(info.startTime, info.duration)
+                        -- Check if on cooldown (not just GCD)
+                        local remaining = (info.startTime + info.duration) - GetTime()
+                        if info.duration > GCD_THRESHOLD and remaining > 0.1 then
+                            isOnCooldown = true
+                        end
                     else
                         iconFrame.cooldown:Clear()
                     end
                     cooldownSet = true
                 end
             end)
+            iconFrame._lastDurationObj = nil  -- Clear stored duration when using legacy API
         end
         
         -- IMPORTANT: Don't call Clear() during combat!
@@ -3077,22 +3195,78 @@ local function UpdateCustomTrackerCooldown(iconFrame)
         -- Calling Clear() every tick when APIs fail causes flashing.
         if not cooldownSet and not isRestricted then
             pcall(function() iconFrame.cooldown:Clear() end)
+            iconFrame._lastDurationObj = nil
         end
         
-        -- Desaturation check - ONLY when not in combat
-        -- During combat, we cannot read cooldown values (they're secret)
-        -- so we skip desaturation updates - the visual cooldown swipe is enough
+        -- Desaturation detection - check if there's a REAL cooldown (not just GCD)
+        -- Key insight: GCD doesn't show cooldown text, but real cooldowns do!
+        -- We can check if the cooldown frame has visible text to distinguish them.
+        
         if not isRestricted then
+            -- Outside combat - we can check the actual cooldown values
             pcall(function()
                 local info = C_Spell.GetSpellCooldown(trackID)
                 if info and info.duration and info.startTime then
-                    local duration = info.duration
-                    local remaining = (info.startTime + duration) - GetTime()
-                    if duration > GCD_THRESHOLD and remaining > 0.1 then
-                        isOnCooldown = true
+                    if type(info.duration) == "number" then
+                        -- Only desaturate for cooldowns longer than GCD
+                        if info.duration > GCD_THRESHOLD then
+                            local remaining = (info.startTime + info.duration) - GetTime()
+                            if remaining > 0.1 then
+                                isOnCooldown = true
+                            end
+                        end
                     end
                 end
             end)
+        else
+            -- During combat - use TEXT-BASED detection to avoid secret value issues
+            -- Key insight: Cooldown text addons (OmniCC, Blizzard) display remaining time
+            -- GCD does NOT show text on custom tracker cooldown frames
+            -- If there's ANY visible cooldown text, it's a real cooldown
+            if iconFrame.cooldown then
+                pcall(function()
+                    local cdFrame = iconFrame.cooldown
+                    
+                    -- Look for visible cooldown text (FontString regions)
+                    local cooldownText = nil
+                    
+                    -- Check cooldown frame's own regions
+                    for _, region in pairs({cdFrame:GetRegions()}) do
+                        if region:IsObjectType("FontString") and region:IsShown() then
+                            local text = region:GetText()
+                            if text and text ~= "" then
+                                cooldownText = text
+                                break
+                            end
+                        end
+                    end
+                    
+                    -- Also check children (OmniCC adds text as child frames)
+                    if not cooldownText then
+                        for _, child in pairs({cdFrame:GetChildren()}) do
+                            if child:IsShown() then
+                                for _, region in pairs({child:GetRegions()}) do
+                                    if region:IsObjectType("FontString") and region:IsShown() then
+                                        local text = region:GetText()
+                                        if text and text ~= "" then
+                                            cooldownText = text
+                                            break
+                                        end
+                                    end
+                                end
+                            end
+                            if cooldownText then break end
+                        end
+                    end
+                    
+                    -- If ANY cooldown text is showing, it's a real cooldown
+                    -- GCD doesn't show text on custom tracker frames
+                    if cooldownText then
+                        isOnCooldown = true
+                    end
+                    -- If no text at all, it's either GCD or ready - don't set isOnCooldown
+                end)
+            end
         end
         
         -- =====================================================================
@@ -3128,14 +3302,17 @@ local function UpdateCustomTrackerCooldown(iconFrame)
         end
     end
     
-    -- Apply desaturation based on cooldown state
-    -- Note: During combat, isOnCooldown may be false even when on cooldown
-    -- because we can't read secret values. This is acceptable - the swipe is visible.
-    pcall(function()
-        if iconFrame.icon and iconFrame.icon.SetDesaturated then
-            iconFrame.icon:SetDesaturated(isOnCooldown)
-        end
-    end)
+    -- =========================================================================
+    -- APPLY BASIC COOLDOWN VISUAL
+    -- Custom tracker icons just show basic desaturation on cooldown.
+    -- Per-icon settings create SEPARATE clone frames via CooldownHighlights.
+    -- =========================================================================
+    if iconFrame.icon and iconFrame.icon.SetDesaturated then
+        iconFrame.icon:SetDesaturated(isOnCooldown)
+    end
+    
+    -- Store the cooldown state on the frame for per-icon to use
+    iconFrame._TUI_isOnCooldown = isOnCooldown
 end
 
 -- Apply edge style settings to all custom tracker icons
@@ -3324,32 +3501,33 @@ end
 local function LayoutCustomTrackerIcons()
     if not customTrackerFrame then return end
     
-    -- Collect all icons (including hidden) and sort by listIndex
+    -- Collect all icons and sort by listIndex
     local allIcons = {}
     for key, iconFrame in pairs(customTrackerIcons) do
         allIcons[#allIcons + 1] = iconFrame
     end
     
-    -- Sort by listIndex to get consistent order for per-icon settings
+    -- Sort by listIndex to get consistent order
     table.sort(allIcons, function(a, b)
         return (a.listIndex or 0) < (b.listIndex or 0)
     end)
     
-    -- Apply per-icon hide BEFORE layout based on listIndex order
-    for idx, icon in ipairs(allIcons) do
-        local isHiddenByPerIcon = TUICD.CooldownHighlights and TUICD.CooldownHighlights:IsIconHidden("custom", idx)
-        if isHiddenByPerIcon then
-            icon:SetAlpha(0)
-            icon._TUI_hiddenByPerIcon = true
-        else
-            icon._TUI_hiddenByPerIcon = false
-        end
-    end
-    
-    -- Now filter to only visible icons for layout
+    -- Filter to only visible icons for layout
+    -- Exclude icons hidden by per-icon "Hide in Tracker" setting
     local icons = {}
-    for _, iconFrame in ipairs(allIcons) do
-        if iconFrame:IsShown() then
+    local CooldownHighlights = TUICD.CooldownHighlights
+    for slotIndex, iconFrame in ipairs(allIcons) do
+        -- Check persisted "Hide in Tracker" setting from CooldownHighlights DB
+        local isHiddenInDB = CooldownHighlights and CooldownHighlights.IsIconHidden and CooldownHighlights:IsIconHidden("custom", slotIndex)
+        
+        if isHiddenInDB or iconFrame._TUI_hiddenByPerIcon then
+            -- Per-icon hide: keep icon but don't include in layout
+            iconFrame._TUI_hiddenByPerIcon = true  -- Sync runtime flag
+            iconFrame:SetAlpha(0)
+            iconFrame:EnableMouse(false)  -- Don't intercept clicks
+        elseif iconFrame:IsShown() then
+            iconFrame._TUI_hiddenByPerIcon = false
+            iconFrame:EnableMouse(true)
             icons[#icons + 1] = iconFrame
         end
     end
@@ -3938,8 +4116,10 @@ local function LayoutCustomTrackerIcons()
             icon:ClearAllPoints()
             icon:SetPoint("TOPLEFT", customTrackerFrame, "TOPLEFT", finalX, finalY)
             icon:SetSize(iconWidth, iconHeight)
-            icon:SetAlpha(iconOpacity)
-            -- Per-icon hide is applied after visual slots are assigned
+            -- Skip alpha if icon is hidden by per-icon settings
+            if not icon._TUI_hiddenByPerIcon then
+                icon:SetAlpha(iconOpacity)
+            end
             
             -- Check if Masque is handling appearance
             local useMasque = IsMasqueEnabled("customTrackers")
@@ -4123,8 +4303,24 @@ end
 
 -- Update all custom tracker cooldowns
 local function UpdateAllCustomTrackerCooldowns()
+    -- Update tracker icons
     for _, iconFrame in pairs(customTrackerIcons) do
         UpdateCustomTrackerCooldown(iconFrame)
+    end
+    
+    -- ALSO update per-icon frames (they use the same update function)
+    -- This ensures per-icon stays in sync during combat
+    local CooldownHighlights = TUICD.CooldownHighlights
+    if CooldownHighlights and CooldownHighlights.GetHighlightFrames then
+        local perIconFrames = CooldownHighlights:GetHighlightFrames("custom")
+        if perIconFrames then
+            for slotIndex, frame in pairs(perIconFrames) do
+                if frame and frame.entry and frame:IsShown() then
+                    -- Use exact same update function as tracker icons
+                    UpdateCustomTrackerCooldown(frame)
+                end
+            end
+        end
     end
 end
 
@@ -4186,6 +4382,154 @@ Cooldowns.AddCustomEntry = AddCustomEntry
 Cooldowns.RemoveCustomEntry = RemoveCustomEntry
 Cooldowns.RebuildCustomTrackerIcons = RebuildCustomTrackerIcons
 Cooldowns.customTrackerIcons = customTrackerIcons
+Cooldowns.settingsPanels = settingsPanels  -- Expose for SpellbookHelper access
+
+-- Get custom tracker entry data by slot index (for CooldownHighlights per-icon)
+-- Returns: entry, displayName, displayTexture, trackType, trackID
+function Cooldowns.GetCustomTrackerEntryBySlot(slotIndex)
+    -- Get ALL icons sorted by listIndex (same order as per-icon panel)
+    -- Include all icons, not just shown ones (so per-icon works when tracker hidden)
+    local icons = {}
+    for _, iconFrame in pairs(customTrackerIcons) do
+        if iconFrame then
+            icons[#icons + 1] = iconFrame
+        end
+    end
+    table.sort(icons, function(a, b)
+        return (a.listIndex or 0) < (b.listIndex or 0)
+    end)
+    
+    local iconFrame = icons[slotIndex]
+    if not iconFrame or not iconFrame.entry then
+        return nil
+    end
+    
+    local entry = iconFrame.entry
+    local displayName, displayTexture = GetEntryDisplayInfo(entry)
+    local trackType, trackID = GetEntryTrackingID(entry)
+    
+    return entry, displayName, displayTexture, trackType, trackID
+end
+
+-- Get cooldown info for custom tracker entry (spell or item)
+-- Returns: start, duration, enabled, charges, maxCharges, chargeStart, chargeDuration
+function Cooldowns.GetCustomTrackerCooldownInfo(trackType, trackID)
+    if not trackType or not trackID then
+        return 0, 0, 1, nil, nil, nil, nil
+    end
+    
+    if trackType == "spell" then
+        local cdInfo = SpellAPI:GetCooldownInfo(trackID)
+        if cdInfo then
+            local start = cdInfo.startTime or 0
+            local duration = cdInfo.duration or 0
+            -- Avoid boolean test on isEnabled - it's secret in combat
+            -- Just assume enabled=1 since we use duration for cooldown detection anyway
+            local enabled = 1
+            
+            -- Check for charges - wrap in pcall since maxCharges may be secret in combat
+            local chargeInfo = SpellAPI:GetChargesInfo(trackID)
+            if chargeInfo then
+                -- Use pcall to safely check maxCharges (may be secret in combat)
+                local hasCharges = false
+                pcall(function()
+                    if chargeInfo.maxCharges and chargeInfo.maxCharges > 1 then
+                        hasCharges = true
+                    end
+                end)
+                
+                if hasCharges then
+                    return start, duration, enabled, 
+                           chargeInfo.currentCharges, chargeInfo.maxCharges,
+                           chargeInfo.cooldownStartTime, chargeInfo.cooldownDuration
+                end
+            end
+            
+            return start, duration, enabled
+        end
+    elseif trackType == "item" then
+        local start, duration, enabled = C_Item.GetItemCooldown(trackID)
+        return start or 0, duration or 0, enabled or 1
+    end
+    
+    return 0, 0, 1
+end
+
+-- Hide/show a custom tracker icon by slot index (for per-icon "Hide in Tracker" feature)
+-- This allows per-icon to be shown while hiding the tracker icon
+function Cooldowns.SetCustomTrackerIconHidden(slotIndex, hidden)
+    -- Get icons sorted by listIndex (same order as per-icon panel)
+    local icons = {}
+    for _, iconFrame in pairs(customTrackerIcons) do
+        if iconFrame then
+            icons[#icons + 1] = iconFrame
+        end
+    end
+    table.sort(icons, function(a, b)
+        return (a.listIndex or 0) < (b.listIndex or 0)
+    end)
+    
+    local iconFrame = icons[slotIndex]
+    if iconFrame then
+        iconFrame._TUI_hiddenByPerIcon = hidden
+        if hidden then
+            iconFrame:SetAlpha(0)
+            iconFrame:EnableMouse(false)
+        else
+            -- Restore normal alpha (will be set by layout)
+            local trackerKey = "customTrackers"
+            local iconOpacity = GetCombatAwareOpacity(trackerKey) or 1.0
+            iconFrame:SetAlpha(iconOpacity)
+            iconFrame:EnableMouse(true)
+        end
+        -- Re-layout to update positions
+        LayoutCustomTrackerIcons()
+    end
+end
+
+-- Check if a custom tracker icon is hidden by per-icon settings
+function Cooldowns.IsCustomTrackerIconHidden(slotIndex)
+    -- Get icons sorted by listIndex (same order as per-icon panel)
+    local icons = {}
+    for _, iconFrame in pairs(customTrackerIcons) do
+        if iconFrame then
+            icons[#icons + 1] = iconFrame
+        end
+    end
+    table.sort(icons, function(a, b)
+        return (a.listIndex or 0) < (b.listIndex or 0)
+    end)
+    
+    local iconFrame = icons[slotIndex]
+    return iconFrame and iconFrame._TUI_hiddenByPerIcon == true
+end
+
+-- Get count of custom tracker icons (all icons, not just shown)
+function Cooldowns.GetCustomTrackerSlotCount()
+    local count = 0
+    for _, iconFrame in pairs(customTrackerIcons) do
+        if iconFrame then
+            count = count + 1
+        end
+    end
+    return count
+end
+
+-- Export GetEntryDisplayInfo for CooldownHighlights to use
+function Cooldowns.GetEntryDisplayInfo(entry)
+    return GetEntryDisplayInfo(entry)
+end
+
+-- Export GetEntryTrackingID for CooldownHighlights to use  
+function Cooldowns.GetEntryTrackingID(entry)
+    return GetEntryTrackingID(entry)
+end
+
+-- Export UpdateCustomTrackerCooldown for CooldownHighlights per-icon to use
+-- This ensures per-icon uses the EXACT same cooldown logic as the tracker
+function Cooldowns.UpdateCustomTrackerCooldown(iconFrame)
+    return UpdateCustomTrackerCooldown(iconFrame)
+end
 
 -- Export to TUICD namespace so SpellbookHelper can find it
 TUICD.Cooldowns = Cooldowns
@@ -9893,7 +10237,7 @@ function Cooldowns:CreateCustomTrackersPanel()
         
         -- Local RefreshLayout helper
         local function RefreshLayout()
-            UpdateCustomTrackerLayout()
+            LayoutCustomTrackerIcons()
         end
         
         -- Helper to create a font dropdown
@@ -11058,7 +11402,12 @@ function Cooldowns:CreateCustomTrackersPanel()
             
             -- Hide icon checkbox handler
             controls.hideCheck:SetScript("OnClick", function(self)
-                CooldownHighlights:SetIconHidden(customTrackerKey, slotIndex, self:GetChecked())
+                local checked = self:GetChecked()
+                CooldownHighlights:SetIconHidden(customTrackerKey, slotIndex, checked)
+                -- ALSO hide the actual custom tracker icon (not just the per-icon highlight)
+                if Cooldowns.SetCustomTrackerIconHidden then
+                    Cooldowns.SetCustomTrackerIconHidden(slotIndex, checked)
+                end
                 Cooldowns:SaveSettings()
                 -- Refresh the custom tracker layout
                 if LayoutCustomTrackerIcons then
@@ -12010,6 +12359,104 @@ local function OldSlashHandler(msg)
             end
         end
         
+    elseif msg == "counttext" then
+        -- Debug count text settings and fontstrings
+        print("|cff00ff00[TUICD CD]|r Count/Charge Text Debug:")
+        
+        for _, tracker in ipairs(TRACKERS) do
+            local viewer = _G[tracker.name]
+            local trackerKey = tracker.key
+            
+            -- Get tracker-level settings
+            local countScale = GetSetting(trackerKey, "countTextScale") or 1.0
+            local countOffsetX = GetSetting(trackerKey, "countTextOffsetX") or 0
+            local countOffsetY = GetSetting(trackerKey, "countTextOffsetY") or 0
+            local countColorR = GetSetting(trackerKey, "countTextColorR") or 1.0
+            local countColorG = GetSetting(trackerKey, "countTextColorG") or 1.0
+            local countColorB = GetSetting(trackerKey, "countTextColorB") or 1.0
+            
+            print(string.format("  |cffffcc00%s:|r", tracker.key))
+            print(string.format("    Tracker settings: scale=%.1f, offsetX=%d, offsetY=%d, color=%.1f/%.1f/%.1f",
+                countScale, countOffsetX, countOffsetY, countColorR, countColorG, countColorB))
+            
+            if viewer then
+                local icons = CollectIcons(viewer)
+                local foundCount = 0
+                for i, icon in ipairs(icons) do
+                    if icon:IsShown() and i <= 3 then
+                        foundCount = foundCount + 1
+                        local iconName = icon:GetName() or "unnamed"
+                        
+                        -- Check for Count/count fields or ChargeCount frame
+                        local countFS = icon.Count or icon.count or icon.CountText or icon.countText
+                        if countFS and countFS.GetFont then
+                            local text = countFS:GetText() or "(empty)"
+                            local font, size, flags = countFS:GetFont()
+                            local origSize = countFS._TUI_origFontSize
+                            local wasApplied = origSize and "YES" or "NO"
+                            local r, g, b = countFS:GetTextColor()
+                            print(string.format("    Icon %d: .Count FOUND, text='%s', size=%.1f, origSize=%s, applied=%s, color=%.2f/%.2f/%.2f", 
+                                i, text, size or 0, tostring(origSize), wasApplied, r or 0, g or 0, b or 0))
+                        elseif icon.ChargeCount then
+                            -- ChargeCount is a frame - search inside for FontStrings
+                            print(string.format("    Icon %d: .ChargeCount FRAME found", i))
+                            if icon.ChargeCount.GetRegions then
+                                for _, region in ipairs({icon.ChargeCount:GetRegions()}) do
+                                    if region:GetObjectType() == "FontString" then
+                                        local text = region:GetText() or "(empty)"
+                                        local font, size = region:GetFont()
+                                        local origSize = region._TUI_origFontSize
+                                        local wasApplied = origSize and "YES" or "NO"
+                                        local r, g, b = region:GetTextColor()
+                                        print(string.format("      -> FontString: text='%s', size=%.1f, origSize=%s, applied=%s, color=%.2f/%.2f/%.2f", 
+                                            text, size or 0, tostring(origSize), wasApplied, r or 0, g or 0, b or 0))
+                                    end
+                                end
+                            end
+                        else
+                            -- Search regions for fontstrings with numeric text
+                            local foundInRegions = false
+                            if icon.GetRegions then
+                                for _, region in ipairs({icon:GetRegions()}) do
+                                    if region:GetObjectType() == "FontString" then
+                                        local fsText = region:GetText() or ""
+                                        local fsName = region:GetName() or "unnamed"
+                                        if fsText:match("^%d+$") then
+                                            local font, size = region:GetFont()
+                                            local origSize = region._TUI_origFontSize
+                                            local wasApplied = origSize and "YES" or "NO"
+                                            print(string.format("    Icon %d: Found region FS '%s', text='%s', size=%.1f, origSize=%s, applied=%s", 
+                                                i, fsName, fsText, size or 0, tostring(origSize), wasApplied))
+                                            foundInRegions = true
+                                        end
+                                    end
+                                end
+                            end
+                            if not foundInRegions then
+                                print(string.format("    Icon %d (%s): NO count fontstring found", i, iconName))
+                                -- List all fields on the icon
+                                local fields = {}
+                                for k, v in pairs(icon) do
+                                    if type(k) == "string" and type(v) ~= "function" then
+                                        table.insert(fields, k)
+                                    end
+                                end
+                                if #fields > 0 then
+                                    table.sort(fields)
+                                    print(string.format("      Available fields: %s", table.concat(fields, ", ")))
+                                end
+                            end
+                        end
+                    end
+                end
+                if foundCount == 0 then
+                    print("    (no visible icons)")
+                end
+            else
+                print("    (viewer not found)")
+            end
+        end
+        
     else
         print("|cff00ff00[TUICD CD]|r Commands:")
         print("  /tuicd debug - Toggle debug mode")
@@ -12021,6 +12468,7 @@ local function OldSlashHandler(msg)
         print("  /tuicd custom - Rebuild custom trackers")
         print("  /tuicd equipped - Show equipped on-use items")
         print("  /tuicd sizes - Debug icon sizes")
+        print("  /tuicd counttext - Debug count/charge text settings")
     end
 end
 

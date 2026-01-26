@@ -469,21 +469,307 @@ end)
 
 -- ============================================================================
 -- PLAYER_LOGOUT CLEANUP
+-- Clean up all modifications to Blizzard frames to prevent errors if addon is disabled
 -- ============================================================================
 
-local logoutFrame = CreateFrame("Frame")
-logoutFrame:RegisterEvent("PLAYER_LOGOUT")
-logoutFrame:SetScript("OnEvent", function()
-    TUICD:PrintDebug("PLAYER_LOGOUT: Restoring Blizzard frames...")
+-- Track all frames we've modified
+TUICD.modifiedBlizzardFrames = TUICD.modifiedBlizzardFrames or {}
+
+-- Register a Blizzard frame as modified (call this when setting _TUI_ properties)
+function TUICD:TrackModifiedFrame(frame)
+    if frame and not self.modifiedBlizzardFrames[frame] then
+        self.modifiedBlizzardFrames[frame] = true
+    end
+end
+
+-- Restore a fontstring to its original state
+local function RestoreFontString(fs)
+    if not fs then return end
     
-    -- Restore all docked icons
+    -- Clear desired settings first so hooks become no-ops
+    fs._TUI_desiredFont = nil
+    fs._TUI_desiredSize = nil
+    fs._TUI_desiredFlags = nil
+    
+    -- Restore original font settings
+    if fs._TUI_origFont and fs._TUI_origFontSize then
+        pcall(function()
+            fs:SetFont(fs._TUI_origFont, fs._TUI_origFontSize, fs._TUI_origFlags or "")
+        end)
+    end
+    
+    -- Restore original position
+    if fs._TUI_origPoint and fs._TUI_origRelativeTo then
+        pcall(function()
+            fs:ClearAllPoints()
+            fs:SetPoint(
+                fs._TUI_origPoint, 
+                fs._TUI_origRelativeTo, 
+                fs._TUI_origRelativePoint or fs._TUI_origRelPoint or fs._TUI_origPoint, 
+                fs._TUI_origX or 0, 
+                fs._TUI_origY or 0
+            )
+        end)
+    end
+    
+    -- Restore default white color (Blizzard default for most text)
+    if fs.SetTextColor then
+        pcall(function()
+            fs:SetTextColor(1, 1, 1, 1)
+        end)
+    end
+end
+
+-- Clean all _TUI_ properties from a single frame and restore original state
+local function CleanTUIPropertiesFromFrame(frame)
+    if not frame then return end
+    
+    -- List of all _TUI_ properties we might set
+    local tuiProperties = {
+        "_TUI_hiddenByPerIcon",
+        "_TUI_TooltipDisabled",
+        "_TUI_HiddenElements",
+        "_TUI_HiddenRegions",
+        "_TUI_OldBackdrop",
+        "_TUI_MasqueGroup",
+        "_TUI_isCooldownText",
+        "_TUI_origFontSize",
+        "_TUI_origFont",
+        "_TUI_origFlags",
+        "_TUI_origPoint",
+        "_TUI_origRelativeTo",
+        "_TUI_origRelativePoint",
+        "_TUI_origRelPoint",
+        "_TUI_origX",
+        "_TUI_origY",
+        "_TUI_desiredFont",
+        "_TUI_desiredSize", 
+        "_TUI_desiredFlags",
+        "_TUI_FontHooked",
+        "_TUI_hooked",
+        "_TUI_SetCooldownHooked",
+        "_TUI_SetCooldownFromDurationObjectHooked",
+        "_TUI_SetFontObjectHooked",
+        "_TUI_SetTextHooked",
+        "_TUI_originalParent",
+        "_TUI_highlightFrame",
+        "_TUI_cloneFrame",
+    }
+    
+    -- Check for any fontstrings and restore them BEFORE removing properties
+    local regions = {frame:GetRegions()}
+    for _, region in ipairs(regions) do
+        if region and region:GetObjectType() == "FontString" then
+            -- Restore this fontstring first
+            RestoreFontString(region)
+            
+            -- Then remove all _TUI_ properties
+            for _, prop in ipairs(tuiProperties) do
+                if region[prop] ~= nil then
+                    region[prop] = nil
+                end
+            end
+        end
+    end
+    
+    -- Also check the Cooldown frame's text
+    if frame.Cooldown then
+        local cdRegions = {frame.Cooldown:GetRegions()}
+        for _, region in ipairs(cdRegions) do
+            if region and region:GetObjectType() == "FontString" then
+                RestoreFontString(region)
+                for _, prop in ipairs(tuiProperties) do
+                    if region[prop] ~= nil then
+                        region[prop] = nil
+                    end
+                end
+            end
+        end
+        
+        -- Remove properties from Cooldown frame itself
+        for _, prop in ipairs(tuiProperties) do
+            if frame.Cooldown[prop] ~= nil then
+                frame.Cooldown[prop] = nil
+            end
+        end
+    end
+    
+    -- Also check the ChargeCount frame's text (Midnight cooldown viewer uses this)
+    if frame.ChargeCount then
+        local ccRegions = {frame.ChargeCount:GetRegions()}
+        for _, region in ipairs(ccRegions) do
+            if region and region:GetObjectType() == "FontString" then
+                RestoreFontString(region)
+                for _, prop in ipairs(tuiProperties) do
+                    if region[prop] ~= nil then
+                        region[prop] = nil
+                    end
+                end
+            end
+        end
+        
+        -- Check common child fontstrings in ChargeCount
+        local chargeCountChildren = {"Text", "text", "Count", "count"}
+        for _, childName in ipairs(chargeCountChildren) do
+            local child = frame.ChargeCount[childName]
+            if child and child:GetObjectType() == "FontString" then
+                RestoreFontString(child)
+                for _, prop in ipairs(tuiProperties) do
+                    if child[prop] ~= nil then
+                        child[prop] = nil
+                    end
+                end
+            end
+        end
+        
+        -- Remove properties from ChargeCount frame itself
+        for _, prop in ipairs(tuiProperties) do
+            if frame.ChargeCount[prop] ~= nil then
+                frame.ChargeCount[prop] = nil
+            end
+        end
+    end
+    
+    -- Check ALL child frames recursively for fontstrings
+    if frame.GetChildren then
+        local children = {frame:GetChildren()}
+        for _, child in ipairs(children) do
+            if child and child ~= frame.Cooldown and child ~= frame.ChargeCount then
+                -- Check child's regions
+                if child.GetRegions then
+                    local childRegions = {child:GetRegions()}
+                    for _, region in ipairs(childRegions) do
+                        if region and region:GetObjectType() == "FontString" then
+                            RestoreFontString(region)
+                            for _, prop in ipairs(tuiProperties) do
+                                if region[prop] ~= nil then
+                                    region[prop] = nil
+                                end
+                            end
+                        end
+                    end
+                end
+                
+                -- Remove properties from child frame
+                for _, prop in ipairs(tuiProperties) do
+                    if child[prop] ~= nil then
+                        child[prop] = nil
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Restore hidden elements (borders, backgrounds, etc.)
+    if frame._TUI_HiddenElements then
+        if frame.Border and frame._TUI_HiddenElements.Border then 
+            pcall(function() frame.Border:SetAlpha(frame._TUI_HiddenElements.Border) end)
+        end
+        if frame.border and frame._TUI_HiddenElements.border then 
+            pcall(function() frame.border:SetAlpha(frame._TUI_HiddenElements.border) end)
+        end
+        if frame.IconBorder and frame._TUI_HiddenElements.IconBorder then 
+            pcall(function() frame.IconBorder:SetAlpha(frame._TUI_HiddenElements.IconBorder) end)
+        end
+        if frame.iconBorder and frame._TUI_HiddenElements.iconBorder then 
+            pcall(function() frame.iconBorder:SetAlpha(frame._TUI_HiddenElements.iconBorder) end)
+        end
+        if frame.FloatingBG and frame._TUI_HiddenElements.FloatingBG then 
+            pcall(function() frame.FloatingBG:SetAlpha(frame._TUI_HiddenElements.FloatingBG) end)
+        end
+        if frame.GetNormalTexture and frame._TUI_HiddenElements.NormalTexture then
+            local normalTex = frame:GetNormalTexture()
+            if normalTex then 
+                pcall(function() normalTex:SetAlpha(frame._TUI_HiddenElements.NormalTexture) end)
+            end
+        end
+    end
+    
+    -- Restore hidden regions
+    if frame._TUI_HiddenRegions then
+        for region, oldAlpha in pairs(frame._TUI_HiddenRegions) do
+            if region and region.SetAlpha then
+                pcall(function() region:SetAlpha(oldAlpha) end)
+            end
+        end
+    end
+    
+    -- Restore backdrop
+    if frame._TUI_OldBackdrop and frame.SetBackdrop then
+        pcall(function() frame:SetBackdrop(frame._TUI_OldBackdrop) end)
+    end
+    
+    -- Remove all _TUI_ properties from the frame itself
+    for _, prop in ipairs(tuiProperties) do
+        if frame[prop] ~= nil then
+            frame[prop] = nil
+        end
+    end
+end
+
+-- Clean all Blizzard CooldownViewer frames
+local function CleanAllBlizzardCooldownViewers()
+    local viewers = {
+        "EssentialCooldownViewer",
+        "UtilityCooldownViewer", 
+        "BuffIconCooldownViewer"
+    }
+    
+    for _, viewerName in ipairs(viewers) do
+        local viewer = _G[viewerName]
+        if viewer then
+            -- Clean the viewer itself
+            CleanTUIPropertiesFromFrame(viewer)
+            
+            -- Clean all children (the actual icon frames)
+            local children = {viewer:GetChildren()}
+            for _, child in ipairs(children) do
+                CleanTUIPropertiesFromFrame(child)
+            end
+        end
+    end
+end
+
+local cleanupFrame = CreateFrame("Frame")
+cleanupFrame:RegisterEvent("PLAYER_LEAVING_WORLD")  -- Fires on both logout AND reload
+cleanupFrame:SetScript("OnEvent", function()
+    TUICD:PrintDebug("PLAYER_LEAVING_WORLD: Cleaning up Blizzard frame modifications...")
+    
+    -- Mark addon as shutting down (hooks should check this and no-op)
+    TUICD.isShuttingDown = true
+    
+    -- Restore all docked icons first
     if TUICD.Docks and TUICD.Docks.RestoreAllDockedIcons then
         pcall(function()
             TUICD.Docks:RestoreAllDockedIcons()
         end)
     end
     
-    TUICD:PrintDebug("PLAYER_LOGOUT: Cleanup complete")
+    -- Clean all tracked modified frames
+    pcall(function()
+        for frame, _ in pairs(TUICD.modifiedBlizzardFrames or {}) do
+            CleanTUIPropertiesFromFrame(frame)
+        end
+    end)
+    
+    -- Clean all Blizzard CooldownViewer frames
+    pcall(CleanAllBlizzardCooldownViewers)
+    
+    -- Clean CooldownHighlights tracking
+    if TUICD.CooldownHighlights and TUICD.CooldownHighlights.CleanupAllHighlights then
+        pcall(function()
+            TUICD.CooldownHighlights:CleanupAllHighlights()
+        end)
+    end
+    
+    -- Clean BuffHighlights tracking
+    if TUICD.BuffHighlights and TUICD.BuffHighlights.CleanupAllHighlights then
+        pcall(function()
+            TUICD.BuffHighlights:CleanupAllHighlights()
+        end)
+    end
+    
+    TUICD:PrintDebug("PLAYER_LEAVING_WORLD: Cleanup complete")
 end)
 
 -- ============================================================================

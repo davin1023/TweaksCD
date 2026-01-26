@@ -155,6 +155,45 @@ API.SECRECY_LEVEL = {
 -- DEBUG / STATUS
 -- ============================================================================
 
+-- Helper: Set cooldown frame from aura data (used by PersonalResources and other modules)
+-- Returns true if cooldown was set successfully
+function API.SetCooldownFromAura(cooldownFrame, unit, auraInstanceID)
+    if not cooldownFrame or not unit or not auraInstanceID then return false end
+    
+    -- Delegate to DurationAPI if available
+    if TUICD.DurationAPI and TUICD.DurationAPI.ApplyAuraDurationToFrame then
+        return TUICD.DurationAPI:ApplyAuraDurationToFrame(cooldownFrame, unit, auraInstanceID, true)
+    end
+    
+    -- Fallback: direct implementation
+    local auraData = C_UnitAuras and C_UnitAuras.GetAuraDataByAuraInstanceID(unit, auraInstanceID)
+    if not auraData then
+        cooldownFrame:Clear()
+        return false
+    end
+    
+    -- Try Duration Object API first
+    if cooldownFrame.SetCooldownFromDurationObject and C_UnitAuras.GetUnitAuraDuration then
+        local duration = C_UnitAuras.GetUnitAuraDuration(unit, auraInstanceID)
+        if duration then
+            cooldownFrame:SetCooldownFromDurationObject(duration, true)
+            return true
+        end
+    end
+    
+    -- Fallback: traditional SetCooldown (wrap in pcall for secret values)
+    local success = pcall(function()
+        if auraData.expirationTime and auraData.duration and auraData.duration > 0 then
+            local startTime = auraData.expirationTime - auraData.duration
+            cooldownFrame:SetCooldown(startTime, auraData.duration)
+        else
+            cooldownFrame:Clear()
+        end
+    end)
+    
+    return success
+end
+
 function API:PrintStatus()
     TUICD:Print("=== TUICD 2.0 API Status ===")
     TUICD:Print("Midnight Verified: " .. (self.IsMidnightVerified and "|cff00ff00YES|r" or "|cffff0000NO|r"))

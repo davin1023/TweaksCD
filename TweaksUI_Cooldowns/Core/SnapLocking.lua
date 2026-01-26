@@ -125,6 +125,9 @@ function SnapLocking:CreateAttachment(childId, parentId, options)
         heightOffset = options.heightOffset or 0,
         widthMode = options.widthMode or SnapLocking.SIZE_MODE.STRETCH,
         heightMode = options.heightMode or SnapLocking.SIZE_MODE.STRETCH,
+        -- CENTER offset for docks (calculated at snap time for proper resize behavior)
+        centerOffsetX = options.centerOffsetX,
+        centerOffsetY = options.centerOffsetY,
     }
     
     -- Store attachment
@@ -564,6 +567,7 @@ function SnapLocking:ApplyAttachment(childId)
     end
     
     local childFrame = childTUI.frame
+    local parentFrame = parentTUI.frame
     
     -- Check if frame is protected and we're in combat - skip if so
     if InCombatLockdown() then
@@ -576,8 +580,50 @@ function SnapLocking:ApplyAttachment(childId)
         end
     end
     
-    -- Use saved absolute position if available (most reliable)
-    if attachment.absoluteX and attachment.absoluteY then
+    -- For docks or CENTER-to-CENTER attachments, always use relative positioning
+    -- This ensures the dock stays centered when its size changes
+    local isDock = childId:match("^Dock_")
+    local isCenterToCenter = attachment.point == "CENTER" and attachment.relPoint == "CENTER"
+    
+    if isDock then
+        -- For docks, ALWAYS use CENTER-to-CENTER positioning for proper resize behavior
+        -- Convert any attachment to CENTER-based by calculating the center offset
+        
+        -- Get current positions to calculate center offset
+        local childCenterX = childFrame:GetLeft() + childFrame:GetWidth() / 2
+        local childCenterY = childFrame:GetBottom() + childFrame:GetHeight() / 2
+        local parentCenterX = parentFrame:GetLeft() + parentFrame:GetWidth() / 2
+        local parentCenterY = parentFrame:GetBottom() + parentFrame:GetHeight() / 2
+        
+        -- Calculate offset from parent center to child center
+        local centerOffsetX = childCenterX - parentCenterX
+        local centerOffsetY = childCenterY - parentCenterY
+        
+        -- Apply CENTER-to-CENTER with calculated offset
+        childFrame:ClearAllPoints()
+        childFrame:SetPoint("CENTER", parentFrame, "CENTER", centerOffsetX, centerOffsetY)
+        
+        if TUICD.PrintDebug then
+            TUICD:PrintDebug(string.format("SnapLocking: Applied CENTER position for dock %s: offset %.1f,%.1f (converted from %s->%s)",
+                childId, centerOffsetX, centerOffsetY, attachment.point, attachment.relPoint))
+        end
+    elseif isCenterToCenter then
+        -- Use relative positioning - maintains proper anchor relationship when size changes
+        childFrame:ClearAllPoints()
+        childFrame:SetPoint(
+            attachment.point,
+            parentFrame,
+            attachment.relPoint,
+            attachment.offsetX or 0,
+            attachment.offsetY or 0
+        )
+        
+        if TUICD.PrintDebug then
+            TUICD:PrintDebug(string.format("SnapLocking: Applied relative position for %s: %s->%s offset %.1f,%.1f",
+                childId, attachment.point, attachment.relPoint, attachment.offsetX or 0, attachment.offsetY or 0))
+        end
+    elseif attachment.absoluteX and attachment.absoluteY then
+        -- Use saved absolute position (most reliable for non-resizing elements)
         childFrame:ClearAllPoints()
         childFrame:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", attachment.absoluteX, attachment.absoluteY)
         
@@ -587,14 +633,13 @@ function SnapLocking:ApplyAttachment(childId)
         end
     else
         -- Fallback to relative positioning
-        local parentFrame = parentTUI.frame
         childFrame:ClearAllPoints()
         childFrame:SetPoint(
             attachment.point,
             parentFrame,
             attachment.relPoint,
-            attachment.offsetX,
-            attachment.offsetY
+            attachment.offsetX or 0,
+            attachment.offsetY or 0
         )
     end
     
@@ -854,6 +899,46 @@ function SnapLocking:ConfirmPendingSnap(options)
     
     options = options or {}
     
+    -- For docks, calculate CENTER offset at the moment of snap-locking
+    -- This ensures proper resize behavior (dock expands from center)
+    local isDock = pendingSnap.childId:match("^Dock_")
+    local centerOffsetX, centerOffsetY
+    
+    if isDock then
+        local childTUI = self:GetTUIFrame(pendingSnap.childId)
+        local parentTUI = self:GetTUIFrame(pendingSnap.parentId)
+        
+        if childTUI and parentTUI then
+            local childFrame = childTUI.frame
+            local parentFrame = parentTUI.frame
+            
+            -- IMPORTANT: First position the dock at the snap location using the original anchor points
+            -- This ensures we calculate the centerOffset from the actual snapped position, not the drag position
+            childFrame:ClearAllPoints()
+            childFrame:SetPoint(
+                pendingSnap.point or "BOTTOMLEFT",
+                parentFrame,
+                pendingSnap.relPoint or "BOTTOMLEFT",
+                pendingSnap.offsetX or 0,
+                pendingSnap.offsetY or 0
+            )
+            
+            -- Now calculate center-to-center offset from the snapped position
+            local childCenterX = childFrame:GetLeft() + childFrame:GetWidth() / 2
+            local childCenterY = childFrame:GetBottom() + childFrame:GetHeight() / 2
+            local parentCenterX = parentFrame:GetLeft() + parentFrame:GetWidth() / 2
+            local parentCenterY = parentFrame:GetBottom() + parentFrame:GetHeight() / 2
+            
+            centerOffsetX = childCenterX - parentCenterX
+            centerOffsetY = childCenterY - parentCenterY
+            
+            if TUICD.PrintDebug then
+                TUICD:PrintDebug(string.format("ConfirmPendingSnap: Dock %s positioned at snap, CENTER offset = %.1f, %.1f", 
+                    pendingSnap.childId, centerOffsetX, centerOffsetY))
+            end
+        end
+    end
+    
     -- Merge pending snap data with options
     local fullOptions = {
         point = pendingSnap.point,
@@ -866,6 +951,9 @@ function SnapLocking:ConfirmPendingSnap(options)
         heightOffset = options.heightOffset or 0,
         widthMode = options.widthMode or SnapLocking.SIZE_MODE.STRETCH,
         heightMode = options.heightMode or SnapLocking.SIZE_MODE.STRETCH,
+        -- Save CENTER offset for docks
+        centerOffsetX = centerOffsetX,
+        centerOffsetY = centerOffsetY,
     }
     
     local success = self:CreateAttachment(pendingSnap.childId, pendingSnap.parentId, fullOptions)
@@ -1002,6 +1090,9 @@ function SnapLocking:SaveAttachments()
             -- Saved sizes (for size matching persistence)
             savedWidth = attachment.savedWidth,
             savedHeight = attachment.savedHeight,
+            -- CENTER offset for docks
+            centerOffsetX = attachment.centerOffsetX,
+            centerOffsetY = attachment.centerOffsetY,
         }
         
         if TUICD.PrintDebug then
@@ -1085,6 +1176,9 @@ function SnapLocking:LoadAttachments()
             -- Saved sizes
             savedWidth = savedData.savedWidth,
             savedHeight = savedData.savedHeight,
+            -- CENTER offset for docks
+            centerOffsetX = savedData.centerOffsetX,
+            centerOffsetY = savedData.centerOffsetY,
         }
         
         if TUICD.PrintDebug then

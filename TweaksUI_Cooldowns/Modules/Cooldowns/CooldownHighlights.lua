@@ -93,10 +93,11 @@ local layoutWrappers = {
 local updateTickers = {}
 local isInitialized = {}
 
--- Debug mode
-local debugMode = false
+-- Debug mode - uses global TUICD.debugMode
 local function dprint(...)
-    -- Debug printing disabled
+    if TUICD.debugMode then
+        print("|cff00ff00[TUI:CD HL]|r", ...)
+    end
 end
 
 -- ============================================================================
@@ -293,8 +294,14 @@ end
 local function GetShowState(trackerKey, slotIndex, state)
     local show = GetStateSetting(trackerKey, slotIndex, state, "show")
     if show == nil then
-        -- Default: show when active (ready), hide when inactive (on cooldown)
-        return state == "active"
+        -- Default behavior differs by tracker type:
+        -- Custom tracker: show BOTH states (since user added these items specifically)
+        -- Essential/Utility: show when active (ready), hide when inactive (on cooldown)
+        if trackerKey == "custom" then
+            return true  -- Show both states for custom tracker
+        else
+            return state == "active"  -- Original behavior for CDM trackers
+        end
     end
     return show
 end
@@ -741,10 +748,18 @@ local function ShouldHighlightBeVisible(trackerKey)
     
     local visibilityEnabled = TUICD.Database:GetTrackerSetting(dbTrackerKey, "visibilityEnabled")
     if not visibilityEnabled then
+        dprint("ShouldHighlightBeVisible:", trackerKey, "- visibility system DISABLED, returning true")
         return true  -- Visibility system disabled = always show
     end
     
     local state = GetPlayerState()
+    
+    -- Debug output for custom tracker
+    if trackerKey == "custom" then
+        local showInCombat = TUICD.Database:GetTrackerSetting(dbTrackerKey, "showInCombat")
+        local showOutOfCombat = TUICD.Database:GetTrackerSetting(dbTrackerKey, "showOutOfCombat")
+        dprint("ShouldHighlightBeVisible: custom - inCombat:", state.inCombat, "showInCombat:", showInCombat, "showOutOfCombat:", showOutOfCombat)
+    end
     
     -- OR logic: if ANY checked condition is true, show the highlight
     if state.inCombat and TUICD.Database:GetTrackerSetting(dbTrackerKey, "showInCombat") then return true end
@@ -761,6 +776,7 @@ local function ShouldHighlightBeVisible(trackerKey)
     if not state.isMounted and TUICD.Database:GetTrackerSetting(dbTrackerKey, "showNotMounted") then return true end
     
     -- No conditions matched
+    dprint("ShouldHighlightBeVisible:", trackerKey, "- NO conditions matched, returning false")
     return false
 end
 
@@ -778,6 +794,7 @@ local function GetIconVisualState(icon)
     if not icon then return true end  -- Default to "ready" if no icon
     
     local isReady = true
+    local isRestricted = InCombatLockdown()
     
     -- Check cooldown frame times - only count as "on cooldown" if duration > GCD threshold
     -- NOTE: GetCooldownTimes returns MILLISECONDS
@@ -796,6 +813,38 @@ local function GetIconVisualState(icon)
                         isReady = false
                     end
                 end
+            elseif isRestricted and (start or duration) then
+                -- During combat, values might be secret - check for cooldown text
+                -- GCD doesn't show text, real cooldowns do!
+                local hasVisibleText = false
+                for _, region in pairs({cooldown:GetRegions()}) do
+                    if region:IsObjectType("FontString") and region:IsShown() then
+                        local text = region:GetText()
+                        if text and text ~= "" then
+                            hasVisibleText = true
+                            break
+                        end
+                    end
+                end
+                if not hasVisibleText then
+                    for _, child in pairs({cooldown:GetChildren()}) do
+                        if child:IsShown() then
+                            for _, region in pairs({child:GetRegions()}) do
+                                if region:IsObjectType("FontString") and region:IsShown() then
+                                    local text = region:GetText()
+                                    if text and text ~= "" then
+                                        hasVisibleText = true
+                                        break
+                                    end
+                                end
+                            end
+                        end
+                        if hasVisibleText then break end
+                    end
+                end
+                if hasVisibleText then
+                    isReady = false
+                end
             end
         end
     end)
@@ -803,8 +852,57 @@ local function GetIconVisualState(icon)
     return isReady
 end
 
+-- Find the source tracker icon frame for a custom tracker per-icon
+-- This allows per-icons to read _TUI_isOnCooldown from the tracker frame
+local function GetSourceTrackerIconFrame(perIconFrame)
+    if not perIconFrame then return nil end
+    if not perIconFrame.trackType or not perIconFrame.trackID then return nil end
+    
+    local Cooldowns = TUICD.Cooldowns
+    if not Cooldowns or not Cooldowns.customTrackerIcons then return nil end
+    
+    local entryKey = perIconFrame.trackType .. "_" .. perIconFrame.trackID
+    return Cooldowns.customTrackerIcons[entryKey]
+end
+
 local function GetSlotInfo(trackerKey, slotIndex)
-    -- Use TUICD.Cooldowns.GetOrderedIcons if available (same order as layout/list)
+    -- Custom tracker: Use dedicated function to get entry data
+    if trackerKey == "custom" then
+        local Cooldowns = TUICD.Cooldowns
+        if Cooldowns and Cooldowns.GetCustomTrackerEntryBySlot then
+            local entry, displayName, displayTexture, trackType, trackID = Cooldowns.GetCustomTrackerEntryBySlot(slotIndex)
+            if entry then
+                -- Determine cooldown state
+                local isActive = true  -- Default to ready
+                if Cooldowns.GetCustomTrackerCooldownInfo then
+                    -- Wrap in pcall since duration may be secret in combat
+                    pcall(function()
+                        local start, duration = Cooldowns.GetCustomTrackerCooldownInfo(trackType, trackID)
+                        if start and duration and duration > 1.5 then
+                            local remaining = (start + duration) - GetTime()
+                            if remaining > 0.1 then
+                                isActive = false  -- On cooldown
+                            end
+                        end
+                    end)
+                end
+                
+                return {
+                    icon = nil,  -- No source icon - we create our own
+                    isActive = isActive,
+                    texture = displayTexture,
+                    name = displayName or ("Slot " .. slotIndex),
+                    -- Custom tracker specific data
+                    entry = entry,
+                    trackType = trackType,
+                    trackID = trackID,
+                }
+            end
+        end
+        return nil
+    end
+    
+    -- Essential/Utility: Use existing icon-based logic
     local icons
     local Cooldowns = TUICD.Cooldowns
     if Cooldowns and Cooldowns.GetOrderedIcons then
@@ -845,7 +943,16 @@ local function GetSlotInfo(trackerKey, slotIndex)
 end
 
 local function GetSlotCount(trackerKey)
-    -- Use TUICD.Cooldowns.GetOrderedIcons if available (same order as layout/list)
+    -- Custom tracker: Use dedicated function
+    if trackerKey == "custom" then
+        local Cooldowns = TUICD.Cooldowns
+        if Cooldowns and Cooldowns.GetCustomTrackerSlotCount then
+            return Cooldowns.GetCustomTrackerSlotCount()
+        end
+        return 0
+    end
+    
+    -- Essential/Utility: Use TUICD.Cooldowns.GetOrderedIcons if available (same order as layout/list)
     local Cooldowns = TUICD.Cooldowns
     if Cooldowns and Cooldowns.GetOrderedIcons then
         local viewer = GetViewer(trackerKey)
@@ -1023,6 +1130,26 @@ local function CreateHighlightFrame(trackerKey, slotIndex)
     frame.slotIndex = slotIndex
     frame._TUI_useMasque = masqueEnabled
     
+    -- For custom tracker: Store entry data directly on the frame
+    -- This allows UpdateHighlightFrame to use the same cooldown logic as the tracker
+    if trackerKey == "custom" then
+        local Cooldowns = TUICD.Cooldowns
+        if Cooldowns and Cooldowns.GetCustomTrackerEntryBySlot then
+            local entry, displayName, displayTexture, trackType, trackID = Cooldowns.GetCustomTrackerEntryBySlot(slotIndex)
+            if entry then
+                frame.entry = entry
+                frame.trackType = trackType
+                frame.trackID = trackID
+                frame.entryName = displayName
+                -- Set initial texture
+                if displayTexture and frame.icon then
+                    frame.icon:SetTexture(displayTexture)
+                end
+                dprint("Custom highlight frame stored entry data:", trackType, trackID, displayName)
+            end
+        end
+    end
+    
     -- Set initial position
     local pos = GetHighlightPosition(trackerKey, slotIndex)
     if pos then
@@ -1174,7 +1301,62 @@ local function UpdateHighlightFrame(trackerKey, slotIndex)
         isLayoutMode = true
     end
     
+    -- For custom tracker: If slotInfo is nil but frame has entry data, create a minimal slotInfo
+    -- IMPORTANT: Read cooldown state from the SOURCE TRACKER ICON FRAME, not from per-icon frame
+    -- The source tracker frame has _TUI_isOnCooldown set by UpdateCustomTrackerCooldown
+    if not slotInfo and trackerKey == "custom" and frame.entry then
+        dprint("Custom per-icon slotInfo creation for slot", slotIndex, "- frame.entry:", frame.entry and "YES" or "NO")
+        
+        -- Get texture from stored entry
+        local displayTexture = nil
+        if TUICD.Cooldowns and frame.entry then
+            pcall(function()
+                local _, tex = TUICD.Cooldowns.GetEntryDisplayInfo(frame.entry)
+                displayTexture = tex
+            end)
+        end
+        
+        -- CRITICAL: Find the SOURCE tracker icon frame and read its cooldown state
+        -- The source frame has _TUI_isOnCooldown set correctly by UpdateCustomTrackerCooldown
+        local sourceFrame = GetSourceTrackerIconFrame(frame)
+        local isOnCooldown = false
+        
+        if sourceFrame then
+            -- Read state from source tracker frame
+            isOnCooldown = sourceFrame._TUI_isOnCooldown or false
+            dprint("Custom per-icon using SOURCE frame state:", "isOnCooldown:", isOnCooldown)
+        else
+            -- Fallback: Try to determine state via API (may fail in combat)
+            dprint("Custom per-icon NO SOURCE FRAME - trying API fallback")
+            local Cooldowns = TUICD.Cooldowns
+            if Cooldowns and Cooldowns.GetCustomTrackerCooldownInfo and frame.trackType and frame.trackID then
+                local ok, start, duration = pcall(Cooldowns.GetCustomTrackerCooldownInfo, frame.trackType, frame.trackID)
+                if ok and start and duration and type(duration) == "number" and duration > 1.5 then
+                    local remaining = (start + duration) - GetTime()
+                    if remaining > 0.1 then
+                        isOnCooldown = true
+                    end
+                end
+            end
+        end
+        
+        -- Store state on per-icon frame for visibility checks
+        frame._TUI_isOnCooldown = isOnCooldown
+        
+        local isActive = not isOnCooldown  -- isActive = ready = NOT on cooldown
+        dprint("Custom per-icon isActive:", isActive, "(isOnCooldown:", isOnCooldown, ")")
+        
+        slotInfo = {
+            icon = nil,
+            isActive = isActive,
+            texture = displayTexture,
+            name = frame.entryName or "Custom",
+            _customTrackerCooldownAlreadyUpdated = true,  -- Flag so we don't update twice
+        }
+    end
+    
     if not slotInfo then
+        dprint("NO slotInfo for", trackerKey, slotIndex, "- frame.entry:", frame.entry and "YES" or "NO")
         -- Skip docked icons during layout mode - dock displays them
         local isDocked = TUICD.Docks and TUICD.Docks.IsIconDocked and TUICD.Docks:IsIconDocked(trackerKey, slotIndex)
         if isLayoutMode and not isDocked then
@@ -1258,105 +1440,177 @@ local function UpdateHighlightFrame(trackerKey, slotIndex)
     frame:SetAlpha(opacity)
     
     -- =========================================================================
-    -- COOLDOWN AND CHARGE UPDATES: Use cached spellID for API calls
-    -- The spellID cache is populated outside combat, so we can safely use
-    -- C_Spell APIs during combat without reading from the (secret) source icon
-    -- =========================================================================
-    local sourceIcon = slotInfo.icon
-    local sourceCooldown = sourceIcon.Cooldown or sourceIcon.cooldown
-    
-    -- Get spellID from cache first (populated outside combat)
-    -- This is critical for Midnight compatibility
-    local spellID = GetCachedSpellID(trackerKey, slotIndex)
-    
-    -- If cache miss (shouldn't happen normally), try direct read (only works outside combat)
-    if not spellID and not InCombatLockdown() then
-        spellID = ExtractSpellID(sourceIcon)
-        -- Update cache while we're at it
-        if spellID then
-            spellIDCache[trackerKey][slotIndex] = spellID
-        end
-    end
-    
-    -- For spells: Use C_Spell API (charges first, then regular cooldown)
-    -- Pass directly to SetCooldownFromDurationObject - NO conditionals on Duration objects
-    if spellID and C_Spell then
-        -- Try charges cooldown first (for spells with charges like Fire Blast, Roll)
-        if C_Spell.GetSpellChargesCooldownDuration and frame.cooldown.SetCooldownFromDurationObject then
-            pcall(function()
-                frame.cooldown:SetCooldownFromDurationObject(C_Spell.GetSpellChargesCooldownDuration(spellID), true)
-            end)
-        -- Fallback to regular cooldown duration
-        elseif C_Spell.GetSpellCooldownDuration and frame.cooldown.SetCooldownFromDurationObject then
-            pcall(function()
-                frame.cooldown:SetCooldownFromDurationObject(C_Spell.GetSpellCooldownDuration(spellID), true)
-            end)
-        end
-    -- For non-spells (items/equipment): Pass through from source cooldown frame
-    elseif sourceCooldown and sourceCooldown.GetCooldownDuration and frame.cooldown.SetCooldownFromDurationObject then
-        pcall(function()
-            frame.cooldown:SetCooldownFromDurationObject(sourceCooldown:GetCooldownDuration(), true)
-        end)
-    end
-    
-    -- =========================================================================
-    -- CHARGE/COUNT DISPLAY: Copy count/charge text
-    -- CRITICAL: No conditionals on returned values - they may be secret
-    -- Just pass directly to SetText and let Blizzard handle it
+    -- COOLDOWN AND CHARGE UPDATES
+    -- Custom tracker: Run EXACT same update code as tracker icons
+    -- Essential/Utility: Use cached spellID from source icon
     -- =========================================================================
     
-    -- Method 1: Use C_Spell.GetSpellDisplayCount API for spells
-    -- Pass directly to SetText - NO conditionals on the result
-    if spellID and C_Spell and C_Spell.GetSpellDisplayCount then
-        pcall(function()
-            frame.count:SetText(C_Spell.GetSpellDisplayCount(spellID))
-            frame.count:Show()
-        end)
-    else
-        -- Method 2: Source icon's Count FontString pass-through (for items/equipment)
-        local sourceCountFS = sourceIcon.Count or sourceIcon.count or sourceIcon.CountText or sourceIcon.countText
+    -- Define at top level for use by glow code later
+    local sourceIcon = slotInfo and slotInfo.icon  -- nil for custom tracker
+    local sourceCooldown = sourceIcon and (sourceIcon.Cooldown or sourceIcon.cooldown)
+    local spellID = nil  -- Will be set for Essential/Utility
+    
+    -- Custom tracker: Get state from SOURCE tracker frame
+    -- The per-icon frame doesn't have proper cooldown tracking - only the tracker icons do
+    -- So we read _TUI_isOnCooldown from the SOURCE tracker frame
+    if trackerKey == "custom" and frame.entry then
+        -- Find the source tracker icon frame
+        local sourceFrame = GetSourceTrackerIconFrame(frame)
         
-        -- Try cooldown frame's count if not found on icon
-        if not sourceCountFS and sourceCooldown then
-            sourceCountFS = sourceCooldown.Count or sourceCooldown.count or sourceCooldown.Charges or sourceCooldown.charges
-        end
-        
-        -- Try icon's children if still not found
-        if not sourceCountFS and sourceIcon.GetChildren then
-            pcall(function()
-                for i = 1, sourceIcon:GetNumChildren() do
-                    local child = select(i, sourceIcon:GetChildren())
-                    if child then
-                        local childCount = child.Count or child.count
-                        if childCount then
-                            sourceCountFS = childCount
-                            break
+        if sourceFrame then
+            -- Read state from source tracker frame (set by UpdateCustomTrackerCooldown in Cooldowns.lua)
+            local isOnCooldown = sourceFrame._TUI_isOnCooldown or false
+            frame._TUI_isOnCooldown = isOnCooldown  -- Copy to per-icon for visibility checks
+            
+            dprint("Custom per-icon state from SOURCE:", slotIndex, "isOnCooldown:", isOnCooldown)
+            
+            -- Copy cooldown display from source tracker frame to per-icon frame
+            if sourceFrame.cooldown and frame.cooldown then
+                pcall(function()
+                    -- Use GetCooldownDuration if available (Midnight API)
+                    if sourceFrame.cooldown.GetCooldownDuration and frame.cooldown.SetCooldownFromDurationObject then
+                        frame.cooldown:SetCooldownFromDurationObject(sourceFrame.cooldown:GetCooldownDuration(), true)
+                    elseif sourceFrame.cooldown.GetCooldownTimes then
+                        -- Fallback: Copy start/duration (may be secret in combat)
+                        local start, duration = sourceFrame.cooldown:GetCooldownTimes()
+                        if start and duration and type(start) == "number" and type(duration) == "number" then
+                            if duration > 0 then
+                                frame.cooldown:SetCooldown(start / 1000, duration / 1000)  -- Convert from ms
+                            else
+                                frame.cooldown:Clear()
+                            end
                         end
                     end
-                end
+                end)
+            end
+            
+            -- Re-determine state based on stored value
+            local detectedState = isOnCooldown and "inactive" or "active"
+            
+            -- Only re-apply if state differs from initial detection
+            if detectedState ~= currentState then
+                currentState = detectedState
+                
+                -- Re-get and re-apply state-specific settings
+                local newSize = GetHighlightSize(trackerKey, slotIndex, currentState)
+                local newOpacity = GetHighlightOpacity(trackerKey, slotIndex, currentState)
+                local newSaturated = GetHighlightSaturation(trackerKey, slotIndex, currentState)
+                local newAspectRatio = GetHighlightAspectRatio(trackerKey, slotIndex, currentState)
+                
+                -- Re-apply size and aspect ratio
+                ApplyAspectRatio(frame, newSize, newAspectRatio, trackerKey, slotIndex, currentState)
+                
+                -- Re-apply saturation based on per-icon settings
+                frame.icon:SetDesaturated(not newSaturated)
+                
+                -- Re-apply opacity
+                frame:SetAlpha(newOpacity)
+                
+                -- Update showThisState for final visibility check
+                showThisState = GetShowState(trackerKey, slotIndex, currentState)
+            end
+        else
+            dprint("Custom per-icon NO SOURCE FRAME:", slotIndex, "trackType:", frame.trackType or "nil", "trackID:", frame.trackID or "nil")
+        end
+    elseif trackerKey == "custom" and not frame.entry then
+        dprint("Custom per-icon has NO ENTRY:", slotIndex, "- frame needs entry data to track cooldown")
+    elseif sourceIcon then
+        -- Essential/Utility: Use cached spellID and source icon
+        
+        -- Get spellID from cache first (populated outside combat)
+        -- This is critical for Midnight compatibility
+        spellID = GetCachedSpellID(trackerKey, slotIndex)
+        
+        -- If cache miss (shouldn't happen normally), try direct read (only works outside combat)
+        if not spellID and not InCombatLockdown() and sourceIcon then
+            spellID = ExtractSpellID(sourceIcon)
+            -- Update cache while we're at it
+            if spellID then
+                spellIDCache[trackerKey][slotIndex] = spellID
+            end
+        end
+        
+        -- For spells: Use C_Spell API (charges first, then regular cooldown)
+        -- Pass directly to SetCooldownFromDurationObject - NO conditionals on Duration objects
+        if spellID and C_Spell then
+            -- Try charges cooldown first (for spells with charges like Fire Blast, Roll)
+            if C_Spell.GetSpellChargesCooldownDuration and frame.cooldown.SetCooldownFromDurationObject then
+                pcall(function()
+                    frame.cooldown:SetCooldownFromDurationObject(C_Spell.GetSpellChargesCooldownDuration(spellID), true)
+                end)
+            -- Fallback to regular cooldown duration
+            elseif C_Spell.GetSpellCooldownDuration and frame.cooldown.SetCooldownFromDurationObject then
+                pcall(function()
+                    frame.cooldown:SetCooldownFromDurationObject(C_Spell.GetSpellCooldownDuration(spellID), true)
+                end)
+            end
+        -- For non-spells (items/equipment): Pass through from source cooldown frame
+        elseif sourceCooldown and sourceCooldown.GetCooldownDuration and frame.cooldown.SetCooldownFromDurationObject then
+            pcall(function()
+                frame.cooldown:SetCooldownFromDurationObject(sourceCooldown:GetCooldownDuration(), true)
             end)
         end
         
-        -- Pass through from source FontString - NO conditionals on GetText result
-        if sourceCountFS and sourceCountFS.GetText then
+        -- =========================================================================
+        -- CHARGE/COUNT DISPLAY: Copy count/charge text
+        -- CRITICAL: No conditionals on returned values - they may be secret
+        -- Just pass directly to SetText and let Blizzard handle it
+        -- =========================================================================
+        
+        -- Method 1: Use C_Spell.GetSpellDisplayCount API for spells
+        -- Pass directly to SetText - NO conditionals on the result
+        if spellID and C_Spell and C_Spell.GetSpellDisplayCount then
             pcall(function()
-                frame.count:SetText(sourceCountFS:GetText())
+                frame.count:SetText(C_Spell.GetSpellDisplayCount(spellID))
+                frame.count:Show()
             end)
-            -- Use SetAlphaFromBoolean for visibility (handles secret booleans)
-            if sourceCountFS.IsShown then
+        else
+            -- Method 2: Source icon's Count FontString pass-through (for items/equipment)
+            local sourceCountFS = sourceIcon.Count or sourceIcon.count or sourceIcon.CountText or sourceIcon.countText
+            
+            -- Try cooldown frame's count if not found on icon
+            if not sourceCountFS and sourceCooldown then
+                sourceCountFS = sourceCooldown.Count or sourceCooldown.count or sourceCooldown.Charges or sourceCooldown.charges
+            end
+            
+            -- Try icon's children if still not found
+            if not sourceCountFS and sourceIcon.GetChildren then
                 pcall(function()
-                    frame.count:SetAlphaFromBoolean(sourceCountFS:IsShown(), 1, 0)
+                    for i = 1, sourceIcon:GetNumChildren() do
+                        local child = select(i, sourceIcon:GetChildren())
+                        if child then
+                            local childCount = child.Count or child.count
+                            if childCount then
+                                sourceCountFS = childCount
+                                break
+                            end
+                        end
+                    end
                 end)
             end
-            frame.count:Show()
-        else
-            frame.count:SetText("")
-            frame.count:Hide()
+            
+            -- Pass through from source FontString - NO conditionals on GetText result
+            if sourceCountFS and sourceCountFS.GetText then
+                pcall(function()
+                    frame.count:SetText(sourceCountFS:GetText())
+                end)
+                -- Use SetAlphaFromBoolean for visibility (handles secret booleans)
+                if sourceCountFS.IsShown then
+                    pcall(function()
+                        frame.count:SetAlphaFromBoolean(sourceCountFS:IsShown(), 1, 0)
+                    end)
+                end
+                frame.count:Show()
+            else
+                frame.count:SetText("")
+                frame.count:Hide()
+            end
         end
     end
     
     -- =========================================================================
     -- Copy glow state from source icon (proc/spell activation glow)
+    -- Custom tracker: Use frame's stored trackID (no source icon)
     -- =========================================================================
     local showGlow = false
     
@@ -1364,18 +1618,26 @@ local function UpdateHighlightFrame(trackerKey, slotIndex)
     local procGlowEnabled = GetShowProcGlow(trackerKey, slotIndex)
     if procGlowEnabled == nil then procGlowEnabled = true end
     
+    -- Get spellID for glow check
+    local glowSpellID = nil
+    if trackerKey == "custom" and frame.trackType == "spell" then
+        glowSpellID = frame.trackID
+    elseif trackerKey ~= "custom" then
+        glowSpellID = spellID  -- From the Essential/Utility cache
+    end
+    
     if procGlowEnabled then
         -- Method 1: Direct API check using IsSpellOverlayed (most reliable)
-        if spellID and IsSpellOverlayed then
+        if glowSpellID and IsSpellOverlayed then
             pcall(function()
-                if IsSpellOverlayed(spellID) then
+                if IsSpellOverlayed(glowSpellID) then
                     showGlow = true
                 end
             end)
         end
         
-        -- Method 2: Check source icon's overlay frames (fallback)
-        if not showGlow then
+        -- Method 2: Check source icon's overlay frames (fallback - only for non-custom tracker)
+        if not showGlow and sourceIcon then
             pcall(function()
                 -- Check for overlay glow frame (standard Blizzard glow)
                 if sourceIcon.overlay and sourceIcon.overlay:IsShown() then
@@ -1510,6 +1772,7 @@ local function UpdateHighlightFrame(trackerKey, slotIndex)
     
     -- Default to "ready" (not on cooldown) - only set to true if we CONFIRM a real cooldown
     local thisIconOnCooldown = false
+    local isRestricted = InCombatLockdown()
     
     -- Check actual cooldown duration from source cooldown
     -- NOTE: GetCooldownTimes returns MILLISECONDS
@@ -1527,6 +1790,38 @@ local function UpdateHighlightFrame(trackerKey, slotIndex)
                     if remaining > 0.1 then
                         thisIconOnCooldown = true
                     end
+                end
+            elseif isRestricted and (start or duration) then
+                -- During combat, values might be secret - check for cooldown text
+                -- GCD doesn't show text, real cooldowns do!
+                local hasVisibleText = false
+                for _, region in pairs({sourceCooldown:GetRegions()}) do
+                    if region:IsObjectType("FontString") and region:IsShown() then
+                        local text = region:GetText()
+                        if text and text ~= "" then
+                            hasVisibleText = true
+                            break
+                        end
+                    end
+                end
+                if not hasVisibleText then
+                    for _, child in pairs({sourceCooldown:GetChildren()}) do
+                        if child:IsShown() then
+                            for _, region in pairs({child:GetRegions()}) do
+                                if region:IsObjectType("FontString") and region:IsShown() then
+                                    local text = region:GetText()
+                                    if text and text ~= "" then
+                                        hasVisibleText = true
+                                        break
+                                    end
+                                end
+                            end
+                        end
+                        if hasVisibleText then break end
+                    end
+                end
+                if hasVisibleText then
+                    thisIconOnCooldown = true
                 end
             end
         end
@@ -1547,16 +1842,62 @@ local function UpdateHighlightFrame(trackerKey, slotIndex)
                             thisIconOnCooldown = true
                         end
                     end
+                elseif isRestricted and (start or duration) then
+                    -- During combat - check for cooldown text
+                    local hasVisibleText = false
+                    for _, region in pairs({frame.cooldown:GetRegions()}) do
+                        if region:IsObjectType("FontString") and region:IsShown() then
+                            local text = region:GetText()
+                            if text and text ~= "" then
+                                hasVisibleText = true
+                                break
+                            end
+                        end
+                    end
+                    if not hasVisibleText then
+                        for _, child in pairs({frame.cooldown:GetChildren()}) do
+                            if child:IsShown() then
+                                for _, region in pairs({child:GetRegions()}) do
+                                    if region:IsObjectType("FontString") and region:IsShown() then
+                                        local text = region:GetText()
+                                        if text and text ~= "" then
+                                            hasVisibleText = true
+                                            break
+                                        end
+                                    end
+                                end
+                            end
+                            if hasVisibleText then break end
+                        end
+                    end
+                    if hasVisibleText then
+                        thisIconOnCooldown = true
+                    end
                 end
             end
         end)
+    end
+    
+    -- Custom tracker: Use stored cooldown state from UpdateCustomTrackerCooldown
+    -- _TUI_isOnCooldown is the AUTHORITATIVE source for custom tracker (set by same function tracker uses)
+    if trackerKey == "custom" then
+        -- For custom tracker, _TUI_isOnCooldown IS the state, not a fallback
+        thisIconOnCooldown = frame._TUI_isOnCooldown or false
+        dprint("Custom per-icon state:", slotIndex, "_TUI_isOnCooldown:", frame._TUI_isOnCooldown, "thisIconOnCooldown:", thisIconOnCooldown)
     end
     
     -- Store state for debugging/tracking
     iconCooldownState[trackerKey][slotIndex] = thisIconOnCooldown
     
     -- Check tracker visibility conditions (combat, group, instance, etc.)
-    local trackerVisible = ShouldHighlightBeVisible(trackerKey)
+    -- NOTE: Per-icon frames are INDEPENDENT - they use their own showActive/showInactive settings
+    -- and should NOT inherit the tracker's combat/group/instance visibility rules.
+    -- The per-icon IS the visibility control - showActive/showInactive determines when it shows.
+    local trackerVisible = true  -- Per-icons always pass tracker visibility check
+    
+    if trackerKey == "custom" then
+        dprint("Custom per-icon visibility check:", slotIndex, "trackerVisible:", trackerVisible, "thisIconOnCooldown:", thisIconOnCooldown, "showActive:", showActive, "showInactive:", showInactive)
+    end
     
     -- Notify dock if this icon is docked
     local dockAssignment = GetDockAssignment(trackerKey, slotIndex)
@@ -1586,19 +1927,43 @@ local function UpdateHighlightFrame(trackerKey, slotIndex)
         local actualState = thisIconOnCooldown and "inactive" or "active"
         local actualOpacity = GetHighlightOpacity(trackerKey, slotIndex, actualState)
         local actualSaturated = GetHighlightSaturation(trackerKey, slotIndex, actualState)
+        
+        if trackerKey == "custom" then
+            dprint("Custom per-icon FINAL:", slotIndex, "actualState:", actualState, "saturated:", actualSaturated, "opacity:", actualOpacity, "_TUI_isOnCooldown:", frame._TUI_isOnCooldown)
+        end
+        
         frame:SetAlpha(actualOpacity)
         frame.icon:SetDesaturated(not actualSaturated)
         frame:Show()
     else
+        if trackerKey == "custom" then
+            dprint("Custom per-icon HIDDEN:", slotIndex, "thisIconOnCooldown:", thisIconOnCooldown, "showActive:", showActive, "showInactive:", showInactive)
+        end
         frame:Hide()
+        if trackerKey == "custom" then
+            dprint("Custom per-icon after Hide():", slotIndex, "IsShown:", frame:IsShown(), "Alpha:", frame:GetAlpha())
+        end
     end
 end
 
 local function UpdateAllHighlights(trackerKey)
     local db = GetDB(trackerKey)
-    if not db then return end
+    if not db then 
+        dprint("UpdateAllHighlights: NO db for", trackerKey)
+        return 
+    end
     
     local inCombat = InCombatLockdown()
+    
+    -- Debug: Count enabled slots
+    local enabledCount = 0
+    for slotIndex, enabled in pairs(db.enabled) do
+        if enabled then enabledCount = enabledCount + 1 end
+    end
+    
+    if trackerKey == "custom" and enabledCount > 0 then
+        dprint("UpdateAllHighlights: custom tracker has", enabledCount, "enabled slots")
+    end
     
     for slotIndex, enabled in pairs(db.enabled) do
         if enabled then
@@ -1610,9 +1975,17 @@ local function UpdateAllHighlights(trackerKey)
             end
             -- Only update if frame exists
             if highlightFrames[trackerKey][slotIndex] then
+                local frame = highlightFrames[trackerKey][slotIndex]
+                if trackerKey == "custom" then
+                    dprint("UpdateAllHighlights: custom slot", slotIndex, "frame exists, entry:", frame.entry and "YES" or "NO", "trackType:", frame.trackType or "nil")
+                end
                 local success, err = pcall(UpdateHighlightFrame, trackerKey, slotIndex)
-                if not success and debugMode then
+                if not success and TUICD.debugMode then
                     dprint("UpdateHighlightFrame error:", trackerKey, slotIndex, tostring(err))
+                end
+            else
+                if trackerKey == "custom" then
+                    dprint("UpdateAllHighlights: custom slot", slotIndex, "has NO frame")
                 end
             end
         end
@@ -1864,6 +2237,9 @@ local function ProcessDirtyTrackers()
     for trackerKey, isDirty in pairs(dirtyTrackers) do
         if isDirty and activeTrackers[trackerKey] then
             local trackerInfo = activeTrackers[trackerKey]
+            if trackerKey == "custom" then
+                dprint("ProcessDirtyTrackers: custom is dirty, isInternal:", trackerInfo.isInternal)
+            end
             if trackerInfo.isInternal then
                 -- Internal tracker (essential/utility) - use UpdateAllHighlights
                 pcall(UpdateAllHighlights, trackerKey)
@@ -1872,15 +2248,21 @@ local function ProcessDirtyTrackers()
                 pcall(trackerInfo.updateFunc)
             end
             dirtyTrackers[trackerKey] = false
+        elseif isDirty and trackerKey == "custom" then
+            dprint("ProcessDirtyTrackers: custom is dirty BUT NOT in activeTrackers!")
         end
     end
 end
 
 local function OnUpdateEvent(self, event, unit, ...)
     if event == "SPELL_UPDATE_COOLDOWN" or event == "SPELL_UPDATE_CHARGES" or event == "ACTIONBAR_UPDATE_COOLDOWN" then
-        -- Cooldown changed - mark cooldown trackers dirty
+        -- Cooldown changed - mark cooldown trackers dirty (including custom!)
         MarkTrackerDirty("essential")
         MarkTrackerDirty("utility")
+        MarkTrackerDirty("custom")
+    elseif event == "BAG_UPDATE_COOLDOWN" then
+        -- Item cooldown changed - mark custom tracker dirty
+        MarkTrackerDirty("custom")
     elseif event == "UNIT_AURA" then
         -- Aura changed - mark buff tracker dirty (only for player)
         if unit == "player" then
@@ -1923,6 +2305,7 @@ local function EnsureEventFrameExists()
     updateEventFrame:RegisterEvent("SPELL_UPDATE_COOLDOWN")
     updateEventFrame:RegisterEvent("SPELL_UPDATE_CHARGES")
     updateEventFrame:RegisterEvent("ACTIONBAR_UPDATE_COOLDOWN")
+    updateEventFrame:RegisterEvent("BAG_UPDATE_COOLDOWN")  -- For item cooldowns (custom tracker)
     updateEventFrame:RegisterEvent("UNIT_AURA")  -- For buff tracker
     updateEventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
     updateEventFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
@@ -1935,7 +2318,10 @@ end
 
 -- Internal function for essential/utility trackers
 local function StartUpdateTicker(trackerKey)
-    if activeTrackers[trackerKey] then return end
+    if activeTrackers[trackerKey] then 
+        dprint("StartUpdateTicker:", trackerKey, "already registered")
+        return 
+    end
     
     activeTrackers[trackerKey] = { isInternal = true, updateFunc = nil }
     EnsureEventFrameExists()
@@ -1943,7 +2329,7 @@ local function StartUpdateTicker(trackerKey)
     -- Initial update
     MarkTrackerDirty(trackerKey)
     
-    dprint("Started internal updates for:", trackerKey)
+    dprint("Started internal updates for:", trackerKey, "- now registered in activeTrackers")
 end
 
 local function StopUpdateTicker(trackerKey)
@@ -2010,6 +2396,11 @@ end
 -- ============================================================================
 -- PUBLIC API
 -- ============================================================================
+
+-- Get all highlight frames for a tracker (for external updates)
+function CooldownHighlights:GetHighlightFrames(trackerKey)
+    return highlightFrames[trackerKey]
+end
 
 function CooldownHighlights:EnableHighlight(trackerKey, slotIndex, enabled)
     SetHighlightEnabled(trackerKey, slotIndex, enabled)
@@ -2518,8 +2909,8 @@ function CooldownHighlights:DumpSpellIDCache(trackerKey)
 end
 
 function CooldownHighlights:ToggleDebug()
-    debugMode = not debugMode
-    print("|cff00ff00TweaksUI CooldownHighlights:|r Debug mode", debugMode and "ENABLED" or "DISABLED")
+    TUICD.debugMode = not TUICD.debugMode
+    print("|cff00ff00TweaksUI CooldownHighlights:|r Debug mode", TUICD.debugMode and "ENABLED" or "DISABLED")
 end
 
 function CooldownHighlights:SetPosition(trackerKey, slotIndex, point, relPoint, x, y)
@@ -2751,7 +3142,7 @@ end
 function CooldownHighlights:Initialize(trackerKey)
     -- If no trackerKey provided, initialize for all trackers
     if not trackerKey then
-        for _, key in ipairs({"essential", "utility", "buffs", "customTrackers"}) do
+        for _, key in ipairs({"essential", "utility", "custom"}) do
             self:Initialize(key)
         end
         return
@@ -2764,7 +3155,22 @@ function CooldownHighlights:Initialize(trackerKey)
     
     -- Create frames for any enabled highlights (only outside combat)
     local db = GetDB(trackerKey)
-    if not db then return end
+    if not db then 
+        dprint("Initialize: NO db for", trackerKey)
+        return 
+    end
+    
+    -- Debug: Count enabled slots
+    local enabledCount = 0
+    for slotIndex, enabled in pairs(db.enabled) do
+        if enabled then 
+            enabledCount = enabledCount + 1 
+            if trackerKey == "custom" then
+                dprint("Initialize: custom slot", slotIndex, "is enabled")
+            end
+        end
+    end
+    dprint("Initialize:", trackerKey, "has", enabledCount, "enabled per-icons")
     
     if not InCombatLockdown() then
         for slotIndex, enabled in pairs(db.enabled) do

@@ -1,0 +1,89 @@
+## Interface: 120000
+## Title: TweaksUI: Cooldowns
+## Notes: Enhanced cooldown tracking with custom layouts, visibility controls, and proc alerts.
+## Author: Meltheran
+## Version: 3.0.20
+## SavedVariables: TweaksUI_Cooldowns_DB
+## SavedVariablesPerCharacter: TweaksUI_Cooldowns_CharDB
+## OptionalDeps: Masque, LibSharedMedia-3.0, CMT, !TweaksUI
+## X-Category: Interface Enhancements
+## X-Website: https://www.curseforge.com/wow/addons/tweaksui-cooldowns
+## IconTexture: Interface\AddOns\TweaksUI_Cooldowns\Media\Textures\TweaksUI_Icon
+
+# ============================================================================
+# Libraries
+# ============================================================================
+Libs\LibStub\LibStub.lua
+Libs\CallbackHandler-1.0\CallbackHandler-1.0.lua
+Libs\LibSharedMedia-3.0\LibSharedMedia-3.0.lua
+Libs\LibDeflate\LibDeflate.lua
+Libs\LibFlyPaper-2.0\LibFlyPaper-2.0.lua
+
+# ============================================================================
+# Core - Constants & Base
+# ============================================================================
+Core\Constants.lua
+Core\Events.lua
+Core\Utilities.lua
+Core\GlobalScale.lua
+Core\Media.lua
+
+# ============================================================================
+# Core - API Layer (Midnight-native)
+# ============================================================================
+Core\API\API.lua
+Core\API\SpellAPI.lua
+Core\API\AuraAPI.lua
+Core\API\DurationAPI.lua
+Core\API\CurveAPI.lua
+Core\API\RestrictionAPI.lua
+Core\API\SecretAPI.lua
+Core\API\StatusBarAPI.lua
+Core\API\UnitAPI.lua
+
+# ============================================================================
+# Core - Database & Profiles
+# ============================================================================
+Core\Database.lua
+Core\Profiles.lua
+Core\ProfileImportExport.lua
+
+# ============================================================================
+# Core - UI Framework
+# ============================================================================
+Core\TUIFrame.lua
+Core\TabbedPanel.lua
+Core\SnapLocking.lua
+Core\ModuleManager.lua
+Core\MinimapButton.lua
+Core\Settings.lua
+
+# ============================================================================
+# Modules - Layout System (from TweaksUI)
+# ============================================================================
+Modules\Layout\Layout.lua
+Modules\Layout\LayoutUI.lua
+Modules\Layout\LayoutElements.lua
+Modules\Layout\UIElements.lua
+
+# ============================================================================
+# Modules - Cooldowns (from TweaksUI)
+# Note: CooldownClones must be loaded first as Cooldowns depends on CooldownContainers
+# ============================================================================
+Modules\Cooldowns\CooldownClones.lua
+Modules\Cooldowns\SpellbookHelper.lua
+Modules\Cooldowns\Cooldowns.lua
+Modules\Cooldowns\Docks.lua
+Modules\Cooldowns\DocksUI.lua
+Modules\Cooldowns\CooldownHighlights.lua
+Modules\Cooldowns\BuffHighlights.lua
+
+# ============================================================================
+# Modules - Profiles UI
+# ============================================================================
+Modules\Profiles\ProfilesUI.lua
+
+# ============================================================================
+# Core - Main (must be last)
+# ============================================================================
+Core\Main.lua

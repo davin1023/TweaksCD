@@ -197,8 +197,28 @@ function LayoutElements:NudgeElement(id, deltaX, deltaY)
             local parentFrame = parentTUI.frame
             local parentLeft, parentBottom = parentFrame:GetLeft(), parentFrame:GetBottom()
             if parentLeft and parentBottom then
+                -- Update original offset (for non-dock elements)
                 attachment.offsetX = (left + deltaX) - parentLeft
                 attachment.offsetY = (bottom + deltaY) - parentBottom
+                
+                -- For docks, also update the centerOffset (used for proper resize behavior)
+                local isDock = id:match("^Dock_")
+                if isDock then
+                    -- Calculate new center offset
+                    local newCenterX = (left + deltaX) + frame:GetWidth() / 2
+                    local newCenterY = (bottom + deltaY) + frame:GetHeight() / 2
+                    local parentCenterX = parentLeft + parentFrame:GetWidth() / 2
+                    local parentCenterY = parentBottom + parentFrame:GetHeight() / 2
+                    
+                    attachment.centerOffsetX = newCenterX - parentCenterX
+                    attachment.centerOffsetY = newCenterY - parentCenterY
+                    
+                    if TUICD.debugMode then
+                        TUICD:PrintDebug(string.format("NudgeElement: Updated dock centerOffset to %.1f, %.1f",
+                            attachment.centerOffsetX, attachment.centerOffsetY))
+                    end
+                end
+                
                 SnapLocking:SaveAttachments()
             end
         end

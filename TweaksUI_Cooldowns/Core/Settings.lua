@@ -12,7 +12,7 @@ local Settings = TUICD.Settings
 -- CONSTANTS
 -- ============================================================
 local HUB_WIDTH = 200
-local HUB_HEIGHT = 355
+local HUB_HEIGHT = 389  -- Increased for Personal Resources button
 local BUTTON_WIDTH = 170
 local BUTTON_HEIGHT = 28
 local BUTTON_SPACING = 6
@@ -166,6 +166,16 @@ function Settings:CreatePanel()
     end)
     yOffset = yOffset - BUTTON_HEIGHT - BUTTON_SPACING
     
+    -- Personal Resources Button
+    local personalResourcesBtn = CreateFrame("Button", nil, hubPanel, "UIPanelButtonTemplate")
+    personalResourcesBtn:SetPoint("TOPLEFT", 15, yOffset)
+    personalResourcesBtn:SetSize(BUTTON_WIDTH, BUTTON_HEIGHT)
+    personalResourcesBtn:SetText("Personal Resources")
+    personalResourcesBtn:SetScript("OnClick", function()
+        self:OpenPersonalResourcesPanel()
+    end)
+    yOffset = yOffset - BUTTON_HEIGHT - BUTTON_SPACING
+    
     -- Layout Button
     local layoutBtn = CreateFrame("Button", nil, hubPanel, "UIPanelButtonTemplate")
     layoutBtn:SetPoint("TOPLEFT", 15, yOffset)
@@ -300,6 +310,18 @@ function Settings:OpenCooldownsPanel()
         TUICD.Cooldowns:ToggleSettingsPanel(hubPanel)
     else
         TUICD:PrintError("Cooldowns module not available")
+    end
+end
+
+-- ============================================================
+-- OPEN PERSONAL RESOURCES PANEL
+-- ============================================================
+function Settings:OpenPersonalResourcesPanel()
+    -- Use the PersonalResources module's built-in settings panel
+    if TUICD.PersonalResources and TUICD.PersonalResources.ToggleSettingsPanel then
+        TUICD.PersonalResources:ToggleSettingsPanel(hubPanel)
+    else
+        TUICD:PrintError("Personal Resources module not available")
     end
 end
 
