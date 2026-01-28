@@ -907,10 +907,9 @@ function LayoutUI:CheckForSnapTargetAtMouse(draggingElementId)
     end
     
     if closestElementId then
-        -- Only print when element changes
+        -- Track element changes for highlight updates
         if closestElementId ~= lastHighlightedElement then
             lastHighlightedElement = closestElementId
-            TUICD:Print("Near: " .. closestElementId)
         end
         
         -- Found a nearby element - highlight it directly
@@ -1831,6 +1830,16 @@ function LayoutUI:CreateCoordPanel()
         for _, childId in ipairs(children) do
             if SnapLocking:RemoveAttachment(childId) then
                 clearedCount = clearedCount + 1
+            end
+        end
+        
+        -- Reset frame scale to 1.0 (fix for corrupted scale values)
+        local tui = TUICD.TUIFrame.Get(selectedId)
+        if tui and tui.frame then
+            local currentScale = tui.frame:GetScale()
+            if currentScale ~= 1.0 then
+                tui.frame:SetScale(1.0)
+                TUICD:Print(string.format("Reset frame scale from %.3f to 1.0", currentScale))
             end
         end
         
@@ -3350,7 +3359,6 @@ function LayoutUI:ShowElementList()
     nearestText:SetText("|cff00ff00Use Nearest (auto)|r")
     nearestBtn:SetHighlightTexture("Interface\\Buttons\\UI-Listbox-Highlight", "ADD")
     nearestBtn:SetScript("OnClick", function()
-        TUICD:Print("Use Nearest selected")
         coordPanel.useCustomParent = false
         coordPanel.selectedParentId = nil
         elementList:Hide()
@@ -3386,8 +3394,6 @@ function LayoutUI:ShowElementList()
         local targetId = elem.id
         local targetName = elem.name
         btn:SetScript("OnClick", function()
-            TUICD:Print("Selected: " .. targetName)
-            
             local currentSelectedId = Layout:GetSelectedElement()
             if not currentSelectedId then return end
             

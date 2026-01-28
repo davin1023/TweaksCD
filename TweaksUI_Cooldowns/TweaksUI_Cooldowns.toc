@@ -2,7 +2,7 @@
 ## Title: TweaksUI: Cooldowns
 ## Notes: Enhanced cooldown tracking with custom layouts, visibility controls, and proc alerts.
 ## Author: Meltheran
-## Version: 3.0.20
+## Version: 3.2.0
 ## SavedVariables: TweaksUI_Cooldowns_DB
 ## SavedVariablesPerCharacter: TweaksUI_Cooldowns_CharDB
 ## OptionalDeps: Masque, LibSharedMedia-3.0, CMT, !TweaksUI

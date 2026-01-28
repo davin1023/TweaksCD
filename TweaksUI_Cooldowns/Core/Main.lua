@@ -824,6 +824,116 @@ local function HandleSlashCommand(msg)
     elseif cmd == "debug" then
         TUICD:SetDebugMode(not TUICD.debugMode)
         
+    elseif cmd == "coorddebug" then
+        -- Debug coordinate calculation for selected Layout element
+        TUICD:Print("|cff00ccff=== Coordinate Debug ===|r")
+        
+        local Layout = TUICD.Layout
+        if not Layout then
+            TUICD:PrintError("Layout module not found")
+            return
+        end
+        
+        local selectedId, element = Layout:GetSelectedElement()
+        if not selectedId or not element then
+            TUICD:Print("No element selected in Layout Mode")
+            TUICD:Print("Enter Layout Mode (/tuicdlayout) and select an element")
+            return
+        end
+        
+        TUICD:Print("Selected: |cffffff00" .. (element.name or selectedId) .. "|r (id: " .. selectedId .. ")")
+        
+        if not element.tuiFrame then
+            TUICD:PrintError("Element has no tuiFrame!")
+            return
+        end
+        
+        local frame = element.tuiFrame.frame
+        if not frame then
+            TUICD:PrintError("TUIFrame has no frame!")
+            return
+        end
+        
+        -- Get frame info
+        local frameName = frame:GetName() or "(unnamed)"
+        local width, height = frame:GetWidth(), frame:GetHeight()
+        local left, bottom, right, top = frame:GetLeft(), frame:GetBottom(), frame:GetRight(), frame:GetTop()
+        local centerX, centerY = frame:GetCenter()
+        local parent = frame:GetParent()
+        local parentName = parent and (parent:GetName() or "(unnamed)") or "nil"
+        
+        TUICD:Print("Frame: " .. frameName)
+        TUICD:Print("Parent: " .. parentName)
+        TUICD:Print(string.format("Size: %.1f x %.1f", width or 0, height or 0))
+        TUICD:Print(string.format("GetLeft/Bottom: %.1f, %.1f", left or 0, bottom or 0))
+        TUICD:Print(string.format("GetRight/Top: %.1f, %.1f", right or 0, top or 0))
+        TUICD:Print(string.format("GetCenter: %.1f, %.1f", centerX or 0, centerY or 0))
+        
+        -- UIParent info
+        local uiCenterX = UIParent:GetWidth() / 2
+        local uiCenterY = UIParent:GetHeight() / 2
+        TUICD:Print(string.format("UIParent center: %.1f, %.1f", uiCenterX, uiCenterY))
+        
+        -- What the coord panel SHOULD show (assuming CENTER anchor)
+        if centerX and centerY then
+            local offsetX = centerX - uiCenterX
+            local offsetY = centerY - uiCenterY
+            TUICD:Print(string.format("|cff00ff00Expected coords (CENTER): %.0f, %.0f|r", offsetX, offsetY))
+        end
+        
+        -- Check SnapLocking
+        local SnapLocking = TUICD.SnapLocking
+        if SnapLocking then
+            local attachment = SnapLocking:GetAttachment(selectedId)
+            if attachment then
+                TUICD:Print("|cffffff00Attached to:|r " .. attachment.parentId)
+                TUICD:Print(string.format("  Offset: %.1f, %.1f", attachment.offsetX or 0, attachment.offsetY or 0))
+                TUICD:Print(string.format("  CenterOffset: %.1f, %.1f", attachment.centerOffsetX or 0, attachment.centerOffsetY or 0))
+            else
+                TUICD:Print("Not attached (standalone)")
+            end
+            
+            if SnapLocking:IsInLockedGroup(selectedId) then
+                local group = SnapLocking:GetConnectedGroup(selectedId)
+                TUICD:Print("|cffffff00In locked group:|r " .. table.concat(group, ", "))
+            end
+        end
+        
+    elseif cmd == "clearlocks" then
+        -- Clear all attachments and reset all frame scales
+        TUICD:Print("|cff00ccff=== Clearing All Locks & Resetting Scales ===|r")
+        
+        local SnapLocking = TUICD.SnapLocking
+        local Layout = TUICD.Layout
+        local clearedCount = 0
+        local scaleResetCount = 0
+        
+        -- Clear all attachments
+        if SnapLocking and SnapLocking.ClearAllAttachments then
+            clearedCount = SnapLocking:ClearAllAttachments() or 0
+        end
+        
+        -- Reset all frame scales to 1.0
+        if Layout then
+            local elements = Layout:GetAllElements()
+            if elements then
+                for id, element in pairs(elements) do
+                    if element.tuiFrame and element.tuiFrame.frame then
+                        local frame = element.tuiFrame.frame
+                        local currentScale = frame:GetScale()
+                        if currentScale ~= 1.0 then
+                            frame:SetScale(1.0)
+                            scaleResetCount = scaleResetCount + 1
+                            TUICD:Print(string.format("  Reset %s scale: %.3f -> 1.0", element.name or id, currentScale))
+                        end
+                    end
+                end
+            end
+        end
+        
+        TUICD:Print(string.format("Cleared %d attachment(s), reset %d scale(s)", clearedCount, scaleResetCount))
+        TUICD:Print("Reload UI (/rl) recommended to fully apply changes")
+        
     elseif cmd == "mounted" then
         -- Debug mounted state detection
         local isMounted = IsMounted()
