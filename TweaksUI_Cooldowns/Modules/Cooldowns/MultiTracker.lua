@@ -993,6 +993,115 @@ function MultiTracker:ResetAllTrackers()
 end
 
 -- ============================================================================
+-- LEGACY CUSTOM ENTRIES MIGRATION (pre-3.0.4 → multiCustom1)
+-- ============================================================================
+
+-- Migrates entries from the old single custom tracker system
+-- (TweaksUI_Cooldowns_CharDB.cooldowns.customEntries) into multiCustom1
+local function MigrateLegacyCustomEntries()
+    local charDb = TweaksUI_Cooldowns_CharDB
+    if not charDb then return end
+
+    -- Already migrated?
+    if charDb._legacyCustomEntriesMigrated then return end
+
+    -- Source: old custom entries keyed by specID
+    local oldEntries = charDb.cooldowns
+                   and charDb.cooldowns.customEntries
+    if not oldEntries then
+        -- Also check settings.cooldowns path (post-3.0 format migration put them there)
+        oldEntries = charDb.settings
+                 and charDb.settings.cooldowns
+                 and charDb.settings.cooldowns.customEntries
+    end
+
+    if not oldEntries or not next(oldEntries) then
+        -- Nothing to migrate
+        charDb._legacyCustomEntriesMigrated = true
+        return
+    end
+
+    -- Target: multiCustom1 (the default "Custom Tracker")
+    local targetKey = "multiCustom1"
+    local db = GetMultiTrackerDB()
+
+    -- Make sure target tracker exists in registry
+    local targetExists = false
+    for _, tracker in ipairs(db.registry) do
+        if tracker.key == targetKey then
+            targetExists = true
+            break
+        end
+    end
+
+    if not targetExists then
+        -- CreateDefaultTrackers should have made it, but just in case
+        TUICD:PrintDebug("Migration target " .. targetKey .. " not found, skipping")
+        return
+    end
+
+    db.entries[targetKey] = db.entries[targetKey] or {}
+
+    local totalMigrated = 0
+    local totalSkipped = 0
+
+    for specID, specEntries in pairs(oldEntries) do
+        if type(specID) == "number" and type(specEntries) == "table" and #specEntries > 0 then
+            db.entries[targetKey][specID] = db.entries[targetKey][specID] or {}
+            local targetList = db.entries[targetKey][specID]
+
+            -- Build a quick lookup of what's already in the target
+            local existingLookup = {}
+            for _, entry in ipairs(targetList) do
+                local key = (entry.type or "") .. "_" .. (entry.id or "")
+                existingLookup[key] = true
+            end
+
+            for _, entry in ipairs(specEntries) do
+                if entry.type and entry.id then
+                    local key = entry.type .. "_" .. entry.id
+                    if not existingLookup[key] then
+                        table.insert(targetList, {
+                            type    = entry.type,
+                            id      = entry.id,
+                            enabled = (entry.enabled ~= false),  -- default true
+                            source  = "legacy_migration",
+                        })
+                        existingLookup[key] = true
+                        totalMigrated = totalMigrated + 1
+                    else
+                        totalSkipped = totalSkipped + 1
+                    end
+                end
+            end
+        end
+    end
+
+    -- Mark migration complete regardless of count
+    charDb._legacyCustomEntriesMigrated = true
+
+    if totalMigrated > 0 then
+        -- Enable the tracker if it was disabled, since user clearly had entries
+        local settings = db.settings[targetKey]
+        if settings and not settings.enabled then
+            settings.enabled = true
+        end
+
+        TUICD:Print(string.format(
+            "Migrated |cffffcc00%d|r custom tracker %s to |cff00ccff%s|r.",
+            totalMigrated,
+            totalMigrated == 1 and "entry" or "entries",
+            "Custom Tracker"
+        ))
+        if totalSkipped > 0 then
+            TUICD:PrintDebug(totalSkipped .. " duplicate(s) skipped during migration.")
+        end
+    else
+        TUICD:PrintDebug("Legacy custom entries migration: nothing new to migrate.")
+    end
+end
+
+-- ============================================================================
 -- INITIALIZATION
 -- ============================================================================
 
@@ -1002,5 +1111,6 @@ initFrame:RegisterEvent("PLAYER_LOGIN")
 initFrame:SetScript("OnEvent", function(self, event)
     InitializeStorage()
     CreateDefaultTrackers()
+    MigrateLegacyCustomEntries()
     TUICD:PrintDebug("MultiTracker system initialized")
 end)
