@@ -310,41 +310,6 @@ local function ReparentViewerToContainer(trackerKey)
         viewer:SetAlpha(0)
     end
     
-    -- Fix potential duplicate layoutIndex values before showing (Blizzard CDM stale icon bug)
-    pcall(function()
-        local children = {viewer:GetChildren()}
-        local seenIndices = {}
-        local hasDuplicates = false
-        
-        -- Check for duplicates
-        for _, child in ipairs(children) do
-            if child.layoutIndex then
-                if seenIndices[child.layoutIndex] then
-                    hasDuplicates = true
-                    break
-                end
-                seenIndices[child.layoutIndex] = true
-            end
-        end
-        
-        -- Fix duplicates by reassigning sequential indices
-        if hasDuplicates then
-            local iconsWithIndex = {}
-            for _, child in ipairs(children) do
-                if child.layoutIndex then
-                    table.insert(iconsWithIndex, child)
-                end
-            end
-            table.sort(iconsWithIndex, function(a, b)
-                return (a.layoutIndex or 0) < (b.layoutIndex or 0)
-            end)
-            for i, icon in ipairs(iconsWithIndex) do
-                icon.layoutIndex = i
-            end
-            TUICD:PrintDebug("CooldownContainers: Fixed duplicate layoutIndex for " .. trackerKey)
-        end
-    end)
-    
     -- Wrap Show() in pcall - Blizzard's CooldownViewer has internal bugs with secret values
     -- that can trigger when their frame is shown (previousCooldownChargesCount comparison)
     pcall(function() viewer:Show() end)

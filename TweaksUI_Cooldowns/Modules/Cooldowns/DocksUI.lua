@@ -368,9 +368,8 @@ local function CreateDockContent(parent)
         local enabled = self:GetChecked()
         if TUICD.Docks then
             TUICD.Docks:SetDockSetting(selectedDock, "enabled", enabled)
-            if TUICD.Layout and TUICD.Layout:IsActive() then
-                TUICD.Layout:RefreshDockOverlay(selectedDock)
-            end
+            -- Dock visibility is managed by Docks module
+            -- LayoutUI will automatically update overlay on next refresh
         end
     end)
     content.enableCB = enableCB
@@ -388,9 +387,7 @@ local function CreateDockContent(parent)
     nameEdit:SetScript("OnEnterPressed", function(self)
         if TUICD.Docks then
             TUICD.Docks:SetDockSetting(selectedDock, "name", self:GetText())
-            if TUICD.Layout and TUICD.Layout:IsActive() then
-                TUICD.Layout:RefreshDockOverlay(selectedDock)
-            end
+            -- Name update will be reflected when Layout Mode refreshes
         end
         self:ClearFocus()
     end)
@@ -1475,6 +1472,17 @@ function DocksUI:Toggle()
 end
 
 function DocksUI:Show()
+    -- Close other module panels when opening Docks
+    if TUICD.Cooldowns and TUICD.Cooldowns.HideTrackerPanels then
+        TUICD.Cooldowns:HideTrackerPanels()
+    end
+    if TUICD.PersonalResources and TUICD.PersonalResources.HideAllPanels then
+        TUICD.PersonalResources:HideAllPanels()
+    end
+    if TUICD.MultiTrackerUI and TUICD.MultiTrackerUI.HideAllPanels then
+        TUICD.MultiTrackerUI:HideAllPanels()
+    end
+    
     if not panel then
         CreatePanel()
     end

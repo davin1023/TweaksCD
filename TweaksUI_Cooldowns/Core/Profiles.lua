@@ -359,6 +359,15 @@ local function GatherCurrentSettings(skipSync)
         cooldownsData.customEntries = DeepCopy(TweaksUI_Cooldowns_CharDB.cooldowns.customEntries)
     end
     
+    -- Gather multiCustom highlight databases dynamically
+    -- These are stored as multiCustom1Highlights, multiCustom2Highlights, etc.
+    local multiCustomHighlights = {}
+    for dbKey, dbData in pairs(TweaksUI_Cooldowns_CharDB) do
+        if type(dbKey) == "string" and dbKey:match("^multiCustom%d+Highlights$") then
+            multiCustomHighlights[dbKey] = DeepCopy(dbData)
+        end
+    end
+    
     return {
         modules = DeepCopy(TweaksUI_Cooldowns_CharDB.settings or {}),
         enabled = DeepCopy(TweaksUI_Cooldowns_CharDB.modules or {}),
@@ -367,11 +376,16 @@ local function GatherCurrentSettings(skipSync)
         actionBarContainerPositions = DeepCopy(TweaksUI_Cooldowns_CharDB.actionBarContainerPositions or {}),
         -- Cooldowns custom entries ONLY (tracked abilities per spec) - excludes trackerCache
         cooldowns = cooldownsData,
-        -- Per-Icon Highlight settings (all tracker types)
+        -- Per-Icon Highlight settings (standard tracker types)
         buffHighlights = DeepCopy(TweaksUI_Cooldowns_CharDB.buffHighlights or {}),
         essentialHighlights = DeepCopy(TweaksUI_Cooldowns_CharDB.essentialHighlights or {}),
         utilityHighlights = DeepCopy(TweaksUI_Cooldowns_CharDB.utilityHighlights or {}),
         customHighlights = DeepCopy(TweaksUI_Cooldowns_CharDB.customHighlights or {}),
+        -- MultiTracker system (Custom Trackers including Essential/Utility scraped from CDM)
+        -- Includes: registry (tracker definitions), settings (per-tracker), entries (per-tracker per-spec)
+        multiTrackers = DeepCopy(TweaksUI_Cooldowns_CharDB.multiTrackers or {}),
+        -- Per-Icon highlights for multiCustom trackers (keyed by dbKey like multiCustom1Highlights)
+        multiCustomHighlights = multiCustomHighlights,
         -- Docks settings (Dynamic Docks feature)
         docks = DeepCopy(TweaksUI_Cooldowns_CharDB.docks or {}),
     }
@@ -587,6 +601,36 @@ function Profiles:ApplySettings(profileData, skipReloadCheck)
         end
     end
     
+    -- Apply MultiTracker system data (Custom Trackers including Essential/Utility from CDM)
+    -- This includes registry, settings, and per-tracker per-spec entries
+    if profileData.multiTrackers then
+        if TUICD.PrintDebug then
+            TUICD:PrintDebug("Profile multiTrackers data found, applying...")
+            if profileData.multiTrackers.registry then
+                TUICD:PrintDebug(string.format("  Registry has %d trackers", #profileData.multiTrackers.registry))
+            end
+        end
+        TweaksUI_Cooldowns_CharDB.multiTrackers = DeepCopy(profileData.multiTrackers)
+        needsReload = true
+    end
+    
+    -- Apply multiCustom per-icon highlight settings (keyed by dbKey like multiCustom1Highlights)
+    if profileData.multiCustomHighlights then
+        if TUICD.PrintDebug then
+            TUICD:PrintDebug("Profile multiCustomHighlights data found, applying...")
+        end
+        -- Restore each highlight database to its proper CharDB key
+        for dbKey, highlightData in pairs(profileData.multiCustomHighlights) do
+            if dbKey:match("^multiCustom%d+Highlights$") then
+                TweaksUI_Cooldowns_CharDB[dbKey] = DeepCopy(highlightData)
+                if TUICD.PrintDebug then
+                    TUICD:PrintDebug(string.format("  Restored %s", dbKey))
+                end
+            end
+        end
+        needsReload = true
+    end
+    
     -- Fire settings changed event
     if TUICD.Events then
         TUICD.Events:Fire(TUICD.EVENTS.SETTINGS_CHANGED, nil, nil, nil)
@@ -673,6 +717,10 @@ function Profiles:SaveProfile(name)
         essentialHighlights = currentSettings.essentialHighlights,
         utilityHighlights = currentSettings.utilityHighlights,
         customHighlights = currentSettings.customHighlights,
+        -- MultiTracker system (Custom Trackers including Essential/Utility)
+        multiTrackers = currentSettings.multiTrackers,
+        -- Per-Icon highlights for multiCustom trackers
+        multiCustomHighlights = currentSettings.multiCustomHighlights,
         -- Docks settings (Dynamic Docks feature)
         docks = currentSettings.docks,
     }

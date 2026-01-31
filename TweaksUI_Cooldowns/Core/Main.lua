@@ -86,79 +86,6 @@ function TUICD:LoadForceAllVisibleState()
 end
 
 -- ============================================================================
--- BLIZZARD FRAME POSITION REPAIR
--- One-time check on login to fix frames that may be positioned off-screen
--- This can happen if TUI:CD was previously installed and modified frame parents
--- ============================================================================
-
-local BLIZZARD_VIEWER_FRAMES = {
-    "EssentialCooldownViewer",
-    "UtilityCooldownViewer", 
-    "BuffIconCooldownViewer",
-}
-
-local function IsFrameOffScreen(frame)
-    if not frame or not frame:IsShown() then return false end
-    
-    local left, bottom, width, height = frame:GetRect()
-    if not left or not bottom or not width or not height then return false end
-    
-    local screenWidth = GetScreenWidth()
-    local screenHeight = GetScreenHeight()
-    
-    -- Frame is considered off-screen if its center is outside visible area
-    -- with a generous margin (frame should be at least partially visible)
-    local centerX = left + (width / 2)
-    local centerY = bottom + (height / 2)
-    
-    -- Check if center is way off screen (more than frame size outside)
-    local offLeft = centerX < -width
-    local offRight = centerX > screenWidth + width
-    local offBottom = centerY < -height
-    local offTop = centerY > screenHeight + height
-    
-    return offLeft or offRight or offBottom or offTop
-end
-
-local function RepairBlizzardFramePositions()
-    local repairedFrames = {}
-    
-    for _, frameName in ipairs(BLIZZARD_VIEWER_FRAMES) do
-        local frame = _G[frameName]
-        if frame then
-            -- Check if frame is off-screen
-            if IsFrameOffScreen(frame) then
-                -- Check parent - if it's not UIParent, that might be the issue
-                local parent = frame:GetParent()
-                local parentName = parent and parent:GetName() or "nil"
-                
-                TUICD:PrintDebug("Repairing " .. frameName .. " (was off-screen, parent: " .. parentName .. ")")
-                
-                -- Reparent to UIParent if needed
-                if parent ~= UIParent then
-                    frame:SetParent(UIParent)
-                end
-                
-                -- Move to center of screen
-                frame:ClearAllPoints()
-                frame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
-                frame:SetAlpha(1)
-                frame:Show()
-                
-                table.insert(repairedFrames, frameName)
-            end
-        end
-    end
-    
-    if #repairedFrames > 0 then
-        TUICD:Print("|cffff8800Warning:|r Found " .. #repairedFrames .. " Blizzard Cooldown frame(s) positioned off-screen.")
-        TUICD:Print("Frames have been moved to screen center.")
-        TUICD:Print("|cffffcc00To fix permanently:|r Open |cff00ccffEdit Mode|r (ESC > Edit Mode),")
-        TUICD:Print("position your cooldown trackers, then |cff00ff00Save Changes|r.")
-    end
-end
-
--- ============================================================================
 -- LEGACY MIGRATION
 -- Migrates data from old TUI:CD 2.x format to new unified format
 -- ============================================================================
@@ -446,15 +373,10 @@ local function Initialize()
         end)
     end
     
-    -- Check for off-screen Blizzard frames (fixes orphaned frames from previous TUI:CD installs)
-    C_Timer.After(3, function()
-        RepairBlizzardFramePositions()
-    end)
-    
     -- Load forceAllVisible state
     TUICD:LoadForceAllVisibleState()
     
-    TUICD:Print("Loaded - Type |cffFFFFFF/tuicd|r to open settings")
+    TUICD:Print("v" .. TUICD.VERSION .. " Loaded - Type |cffFFFFFF/tuicd|r to open settings")
 end
 
 initFrame:SetScript("OnEvent", function(self, event, arg1)
@@ -501,6 +423,7 @@ local function HandleSlashCommand(msg)
         TUICD:Print("|cff00ccff=== TUI: Cooldowns Commands ===|r")
         TUICD:Print("|cffffff00/tuicd|r - Open settings hub")
         TUICD:Print("|cffffff00/tuicd layout|r - Toggle Layout Mode")
+        TUICD:Print("|cffffff00/tuicd patchnotes|r - Show What's New")
         TUICD:Print("|cffffff00/tuicd cdm|r - Open Blizzard Cooldown Manager")
         TUICD:Print("|cffffff00/tuicd showall|r - Toggle visibility bypass")
         TUICD:Print("|cffffff00/tuicd status|r - Show debug status info")
@@ -509,6 +432,7 @@ local function HandleSlashCommand(msg)
         TUICD:Print("|cffffff00/tuicd remigrate|r - Re-import positions from TweaksUI")
         TUICD:Print("|cffffff00/tuicd migrateprofiles|r - Convert old profiles to 3.0 format")
         TUICD:Print("|cffffff00/tuicd version|r - Show version info")
+        TUICD:Print("|cffffff00/tuicdresetmulti|r - Reset all multi-trackers")
         TUICD:Print("|cffffff00/cdm|r - Toggle Blizzard Cooldown Settings")
         TUICD:Print("|cffffff00/rl|r - Reload UI")
         
@@ -517,6 +441,13 @@ local function HandleSlashCommand(msg)
             TUICD.Layout:Toggle()
         else
             TUICD:PrintError("Layout module not available")
+        end
+        
+    elseif cmd == "patchnotes" or cmd == "whatsnew" or cmd == "changelog" then
+        if TUICD.PatchNotes then
+            TUICD.PatchNotes:Show()
+        else
+            TUICD:PrintError("Patch notes not available")
         end
         
     elseif cmd == "cdm" or cmd == "cooldownmanager" then
@@ -849,6 +780,27 @@ local function HandleSlashCommand(msg)
         TUICD:Print("Unknown command: " .. cmd)
         TUICD:Print("Type /tuicd help for commands")
     end
+end
+
+-- Reset multi-trackers slash command
+SLASH_TUICDRESETMULTI1 = "/tuicdresetmulti"
+SlashCmdList["TUICDRESETMULTI"] = function()
+    StaticPopupDialogs["TUICD_RESET_MULTI"] = {
+        text = "Reset ALL multi-trackers? This will delete all entries and settings. Cannot be undone.",
+        button1 = "Reset",
+        button2 = "Cancel",
+        OnAccept = function()
+            if TUICD.MultiTracker and TUICD.MultiTracker.ResetAllTrackers then
+                TUICD.MultiTracker:ResetAllTrackers()
+            else
+                TUICD:PrintError("MultiTracker system not available")
+            end
+        end,
+        timeout = 0,
+        whileDead = true,
+        hideOnEscape = true,
+    }
+    StaticPopup_Show("TUICD_RESET_MULTI")
 end
 
 -- Register slash commands

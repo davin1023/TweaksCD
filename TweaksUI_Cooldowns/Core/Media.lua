@@ -7,7 +7,7 @@ TUICD.Media = {}
 local Media = TUICD.Media
 
 -- Paths
-local MEDIA_PATH = "Interface\\AddOns\\!TUICD\\Media\\"
+local MEDIA_PATH = "Interface\\AddOns\\TweaksUI_Cooldowns\\Media\\"
 local TEXTURE_PATH = MEDIA_PATH .. "Textures\\"
 local FONT_PATH = MEDIA_PATH .. "Fonts\\"
 local SOUND_PATH = MEDIA_PATH .. "Sounds\\"

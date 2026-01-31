@@ -565,6 +565,20 @@ function PIE:Export(options)
                 if TweaksUI_Cooldowns_CharDB.customHighlights then
                     exportData.customHighlights = DeepCopy(TweaksUI_Cooldowns_CharDB.customHighlights)
                 end
+                -- MultiTracker system (Custom Trackers including Essential/Utility from CDM)
+                if TweaksUI_Cooldowns_CharDB.multiTrackers then
+                    exportData.multiTrackers = DeepCopy(TweaksUI_Cooldowns_CharDB.multiTrackers)
+                end
+                -- Per-Icon highlights for multiCustom trackers (keyed by dbKey like multiCustom1Highlights)
+                local multiCustomHighlights = {}
+                for dbKey, dbData in pairs(TweaksUI_Cooldowns_CharDB) do
+                    if type(dbKey) == "string" and dbKey:match("^multiCustom%d+Highlights$") then
+                        multiCustomHighlights[dbKey] = DeepCopy(dbData)
+                    end
+                end
+                if next(multiCustomHighlights) then
+                    exportData.multiCustomHighlights = multiCustomHighlights
+                end
                 -- Docks settings (Dynamic Docks feature)
                 if TweaksUI_Cooldowns_CharDB.docks then
                     exportData.docks = DeepCopy(TweaksUI_Cooldowns_CharDB.docks)
@@ -591,6 +605,20 @@ function PIE:Export(options)
         end
         if TweaksUI_Cooldowns_CharDB.customHighlights then
             exportData.customHighlights = DeepCopy(TweaksUI_Cooldowns_CharDB.customHighlights)
+        end
+        -- MultiTracker system (Custom Trackers including Essential/Utility from CDM)
+        if TweaksUI_Cooldowns_CharDB.multiTrackers then
+            exportData.multiTrackers = DeepCopy(TweaksUI_Cooldowns_CharDB.multiTrackers)
+        end
+        -- Per-Icon highlights for multiCustom trackers (keyed by dbKey like multiCustom1Highlights)
+        local multiCustomHighlights = {}
+        for dbKey, dbData in pairs(TweaksUI_Cooldowns_CharDB) do
+            if type(dbKey) == "string" and dbKey:match("^multiCustom%d+Highlights$") then
+                multiCustomHighlights[dbKey] = DeepCopy(dbData)
+            end
+        end
+        if next(multiCustomHighlights) then
+            exportData.multiCustomHighlights = multiCustomHighlights
         end
         -- Docks settings (Dynamic Docks feature)
         if TweaksUI_Cooldowns_CharDB.docks then
@@ -943,6 +971,10 @@ function PIE:Import(encodedString, profileName)
         essentialHighlights = parsed.essentialHighlights or {},
         utilityHighlights = parsed.utilityHighlights or {},
         customHighlights = parsed.customHighlights or {},
+        -- MultiTracker system (Custom Trackers including Essential/Utility from CDM)
+        multiTrackers = parsed.multiTrackers or {},
+        -- Per-Icon highlights for multiCustom trackers
+        multiCustomHighlights = parsed.multiCustomHighlights or {},
         -- Docks settings (Dynamic Docks feature)
         docks = parsed.docks or {},
     }
@@ -962,6 +994,8 @@ function PIE:Import(encodedString, profileName)
         hasEssentialHighlights = parsed.essentialHighlights ~= nil,
         hasUtilityHighlights = parsed.utilityHighlights ~= nil,
         hasCustomHighlights = parsed.customHighlights ~= nil,
+        hasMultiTrackers = parsed.multiTrackers ~= nil,
+        hasMultiCustomHighlights = parsed.multiCustomHighlights ~= nil,
         hasDocks = parsed.docks ~= nil,
     }
 end

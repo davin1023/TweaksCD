@@ -19,7 +19,7 @@ local DurationAPI = TUICD.DurationAPI
 -- CONSTANTS
 -- ============================================================================
 
-local UPDATE_INTERVAL = 0.05  -- 20 Hz update rate for responsive per-icon tracking
+local UPDATE_INTERVAL = 0.25  -- 4 Hz update rate (was 10 Hz)
 local DEFAULT_SIZE = 48
 local FRAME_PREFIX = "TweaksUI_BuffHighlight_"
 
@@ -1761,43 +1761,33 @@ local function RegisterAllWithLayout()
 end
 
 -- ============================================================================
--- UPDATE SYSTEM - Uses unified system from CooldownHighlights
+-- UPDATE SYSTEM - Simple OnUpdate for reliable updates
 -- ============================================================================
 
-local isActive = false  -- Whether any buff highlights are enabled
+local updateFrame = nil
+local updateElapsed = 0
 
 local function StartUpdateTicker()
-    if isActive then return end
+    if updateFrame then return end
     
-    isActive = true
+    updateFrame = CreateFrame("Frame")
+    updateElapsed = 0
+    updateFrame:SetScript("OnUpdate", function(self, elapsed)
+        updateElapsed = updateElapsed + elapsed
+        if updateElapsed >= UPDATE_INTERVAL then
+            updateElapsed = 0
+            pcall(UpdateAllHighlights)
+        end
+    end)
     
-    -- Register with the unified update system in CooldownHighlights
-    if TUICD.CooldownHighlights and TUICD.CooldownHighlights.RegisterExternalTracker then
-        TUICD.CooldownHighlights:RegisterExternalTracker("buffs", UpdateAllHighlights)
-        dprint("BuffHighlights: Registered with unified update system")
-    else
-        dprint("BuffHighlights: WARNING - CooldownHighlights not available for unified updates")
-    end
+    dprint("Update OnUpdate started (throttled to " .. UPDATE_INTERVAL .. "s)")
 end
 
 local function StopUpdateTicker()
-    -- Check if any highlights still enabled
-    local hasEnabled = false
-    local db = GetDB()
-    if db and db.enabled then
-        for _, enabled in pairs(db.enabled) do
-            if enabled then hasEnabled = true break end
-        end
-    end
-    
-    if not hasEnabled then
-        isActive = false
-        
-        -- Unregister from unified update system
-        if TUICD.CooldownHighlights and TUICD.CooldownHighlights.UnregisterExternalTracker then
-            TUICD.CooldownHighlights:UnregisterExternalTracker("buffs")
-            dprint("BuffHighlights: Unregistered from unified update system")
-        end
+    if updateFrame then
+        updateFrame:SetScript("OnUpdate", nil)
+        updateFrame = nil
+        dprint("Update OnUpdate stopped")
     end
 end
 
@@ -2119,13 +2109,6 @@ end
 function BuffHighlights:RefreshAllHighlights()
     -- Refresh all highlight frames (used when tracker-level settings change)
     UpdateAllHighlights()
-end
-
-function BuffHighlights:MarkDirty()
-    -- Mark as needing update (uses unified system from CooldownHighlights)
-    if TUICD.CooldownHighlights and TUICD.CooldownHighlights.MarkDirty then
-        TUICD.CooldownHighlights:MarkDirty("buffs")
-    end
 end
 
 function BuffHighlights:IsTrackerHidden()
@@ -2477,20 +2460,15 @@ function BuffHighlights:Initialize()
             container:EnableMouse(true)
         end
         
-        -- Show enabled highlight frames during layout mode (skip docked icons)
+        -- Show all enabled highlight frames during layout mode
         local db = GetDB()
-        local Docks = TUICD.Docks
         for slotIndex, enabled in pairs(db.enabled) do
             if enabled then
-                -- Skip icons that are assigned to a dock (dock handles their display)
-                local isDocked = Docks and Docks.IsIconDocked and Docks:IsIconDocked("buffs", slotIndex)
-                if not isDocked then
-                    local frame = highlightFrames[slotIndex]
-                    if frame then
-                        frame:Show()
-                        -- Update appearance
-                        UpdateHighlightFrame(slotIndex)
-                    end
+                local frame = highlightFrames[slotIndex]
+                if frame then
+                    frame:Show()
+                    -- Update appearance
+                    UpdateHighlightFrame(slotIndex)
                 end
             end
         end

@@ -857,7 +857,14 @@ function LayoutUI:CheckForSnapTargetAtMouse(draggingElementId)
     for id, elem in pairs(allElements) do
         if id ~= draggingElementId and elem.tuiFrame and elem.tuiFrame.frame then
             local frame = elem.tuiFrame.frame
-            if frame:IsVisible() then
+            
+            -- CRITICAL: Skip frames that are children of docks
+            -- Docked icons should not be individual snap targets - only the dock container
+            local parent = frame:GetParent()
+            local parentName = parent and parent:GetName() or ""
+            if parentName and string.match(parentName, "TweaksUI_Dock%d+") then
+                -- This is a docked icon - skip it as snap target
+            elseif frame:IsVisible() then
                 local left, bottom, width, height = frame:GetRect()
                 if left and bottom and width and height then
                     local right = left + width
@@ -2688,7 +2695,14 @@ function LayoutUI:FindNearbyElementDuringDrag(draggingElementId, tolerance)
     for id, elem in pairs(allElements) do
         if id ~= draggingElementId and elem.tuiFrame and elem.tuiFrame.frame then
             local frame = elem.tuiFrame.frame
-            if frame:IsVisible() then
+            
+            -- CRITICAL: Skip frames that are children of docks
+            -- Docked icons should not be individual snap targets - only the dock container
+            local parent = frame:GetParent()
+            local parentName = parent and parent:GetName() or ""
+            if parentName and string.match(parentName, "TweaksUI_Dock%d+") then
+                -- This is a docked icon - skip it as snap target
+            elseif frame:IsVisible() then
                 local l, b, w, h = frame:GetRect()
                 if l and b and w and h then
                     local r = l + w
@@ -3326,166 +3340,3 @@ function LayoutUI:GetUnitFromElementId(elementId)
     local unit = elementId:match("^unitframe_(.+)$")
     return unit
 end
-
--- ============================================================================
--- PER-ICON REGISTRATION (for individual highlight frames)
--- ============================================================================
-
--- Per-icon frames registered for layout mode
-local perIconFrames = {}  -- [elementId] = { frame, trackerKey, slotIndex, displayName }
-
--- Generate element ID for per-icon frame
-local function GetPerIconElementId(trackerKey, slotIndex)
-    -- Match the patterns used in IsElementDocked():
-    -- buffs -> BuffHighlight_N
-    -- essential -> TweaksUI_EssentialHighlight_N
-    -- utility -> TweaksUI_UtilityHighlight_N
-    -- customTrackers -> TweaksUI_CustomHighlight_N
-    if trackerKey == "buffs" then
-        return "BuffHighlight_" .. slotIndex
-    elseif trackerKey == "essential" then
-        return "TweaksUI_EssentialHighlight_" .. slotIndex
-    elseif trackerKey == "utility" then
-        return "TweaksUI_UtilityHighlight_" .. slotIndex
-    elseif trackerKey == "customTrackers" then
-        return "TweaksUI_CustomHighlight_" .. slotIndex
-    else
-        return trackerKey .. "_Highlight_" .. slotIndex
-    end
-end
-
--- Register an individual icon frame for Layout Mode dragging
-function LayoutUI:RegisterPerIconFrame(frame, trackerKey, slotIndex, displayName)
-    if not frame or not trackerKey or not slotIndex then return end
-    if not Layout then return end
-    
-    local elementId = GetPerIconElementId(trackerKey, slotIndex)
-    displayName = displayName or (trackerKey .. " Icon " .. slotIndex)
-    
-    -- Store reference
-    perIconFrames[elementId] = {
-        frame = frame,
-        trackerKey = trackerKey,
-        slotIndex = slotIndex,
-        displayName = displayName,
-    }
-    
-    -- Create a TUIFrame-compatible wrapper for the icon
-    local wrapper = {
-        id = elementId,
-        frame = frame,
-        name = displayName,
-        
-        -- Position management (icons use relative positioning to tracker container)
-        SetPosition = function(self, point, relFrame, relPoint, x, y)
-            if InCombatLockdown() then return end
-            -- Per-icon frames generally don't support independent positioning
-            -- They're positioned by their parent container or dock
-        end,
-        
-        GetSaveData = function(self)
-            local left = frame:GetLeft()
-            local bottom = frame:GetBottom()
-            if left and bottom then
-                return { point = "BOTTOMLEFT", x = left, y = bottom }
-            end
-            return { point = "CENTER", x = 0, y = 0 }
-        end,
-        
-        LoadSaveData = function(self, data)
-            -- Per-icon frames don't load position data directly
-        end,
-        
-        GetSize = function(self)
-            return frame:GetSize()
-        end,
-        
-        GetWidth = function(self)
-            return frame:GetWidth()
-        end,
-        
-        GetHeight = function(self)
-            return frame:GetHeight()
-        end,
-        
-        GetScale = function(self)
-            return frame:GetScale() or 1
-        end,
-        
-        Show = function(self)
-            frame:Show()
-        end,
-        
-        Hide = function(self)
-            frame:Hide()
-        end,
-        
-        IsShown = function(self)
-            return frame:IsShown()
-        end,
-        
-        -- No snap target for individual icons (they snap via their container)
-        GetSnapTarget = function(self, tolerance)
-            return nil
-        end,
-    }
-    
-    -- Register with Layout module
-    Layout:RegisterElement(elementId, {
-        name = displayName,
-        category = Layout.CATEGORIES and Layout.CATEGORIES.COOLDOWNS or "Cooldowns",
-        tuiFrame = wrapper,
-        defaultPosition = { point = "CENTER", x = 0, y = 0 },
-    })
-    
-    return elementId
-end
-
--- Unregister a per-icon frame
-function LayoutUI:UnregisterPerIconFrame(trackerKey, slotIndex)
-    if not Layout then return end
-    
-    local elementId = GetPerIconElementId(trackerKey, slotIndex)
-    
-    if perIconFrames[elementId] then
-        Layout:UnregisterElement(elementId)
-        perIconFrames[elementId] = nil
-    end
-end
-
--- Refresh a specific per-icon overlay (update position/visibility)
-function LayoutUI:RefreshPerIconOverlay(trackerKey, slotIndex)
-    if not Layout then return end
-    
-    local elementId = GetPerIconElementId(trackerKey, slotIndex)
-    local element = Layout:GetElement(elementId)
-    
-    if element then
-        self:UpdateOverlayPosition(element)
-        
-        -- Also update visibility based on current frame state
-        local overlay = overlays[elementId]
-        if overlay and element.tuiFrame then
-            if element.tuiFrame:IsShown() then
-                overlay:Show()
-            else
-                overlay:Hide()
-            end
-        end
-    end
-end
-
--- Get all per-icon frames for a tracker type
-function LayoutUI:GetPerIconFrames(trackerKey)
-    local result = {}
-    for elementId, data in pairs(perIconFrames) do
-        if data.trackerKey == trackerKey then
-            result[data.slotIndex] = data
-        end
-    end
-    return result
-end
-
--- Create TUICD.LayoutMode alias for backward compatibility
--- (BuffHighlights and other modules check for TUICD.LayoutMode)
-TUICD.LayoutMode = LayoutUI

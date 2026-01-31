@@ -1,8 +1,8 @@
 ## Interface: 120000
 ## Title: TweaksUI: Cooldowns
-## Notes: Enhanced cooldown tracking with custom layouts, visibility controls, and proc alerts.|n|cff00ccffv3.0.7:|r Unified architecture - shared codebase with TweaksUI
+## Notes: Enhanced cooldown tracking with custom layouts, visibility controls, and proc alerts.|n|cff00ccffv3.0.40:|r Performance optimization - massive CPU reduction
 ## Author: Meltheran
-## Version: 3.0.7
+## Version: 3.0.40
 ## SavedVariables: TweaksUI_Cooldowns_DB
 ## SavedVariablesPerCharacter: TweaksUI_Cooldowns_CharDB
 ## OptionalDeps: Masque, LibSharedMedia-3.0, CMT, !TweaksUI
@@ -57,6 +57,7 @@ Core\SnapLocking.lua
 Core\ModuleManager.lua
 Core\MinimapButton.lua
 Core\Settings.lua
+Core\PatchNotes.lua
 
 # ============================================================================
 # Modules - Layout System (from TweaksUI)
@@ -71,17 +72,27 @@ Modules\Layout\UIElements.lua
 # Note: CooldownClones must be loaded first as Cooldowns depends on CooldownContainers
 # ============================================================================
 Modules\Cooldowns\CooldownClones.lua
+Modules\Cooldowns\RadialSwipe.lua
 Modules\Cooldowns\SpellbookHelper.lua
 Modules\Cooldowns\Cooldowns.lua
 Modules\Cooldowns\Docks.lua
 Modules\Cooldowns\DocksUI.lua
-Modules\Cooldowns\CooldownHighlights.lua
 Modules\Cooldowns\BuffHighlights.lua
+Modules\Cooldowns\CooldownHighlights.lua
+Modules\Cooldowns\MultiTracker.lua
+Modules\Cooldowns\MultiTrackerFrames.lua
+Modules\Cooldowns\MultiTrackerUI.lua
+Modules\Cooldowns\CDMScraper.lua
 
 # ============================================================================
 # Modules - Profiles UI
 # ============================================================================
 Modules\Profiles\ProfilesUI.lua
+
+# ============================================================================
+# Modules - Personal Resources
+# ============================================================================
+Modules\PersonalResources\PersonalResources.lua
 
 # ============================================================================
 # Core - Main (must be last)

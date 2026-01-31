@@ -441,19 +441,6 @@ function Layout:Enter()
     -- THEN create/show overlays for all registered elements
     if TUICD.LayoutUI then
         TUICD.LayoutUI:ShowOverlays()
-        
-        -- Delayed refresh to catch any late-registered elements (like docks)
-        -- Some modules may use C_Timer.After in their callbacks
-        C_Timer.After(0.1, function()
-            if isLayoutModeActive and TUICD.LayoutUI then
-                -- Create overlays for any elements registered after initial ShowOverlays
-                local elements = self:GetAllElements()
-                for id, element in pairs(elements) do
-                    TUICD.LayoutUI:CreateOverlay(element)
-                end
-                TUICD.LayoutUI:UpdateAllOverlays()
-            end
-        end)
     end
     
     print("|cff00ff00TweaksUI:|r Layout Mode |cff00ff00ENABLED|r - Drag elements to reposition")

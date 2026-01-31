@@ -215,54 +215,6 @@ local function GetHighlightFrame(trackerType, slotIndex)
     end
 end
 
--- Check if a docked icon should actually be visible (has active buff/cooldown)
--- This is more reliable than IsShown() since layout mode can force-show frames
-local function IsDockedIconActive(trackerType, slotIndex, frame)
-    if not frame then return false end
-    
-    -- Check if layout mode is active - if so, show all docked icons
-    local isLayoutMode = TUICD.Layout and TUICD.Layout:IsActive()
-    if isLayoutMode then
-        return true
-    end
-    
-    -- First check if the frame is hidden by the highlight module
-    -- (BuffHighlights/CooldownHighlights may hide inactive frames)
-    if not frame:IsShown() then
-        return false
-    end
-    
-    -- For buffs, check if the icon has a valid texture and is not desaturated
-    if trackerType == "buffs" then
-        local icon = frame.icon or frame.Icon
-        if icon then
-            local texture = nil
-            pcall(function() texture = icon:GetTexture() end)
-            if texture and texture ~= 134400 and texture ~= "Interface\\Icons\\INV_Misc_QuestionMark" then
-                -- Has a real texture - check desaturated state
-                -- Not desaturated = buff is active
-                local desaturated = icon:IsDesaturated()
-                if not desaturated then
-                    return true
-                end
-            end
-        end
-        return false
-    else
-        -- For cooldowns (essential, utility, customTrackers)
-        -- Check if the icon is desaturated (inactive) or not (active/on cooldown)
-        local icon = frame.icon or frame.Icon
-        if icon then
-            local desaturated = icon:IsDesaturated()
-            -- If not desaturated, it's on cooldown (active)
-            if not desaturated then
-                return true
-            end
-        end
-        return false
-    end
-end
-
 -- ============================================================================
 -- VISIBILITY EVALUATION
 -- ============================================================================
@@ -378,84 +330,47 @@ local function CreateDockFrame(dockIndex)
     iconArrivalOrder[dockIndex] = {}
     layoutQueued[dockIndex] = false
     
-    -- Position dock using justify-appropriate anchor point
+    -- Position dock using CENTER-to-CENTER for consistent Layout Mode behavior
+    -- The "justify" setting only affects icon arrangement WITHIN the dock
     local settings = GetDockSettings(dockIndex)
-    local anchorPoint = GetJustifyAnchorPoint(settings.justify or JUSTIFY.CENTER, settings.orientation or ORIENTATION.HORIZONTAL)
-    local savedPoint = settings.point or "CENTER"
     local x = settings.x or 0
     local y = settings.y or 0
     
     dock:ClearAllPoints()
-    dock:SetPoint(anchorPoint, UIParent, savedPoint, x, y)
+    dock:SetPoint("CENTER", UIParent, "CENTER", x, y)
     
     -- Apply background/border settings
     Docks:ApplyDockAppearance(dockIndex)
     
     dock:Hide()
     
-    dprint("Created dock frame:", dockIndex, "with anchor:", anchorPoint)
+    dprint("Created dock frame:", dockIndex, "with CENTER anchor")
     
     return dock
 end
 
--- Update the dock's anchor point based on current justify setting
--- When savePosition=true, recalculates and saves from current screen position
--- When savePosition=false, just repositions using saved coordinates at the correct anchor
+-- Update the dock's position (called when settings change)
+-- NOTE: Justify changes no longer affect anchor point - they only affect internal icon layout
 local function UpdateDockAnchor(dockIndex, savePosition)
     local dock = docks[dockIndex]
     if not dock then return end
     
-    local settings = GetDockSettings(dockIndex)
-    local newAnchor = GetJustifyAnchorPoint(settings.justify or JUSTIFY.CENTER, settings.orientation or ORIENTATION.HORIZONTAL)
-    
+    -- Justify changes only affect internal icon layout via LayoutDock
+    -- The dock frame position stays the same (uses CENTER-to-CENTER anchor)
     if savePosition then
-        -- Recalculate position from current screen location (used when justify changes)
-        local left, bottom, width, height = dock:GetRect()
-        if not left or not width then return end
-        
-        local screenWidth, screenHeight = UIParent:GetWidth(), UIParent:GetHeight()
-        local centerX = left + width / 2
-        local centerY = bottom + height / 2
-        
-        -- Calculate the position of the new anchor point relative to UIParent CENTER
-        local anchorX, anchorY
-        if newAnchor == "LEFT" then
-            anchorX = left - screenWidth / 2
-            anchorY = centerY - screenHeight / 2
-        elseif newAnchor == "RIGHT" then
-            anchorX = (left + width) - screenWidth / 2
-            anchorY = centerY - screenHeight / 2
-        elseif newAnchor == "TOP" then
-            anchorX = centerX - screenWidth / 2
-            anchorY = (bottom + height) - screenHeight / 2
-        elseif newAnchor == "BOTTOM" then
-            anchorX = centerX - screenWidth / 2
-            anchorY = bottom - screenHeight / 2
-        else -- CENTER
-            anchorX = centerX - screenWidth / 2
-            anchorY = centerY - screenHeight / 2
-        end
-        
-        dock:ClearAllPoints()
-        dock:SetPoint(newAnchor, UIParent, "CENTER", anchorX, anchorY)
-        
-        -- Save the new position data
-        SetDockSetting(dockIndex, "point", "CENTER")
-        SetDockSetting(dockIndex, "x", anchorX)
-        SetDockSetting(dockIndex, "y", anchorY)
-        
-        dprint("Updated dock", dockIndex, "anchor to", newAnchor, "and saved position")
+        -- Just re-layout the icons inside, position stays the same
+        QueueLayout(dockIndex)
     else
-        -- Just reposition using saved x/y at the correct anchor point (used during layout)
-        local savedPoint = settings.point or "CENTER"
-        local savedX = settings.x or 0
-        local savedY = settings.y or 0
+        -- Restore from saved position using CENTER-to-CENTER anchor
+        local settings = GetDockSettings(dockIndex)
+        local x = settings.x or 0
+        local y = settings.y or 0
         
         dock:ClearAllPoints()
-        dock:SetPoint(newAnchor, UIParent, savedPoint, savedX, savedY)
-        
-        dprint("Repositioned dock", dockIndex, "at anchor", newAnchor, "using saved position")
+        dock:SetPoint("CENTER", UIParent, "CENTER", x, y)
     end
+    
+    dprint("Updated dock", dockIndex, "position with CENTER anchor")
 end
 
 -- Apply background/border/alpha settings to a dock
@@ -503,66 +418,70 @@ local function CreateDockLayoutWrapper(dockIndex)
         return dockLayoutWrappers[dockIndex]
     end
     
-    -- Helper to get current justify-based anchor
-    local function GetCurrentAnchor()
-        local s = GetDockSettings(dockIndex)
-        return GetJustifyAnchorPoint(s.justify or JUSTIFY.CENTER, s.orientation or ORIENTATION.HORIZONTAL)
-    end
-    
     -- Create TUIFrame-compatible wrapper object
+    -- NOTE: Docks use CENTER anchor for positioning (like other layout elements)
+    -- The "justify" setting only affects icon arrangement WITHIN the dock
     local wrapper = {
         id = wrapperId,
         frame = dock,
         name = Docks:GetDockName(dockIndex),
         category = "Cooldowns",
         
-        -- Default position - uses justify-based anchor
+        -- Default position - use CENTER like other layout elements
         defaultPosition = {
-            point = GetCurrentAnchor(),
+            point = "CENTER",
             x = 0,
             y = -100 * dockIndex,  -- Stack docks vertically by default
         },
         
-        -- Get the anchor point this dock uses (based on justify setting)
+        -- Get the anchor point (always CENTER for consistent positioning)
         GetAnchorPoint = function(self)
-            return GetCurrentAnchor()
+            return "CENTER"
         end,
         
-        -- Position management - always uses justify-based anchor
+        -- Position management - always use CENTER-to-CENTER for predictable positioning
         SetPosition = function(self, point, relFrame, relPoint, x, y)
             if InCombatLockdown() then return end
             
-            local anchor = GetCurrentAnchor()
-            relFrame = relFrame or UIParent
-            relPoint = relPoint or point or "CENTER"
+            -- Always anchor from our CENTER to UIParent's CENTER
+            -- The x, y offsets position the dock relative to screen center
             x = x or 0
             y = y or 0
             
             dock:ClearAllPoints()
-            dock:SetPoint(anchor, relFrame, relPoint, x, y)
+            dock:SetPoint("CENTER", UIParent, "CENTER", x, y)
             
-            -- Save to dock settings (store the relative point and offsets)
-            SetDockSetting(dockIndex, "point", relPoint)
+            -- Save to dock settings
+            SetDockSetting(dockIndex, "point", "CENTER")
             SetDockSetting(dockIndex, "x", x)
             SetDockSetting(dockIndex, "y", y)
         end,
         
         GetSaveData = function(self)
-            local anchor = GetCurrentAnchor()
-            local point, relTo, relPoint, x, y = dock:GetPoint(1)
-            
-            if point then
+            -- Calculate the dock's CENTER position relative to UIParent's CENTER
+            -- This is needed because after dragging, WoW changes the anchor to BOTTOMLEFT
+            local left, bottom, width, height = dock:GetRect()
+            if not left or not width then
                 return {
-                    point = relPoint or "CENTER",
-                    x = x or 0,
-                    y = y or 0,
+                    point = "CENTER",
+                    x = 0,
+                    y = 0,
                 }
             end
             
+            -- Calculate dock's center in screen coordinates
+            local dockCenterX = left + width / 2
+            local dockCenterY = bottom + height / 2
+            
+            -- Calculate offset from UIParent's center
+            local screenWidth, screenHeight = UIParent:GetWidth(), UIParent:GetHeight()
+            local x = dockCenterX - screenWidth / 2
+            local y = dockCenterY - screenHeight / 2
+            
             return {
-                point = "CENTER",
-                x = 0,
-                y = 0,
+                point = "CENTER",  -- Always save relative to CENTER
+                x = x,
+                y = y,
             }
         end,
         
@@ -570,16 +489,15 @@ local function CreateDockLayoutWrapper(dockIndex)
             if not data then return end
             if InCombatLockdown() then return end
             
-            local anchor = GetCurrentAnchor()
-            local relPoint = data.point or "CENTER"
+            -- Always use CENTER-to-CENTER positioning
             local x = data.x or 0
             local y = data.y or 0
             
             dock:ClearAllPoints()
-            dock:SetPoint(anchor, UIParent, relPoint, x, y)
+            dock:SetPoint("CENTER", UIParent, "CENTER", x, y)
             
             -- Save to dock settings
-            SetDockSetting(dockIndex, "point", relPoint)
+            SetDockSetting(dockIndex, "point", "CENTER")
             SetDockSetting(dockIndex, "x", x)
             SetDockSetting(dockIndex, "y", y)
         end,
@@ -619,54 +537,17 @@ local function CreateDockLayoutWrapper(dockIndex)
             return dock:IsShown()
         end,
         
-        -- Size locking (used by SnapLocking for size matching)
-        SetSizeLocked = function(self, locked)
-            self.sizeLocked = locked
-        end,
-        
-        IsSizeLocked = function(self)
-            return self.sizeLocked
-        end,
-        
-        -- Get outer size (for snap size matching)
-        GetOuterSize = function(self)
-            local left, bottom, width, height = dock:GetRect()
-            if width and height then
-                return width, height
-            end
-            return dock:GetSize()
-        end,
-        
         -- FlyPaper snap detection
+        -- DISABLED: Docks should stay where the user places them, not auto-snap to other elements
+        -- The dock container is the snap target for its children, not a snapper itself
         GetSnapPoints = function(self, tolerance)
-            local FlyPaper = LibStub and LibStub("LibFlyPaper-2.0", true)
-            if not FlyPaper or not FlyPaper.Stick then return nil end
-            
-            local point, relFrame, relPoint, x, y = FlyPaper.Stick(
-                dock,
-                "TUICD",
-                tolerance
-            )
-            if point and relFrame then
-                return relFrame, point, relPoint, x, y
-            end
-            return nil
+            return nil  -- Docks don't snap to other elements
         end,
         
         -- GetSnapTarget (alias for GetSnapPoints, used by LayoutUI)
+        -- DISABLED: Same reason - docks are snap TARGETS, not snappers
         GetSnapTarget = function(self, tolerance)
-            local FlyPaper = LibStub and LibStub("LibFlyPaper-2.0", true)
-            if not FlyPaper or not FlyPaper.Stick then return nil end
-            
-            local point, relFrame, relPoint, x, y = FlyPaper.Stick(
-                dock,
-                "TUICD",
-                tolerance
-            )
-            if point and relFrame then
-                return relFrame, point, relPoint, x, y
-            end
-            return nil
+            return nil  -- Docks don't snap to other elements
         end,
         
         -- Position changed callback
@@ -675,6 +556,35 @@ local function CreateDockLayoutWrapper(dockIndex)
             SetDockSetting(dockIndex, "x", x)
             SetDockSetting(dockIndex, "y", y)
             dprint("Dock", dockIndex, "position saved via Layout Mode")
+        end,
+        
+        -- Size locking for SnapLocking compatibility
+        -- Docks don't support size matching, but we need these methods to avoid errors
+        sizeLocked = false,
+        SetSizeLocked = function(self, locked)
+            self.sizeLocked = locked
+        end,
+        IsSizeLocked = function(self)
+            return self.sizeLocked
+        end,
+        
+        -- Force set size (for SnapLocking size matching - docks ignore this)
+        ForceSetSize = function(self, width, height)
+            -- Docks manage their own size based on content, ignore size matching
+        end,
+        
+        -- Width/Height getters and setters for SnapLocking compatibility
+        GetWidth = function(self)
+            return dock:GetWidth()
+        end,
+        GetHeight = function(self)
+            return dock:GetHeight()
+        end,
+        SetWidth = function(self, width)
+            -- Docks manage their own width based on content
+        end,
+        SetHeight = function(self, height)
+            -- Docks manage their own height based on content
         end,
     }
     
@@ -782,7 +692,7 @@ local function GetSortedVisibleIcons(dockIndex)
         if iconInfo and iconInfo.frame then
             -- Use IsDockedIconActive instead of just IsShown()
             -- This properly handles layout mode exit by checking actual icon state
-            if IsDockedIconActive(iconInfo.trackerType, iconInfo.slotIndex, iconInfo.frame) then
+            if (iconInfo.frame:IsShown()) then
                 table.insert(visible, iconInfo)
             end
         end
@@ -1068,7 +978,6 @@ function Docks:AssignIcon(dockIndex, trackerType, slotIndex)
     
     local frame = GetHighlightFrame(trackerType, slotIndex)
     if not frame then
-        dprint("AssignIcon: No frame found for", trackerType, slotIndex)
         return
     end
     
@@ -1107,6 +1016,14 @@ function Docks:AssignIcon(dockIndex, trackerType, slotIndex)
     
     -- Reparent to dock
     frame:SetParent(dock)
+    
+    -- CRITICAL: Immediately anchor the frame after reparenting
+    -- Without this, the frame becomes unanchored and invisible until LayoutDock runs
+    frame:ClearAllPoints()
+    frame:SetPoint("CENTER", dock, "CENTER", 0, 0)
+    
+    -- Ensure the dock is shown (icons can't be seen if parent is hidden)
+    dock:Show()
     
     -- Add to arrival order
     local arrivalOrder = iconArrivalOrder[dockIndex]

@@ -7,7 +7,7 @@
 local ADDON_NAME, TUICD = ...
 
 -- Version info
-TUICD.VERSION = "3.0.15"
+TUICD.VERSION = "3.0.40"
 TUICD.ADDON_NAME = ADDON_NAME
 
 -- Build info - Midnight-only (12.0.0+)
@@ -22,23 +22,21 @@ TUICD.IS_MIDNIGHT = true
 TUICD.MODULE_IDS = {
     COOLDOWNS = "cooldowns",
     LAYOUT = "layout",
-    -- Future expansion (uncomment when adding):
-    -- PERSONAL_RESOURCES = "personalResources",
+    PERSONAL_RESOURCES = "personalResources",
 }
 
 -- Module display names (for UI)
 TUICD.MODULE_NAMES = {
     [TUICD.MODULE_IDS.COOLDOWNS] = "Cooldown Trackers",
     [TUICD.MODULE_IDS.LAYOUT] = "Layout",
-    -- Future:
-    -- [TUICD.MODULE_IDS.PERSONAL_RESOURCES] = "Personal Resources",
+    [TUICD.MODULE_IDS.PERSONAL_RESOURCES] = "Personal Resources",
 }
 
 -- Module load order
 TUICD.MODULE_LOAD_ORDER = {
     TUICD.MODULE_IDS.LAYOUT,
     TUICD.MODULE_IDS.COOLDOWNS,
-    -- TUICD.MODULE_IDS.PERSONAL_RESOURCES, -- Future
+    TUICD.MODULE_IDS.PERSONAL_RESOURCES,
 }
 
 -- Events
