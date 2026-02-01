@@ -1017,6 +1017,28 @@ local function BuildVisibilityTab(parent)
         function(v) SetSetting("showInDelve", v) end,
         RefreshTrackerDisplay)
     
+    y = y - 10
+    y = CreateHeader(parent, y, "Target / Mount")
+    y = CreateCheckbox(parent, y, "Has Target",
+        function() return GetSetting("showHasTarget") end,
+        function(v) SetSetting("showHasTarget", v) end,
+        RefreshTrackerDisplay)
+    
+    y = CreateCheckbox(parent, y, "No Target",
+        function() return GetSetting("showNoTarget") end,
+        function(v) SetSetting("showNoTarget", v) end,
+        RefreshTrackerDisplay)
+    
+    y = CreateCheckbox(parent, y, "Mounted",
+        function() return GetSetting("showMounted") end,
+        function(v) SetSetting("showMounted", v) end,
+        RefreshTrackerDisplay)
+    
+    y = CreateCheckbox(parent, y, "Not Mounted",
+        function() return GetSetting("showNotMounted") end,
+        function(v) SetSetting("showNotMounted", v) end,
+        RefreshTrackerDisplay)
+    
     parent:SetHeight(math.abs(y) + 20)
 end
 
@@ -1431,6 +1453,9 @@ function MultiTrackerUI:Show(hub)
     if TUICD.DocksUI then TUICD.DocksUI:Hide() end
     if TUICD.PersonalResources and TUICD.PersonalResources.HideAllPanels then
         TUICD.PersonalResources:HideAllPanels()
+    end
+    if TUICD.Bars and TUICD.Bars.HideAllPanels then
+        TUICD.Bars:HideAllPanels()
     end
     
     if not mainPanel then

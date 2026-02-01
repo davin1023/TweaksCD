@@ -274,16 +274,26 @@ local function IsSecret(value)
     return issecretvalue and issecretvalue(value)
 end
 
--- Check if duration is active (has remaining time)
+-- Check if duration is active (has remaining time > 0)
+-- Uses TruncateWhenZero for secret-safe detection:
+-- returns secret string when > 0, non-secret "" when = 0
 function DurationAPI:IsActive(durationObj)
     if not durationObj then return false end
-    local remaining = durationObj:GetRemainingDuration()
-    -- Note: remaining might be a secret value, so we can't compare directly
-    -- This is a best-effort check
+    local ok, remaining = pcall(durationObj.GetRemainingDuration, durationObj)
+    if not ok or remaining == nil then return false end
+    
     if IsSecret(remaining) then
-        return true  -- Assume active if we can't tell
+        -- Use TruncateWhenZero for secret-safe > 0 check
+        if C_StringUtil and C_StringUtil.TruncateWhenZero then
+            local ok2, str = pcall(C_StringUtil.TruncateWhenZero, remaining)
+            if ok2 and str ~= nil then
+                -- Secret result = value > 0 (active). Non-secret = value = 0 (expired).
+                return IsSecret(str)
+            end
+        end
+        return true  -- Conservative fallback
     end
-    return remaining and remaining > 0
+    return type(remaining) == "number" and remaining > 0
 end
 
 -- Format duration for display (handles secret values)

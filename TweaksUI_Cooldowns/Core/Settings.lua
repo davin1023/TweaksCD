@@ -12,7 +12,7 @@ local Settings = TUICD.Settings
 -- CONSTANTS
 -- ============================================================
 local HUB_WIDTH = 200
-local HUB_HEIGHT = 389  -- Increased for Personal Resources button
+local HUB_HEIGHT = 425  -- Increased for Timer Bars button
 local BUTTON_WIDTH = 170
 local BUTTON_HEIGHT = 28
 local BUTTON_SPACING = 6
@@ -176,6 +176,16 @@ function Settings:CreatePanel()
     end)
     yOffset = yOffset - BUTTON_HEIGHT - BUTTON_SPACING
     
+    -- Timer Bars Button
+    local barsBtn = CreateFrame("Button", nil, hubPanel, "UIPanelButtonTemplate")
+    barsBtn:SetPoint("TOPLEFT", 15, yOffset)
+    barsBtn:SetSize(BUTTON_WIDTH, BUTTON_HEIGHT)
+    barsBtn:SetText("Timer Bars")
+    barsBtn:SetScript("OnClick", function()
+        self:OpenBarsPanel()
+    end)
+    yOffset = yOffset - BUTTON_HEIGHT - BUTTON_SPACING
+    
     -- Layout Button
     local layoutBtn = CreateFrame("Button", nil, hubPanel, "UIPanelButtonTemplate")
     layoutBtn:SetPoint("TOPLEFT", 15, yOffset)
@@ -322,6 +332,25 @@ function Settings:OpenPersonalResourcesPanel()
         TUICD.PersonalResources:ToggleSettingsPanel(hubPanel)
     else
         TUICD:PrintError("Personal Resources module not available")
+    end
+end
+
+-- ============================================================
+-- OPEN BARS PANEL
+-- ============================================================
+function Settings:OpenBarsPanel()
+    if TUICD.Bars and TUICD.Bars.TogglePanel then
+        -- Close other panels first
+        if TUICD.Cooldowns and TUICD.Cooldowns.ToggleSettingsPanel then
+            local cooldownsPanel = TUICD.Cooldowns.settingsPanel
+            if cooldownsPanel and cooldownsPanel:IsShown() then cooldownsPanel:Hide() end
+        end
+        if TUICD.PersonalResources and TUICD.PersonalResources.settingsPanel then
+            TUICD.PersonalResources.settingsPanel:Hide()
+        end
+        TUICD.Bars:TogglePanel()
+    else
+        TUICD:PrintError("Timer Bars module not available")
     end
 end
 

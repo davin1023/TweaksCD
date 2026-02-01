@@ -119,16 +119,33 @@ function SpellAPI:IsOnCooldown(spellID)
     return false
 end
 
--- Get remaining cooldown time (may return secret value in restricted contexts)
+-- Get remaining cooldown time via Duration Object
+-- Note: C_Spell.GetSpellCooldownRemaining was REMOVED in Midnight PTR 1
+-- Use Duration Object's GetRemainingDuration instead (may return secret value)
 function SpellAPI:GetCooldownRemaining(spellID)
     if not spellID then return 0 end
-    return C_Spell.GetSpellCooldownRemaining(spellID)
+    local durationObj = self:GetCooldownDuration(spellID)
+    if durationObj then
+        local ok, remaining = pcall(durationObj.GetRemainingDuration, durationObj)
+        if ok then return remaining end
+    end
+    return 0
 end
 
--- Get cooldown remaining as percentage (can accept curve for color)
+-- Get cooldown remaining as percentage via Duration Object
+-- Note: C_Spell.GetSpellCooldownRemainingPercent was REMOVED in Midnight PTR 1
+-- Use Duration Object's EvaluateRemainingDuration with a curve instead
 function SpellAPI:GetCooldownRemainingPercent(spellID, curve)
     if not spellID then return 0 end
-    return C_Spell.GetSpellCooldownRemainingPercent(spellID, curve)
+    local durationObj = self:GetCooldownDuration(spellID)
+    if durationObj then
+        local scaleCurve = curve or (CurveConstants and CurveConstants.ScaleTo100)
+        if scaleCurve then
+            local ok, result = pcall(durationObj.EvaluateRemainingDuration, durationObj, scaleCurve)
+            if ok then return result end
+        end
+    end
+    return 0
 end
 
 -- ============================================================================

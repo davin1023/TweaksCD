@@ -85,6 +85,14 @@ Modules\Cooldowns\MultiTrackerUI.lua
 Modules\Cooldowns\CDMScraper.lua
 
 # ============================================================================
+# Modules - Timer Bars
+# ============================================================================
+Modules\Bars\BarsData.lua
+Modules\Bars\BarsFrames.lua
+Modules\Bars\BarsUI.lua
+Modules\Bars\Bars.lua
+
+# ============================================================================
 # Modules - Profiles UI
 # ============================================================================
 Modules\Profiles\ProfilesUI.lua

@@ -22,6 +22,7 @@ TUICD.IS_MIDNIGHT = true
 TUICD.MODULE_IDS = {
     COOLDOWNS = "cooldowns",
     LAYOUT = "layout",
+    BARS = "bars",
     PERSONAL_RESOURCES = "personalResources",
 }
 
@@ -29,6 +30,7 @@ TUICD.MODULE_IDS = {
 TUICD.MODULE_NAMES = {
     [TUICD.MODULE_IDS.COOLDOWNS] = "Cooldown Trackers",
     [TUICD.MODULE_IDS.LAYOUT] = "Layout",
+    [TUICD.MODULE_IDS.BARS] = "Timer Bars",
     [TUICD.MODULE_IDS.PERSONAL_RESOURCES] = "Personal Resources",
 }
 
@@ -36,6 +38,7 @@ TUICD.MODULE_NAMES = {
 TUICD.MODULE_LOAD_ORDER = {
     TUICD.MODULE_IDS.LAYOUT,
     TUICD.MODULE_IDS.COOLDOWNS,
+    TUICD.MODULE_IDS.BARS,
     TUICD.MODULE_IDS.PERSONAL_RESOURCES,
 }
 
@@ -58,6 +61,9 @@ TUICD.EVENTS = {
     RESTRICTION_CHANGED = "TUICD_RestrictionChanged",
     SECRETS_ACTIVE = "TUICD_SecretsActive",
     SECRETS_INACTIVE = "TUICD_SecretsInactive",
+    -- Bars module events
+    BARS_SETTINGS_CHANGED = "TUICD_BarsSettingsChanged",
+    BARS_DATA_UPDATED = "TUICD_BarsDataUpdated",
 }
 
 -- Default colors

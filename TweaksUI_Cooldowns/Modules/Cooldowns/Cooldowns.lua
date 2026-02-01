@@ -2368,6 +2368,16 @@ end
 
 -- Public function to refresh a tracker's layout (called from Highlights modules)
 function Cooldowns.RefreshTrackerLayout(trackerKey)
+    -- Multi-tracker keys (multiCustom1, multiCustom2, etc.) → delegate to MultiTrackerFrames
+    if trackerKey and type(trackerKey) == "string" and trackerKey:match("^multiCustom%d+") then
+        if TUICD.MultiTrackerFrames and TUICD.MultiTrackerFrames.LayoutTracker then
+            C_Timer.After(0, function()
+                pcall(TUICD.MultiTrackerFrames.LayoutTracker, TUICD.MultiTrackerFrames, trackerKey)
+            end)
+        end
+        return
+    end
+    
     if trackerKey == "custom" or trackerKey == "customTrackers" then
         -- For custom trackers, refresh via LayoutCustomTrackerIcons
         local customTrackerFrame = _G["TweaksUI_CustomTrackerFrame"]
@@ -2378,6 +2388,13 @@ function Cooldowns.RefreshTrackerLayout(trackerKey)
                 end
             end)
         end
+    elseif trackerKey and trackerKey:match("^multiCustom") then
+        -- For multi-trackers, delegate to MultiTrackerFrames
+        C_Timer.After(0, function()
+            if TUICD.MultiTrackerFrames then
+                pcall(TUICD.MultiTrackerFrames.LayoutTracker, TUICD.MultiTrackerFrames, trackerKey)
+            end
+        end)
     elseif trackerKey == "buffs" then
         local viewer = _G["BuffIconCooldownViewer"]
         if viewer and viewer:IsShown() then
@@ -5384,6 +5401,9 @@ function Cooldowns:ToggleSettingsPanel(parent)
         if TUICD.MultiTrackerUI and TUICD.MultiTrackerUI.HideAllPanels then
             TUICD.MultiTrackerUI:HideAllPanels()
         end
+        if TUICD.Bars and TUICD.Bars.HideAllPanels then
+            TUICD.Bars:HideAllPanels()
+        end
         
         if parent then
             cooldownHub:ClearAllPoints()
@@ -5426,6 +5446,10 @@ function Cooldowns:TogglePanel(trackerKey)
     -- Also hide MultiTracker panels
     if TUICD.MultiTrackerUI and TUICD.MultiTrackerUI.HideAllPanels then
         TUICD.MultiTrackerUI:HideAllPanels()
+    end
+    -- Also hide Bars panels
+    if TUICD.Bars and TUICD.Bars.HideAllPanels then
+        TUICD.Bars:HideAllPanels()
     end
     
     if settingsPanels[trackerKey] then

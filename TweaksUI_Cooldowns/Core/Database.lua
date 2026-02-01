@@ -254,6 +254,10 @@ function DB:IsModuleEnabled(moduleId)
     if not self.charDb.modules then
         self.charDb.modules = {}
     end
+    -- New modules default to enabled if not explicitly set
+    if self.charDb.modules[moduleId] == nil then
+        return true
+    end
     return self.charDb.modules[moduleId] == true
 end
 
