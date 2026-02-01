@@ -92,11 +92,16 @@ local TRACKER_DEFAULTS = {
     showSolo = true,
     showInParty = true,
     showInRaid = true,
+    showInInstance = true,
     showInArena = true,
     showInBattleground = true,
     showInDungeon = true,
     showInScenario = true,
     showInDelve = true,
+    showHasTarget = true,
+    showNoTarget = true,
+    showMounted = true,
+    showNotMounted = true,
     -- Position
     point = "CENTER",
     x = 0,
@@ -993,111 +998,232 @@ function MultiTracker:ResetAllTrackers()
 end
 
 -- ============================================================================
--- LEGACY CUSTOM ENTRIES MIGRATION (pre-3.0.4 → multiCustom1)
+-- LEGACY CUSTOM ENTRIES MIGRATION (pre-3.0.4 → "Old Custom Tracker")
 -- ============================================================================
 
--- Migrates entries from the old single custom tracker system
--- (TweaksUI_Cooldowns_CharDB.cooldowns.customEntries) into multiCustom1
+-- Creates a dedicated "legacyCustom" tracker in MultiTracker from the old
+-- single custom tracker system, so users can see, manage, and delete entries.
+-- Also disables the old customTrackers frame so there's no double-rendering.
+local LEGACY_TRACKER_KEY = "legacyCustom"
+
+-- Helper: aggressively kill the old custom tracker (DB + in-memory + frame)
+-- Must handle race conditions with Cooldowns.lua which does:
+--   C_Timer.After(1.0, RebuildCustomTrackerIcons) during its init
+-- So we kill immediately (if Cooldowns already loaded) AND on a 2-second delay
+-- (to catch the deferred rebuild).
+local function KillOldCustomTracker()
+    local charDb = TweaksUI_Cooldowns_CharDB
+    if not charDb then return end
+
+    -- Wipe old entry data from both DB paths
+    if charDb.cooldowns and charDb.cooldowns.customEntries then
+        wipe(charDb.cooldowns.customEntries)
+    end
+    if charDb.settings and charDb.settings.cooldowns and charDb.settings.cooldowns.customEntries then
+        wipe(charDb.settings.cooldowns.customEntries)
+    end
+
+    -- Disable in saved variables
+    if charDb.settings and charDb.settings.cooldowns and charDb.settings.cooldowns.customTrackers then
+        charDb.settings.cooldowns.customTrackers.enabled = false
+    end
+
+    -- The actual kill: poke in-memory settings + hide frame + rebuild
+    local function DoKill()
+        -- Disable in the Cooldowns module's in-memory settings cache
+        if TUICD.Cooldowns and TUICD.Cooldowns.GetSettings then
+            local memSettings = TUICD.Cooldowns:GetSettings()
+            if memSettings and memSettings.customTrackers then
+                memSettings.customTrackers.enabled = false
+            end
+        end
+
+        -- Call the old rebuild which sees enabled=false → hides all icons
+        if TUICD.Cooldowns and TUICD.Cooldowns.RebuildCustomTrackerIcons then
+            pcall(TUICD.Cooldowns.RebuildCustomTrackerIcons)
+        end
+
+        -- Belt-and-suspenders: hide old frame + all children directly
+        local oldFrame = _G["TweaksUI_CustomTrackerFrame"]
+        if oldFrame then
+            oldFrame:Hide()
+            for _, child in pairs({ oldFrame:GetChildren() }) do
+                child:Hide()
+            end
+        end
+    end
+
+    -- Kill now (if Cooldowns.lua is already loaded — may fail if Database not ready yet)
+    pcall(DoKill)
+
+    -- Kill again after 2 seconds (after Cooldowns.lua's 1-second deferred rebuild)
+    C_Timer.After(2.0, DoKill)
+end
+
 local function MigrateLegacyCustomEntries()
     local charDb = TweaksUI_Cooldowns_CharDB
     if not charDb then return end
 
     -- Already migrated?
-    if charDb._legacyCustomEntriesMigrated then return end
+    if charDb._legacyCustomToMultiTracker then
+        -- Even if already migrated, kill lingering old data/frame every login
+        -- (covers users who ran earlier migration that didn't wipe properly)
+        KillOldCustomTracker()
+        return
+    end
 
     -- Source: old custom entries keyed by specID
+    -- Check both storage paths (2.x direct and post-3.0 format)
     local oldEntries = charDb.cooldowns
                    and charDb.cooldowns.customEntries
     if not oldEntries then
-        -- Also check settings.cooldowns path (post-3.0 format migration put them there)
         oldEntries = charDb.settings
                  and charDb.settings.cooldowns
                  and charDb.settings.cooldowns.customEntries
     end
 
-    if not oldEntries or not next(oldEntries) then
-        -- Nothing to migrate
-        charDb._legacyCustomEntriesMigrated = true
+    -- Count actual entries across all specs
+    local hasAnyEntries = false
+    if oldEntries then
+        for specID, specEntries in pairs(oldEntries) do
+            if type(specID) == "number" and type(specEntries) == "table" and #specEntries > 0 then
+                hasAnyEntries = true
+                break
+            end
+        end
+    end
+
+    if not hasAnyEntries then
+        -- No entries to migrate — stamp and move on
+        charDb._legacyCustomToMultiTracker = true
         return
     end
 
-    -- Target: multiCustom1 (the default "Custom Tracker")
-    local targetKey = "multiCustom1"
+    -- ================================================================
+    -- Create the legacy tracker in MultiTracker registry
+    -- ================================================================
     local db = GetMultiTrackerDB()
 
-    -- Make sure target tracker exists in registry
-    local targetExists = false
+    -- Guard against duplicate creation
+    local alreadyExists = false
     for _, tracker in ipairs(db.registry) do
-        if tracker.key == targetKey then
-            targetExists = true
+        if tracker.key == LEGACY_TRACKER_KEY then
+            alreadyExists = true
             break
         end
     end
 
-    if not targetExists then
-        -- CreateDefaultTrackers should have made it, but just in case
-        TUICD:PrintDebug("Migration target " .. targetKey .. " not found, skipping")
-        return
+    if not alreadyExists then
+        -- Registry entry
+        table.insert(db.registry, {
+            key       = LEGACY_TRACKER_KEY,
+            name      = "Old Custom Tracker",
+            createdAt = time(),
+            isDefault = false,
+            isLegacy  = true,  -- UI can show a hint if desired
+        })
+
+        -- Settings: start from defaults
+        db.settings[LEGACY_TRACKER_KEY] = DeepCopy(TRACKER_DEFAULTS)
+
+        -- Copy visual settings from the old customTrackers tracker so the
+        -- new frame matches the user's previous appearance
+        local oldSettings = charDb.settings
+                        and charDb.settings.cooldowns
+                        and charDb.settings.cooldowns.customTrackers
+        if not oldSettings and charDb.trackers then
+            oldSettings = charDb.trackers.customTrackers  -- TUI:CD 2.x path
+        end
+
+        if oldSettings then
+            local keysToMigrate = {
+                "iconSize", "iconWidth", "iconHeight", "aspectRatio",
+                "columns", "rows", "spacingH", "spacingV",
+                "growDirection", "growSecondary", "alignment", "reverseOrder",
+                "customLayout",
+                "zoom", "borderAlpha", "iconOpacity", "iconOpacityCombat",
+                "iconEdgeStyle", "useMasque",
+                "cooldownTextScale", "cooldownTextOffsetX", "cooldownTextOffsetY",
+                "cooldownTextColorR", "cooldownTextColorG", "cooldownTextColorB",
+                "cooldownTextFont",
+                "countTextScale", "countTextOffsetX", "countTextOffsetY",
+                "countTextColorR", "countTextColorG", "countTextColorB",
+                "countTextFont",
+                "showCountdownText", "hideSweep", "showTooltip", "clickthrough",
+                "visibilityEnabled", "showInCombat", "showOutOfCombat",
+                "showSolo", "showInParty", "showInRaid",
+                "showInInstance", "showInArena", "showInBattleground",
+                "showHasTarget", "showNoTarget", "showMounted", "showNotMounted",
+                -- Position
+                "point", "x", "y",
+            }
+            for _, key in ipairs(keysToMigrate) do
+                if oldSettings[key] ~= nil then
+                    db.settings[LEGACY_TRACKER_KEY][key] = oldSettings[key]
+                end
+            end
+        end
+
+        -- Enabled by default so users see it right away
+        db.settings[LEGACY_TRACKER_KEY].enabled = true
+
+        -- Entries table
+        db.entries[LEGACY_TRACKER_KEY] = {}
     end
 
-    db.entries[targetKey] = db.entries[targetKey] or {}
+    -- ================================================================
+    -- Copy entries into the legacy tracker
+    -- ================================================================
+    db.entries[LEGACY_TRACKER_KEY] = db.entries[LEGACY_TRACKER_KEY] or {}
 
     local totalMigrated = 0
-    local totalSkipped = 0
 
     for specID, specEntries in pairs(oldEntries) do
         if type(specID) == "number" and type(specEntries) == "table" and #specEntries > 0 then
-            db.entries[targetKey][specID] = db.entries[targetKey][specID] or {}
-            local targetList = db.entries[targetKey][specID]
+            db.entries[LEGACY_TRACKER_KEY][specID] = db.entries[LEGACY_TRACKER_KEY][specID] or {}
+            local targetList = db.entries[LEGACY_TRACKER_KEY][specID]
 
-            -- Build a quick lookup of what's already in the target
+            -- Dedup lookup
             local existingLookup = {}
             for _, entry in ipairs(targetList) do
-                local key = (entry.type or "") .. "_" .. (entry.id or "")
-                existingLookup[key] = true
+                existingLookup[(entry.type or "") .. "_" .. (entry.id or "")] = true
             end
 
             for _, entry in ipairs(specEntries) do
                 if entry.type and entry.id then
-                    local key = entry.type .. "_" .. entry.id
-                    if not existingLookup[key] then
+                    local lookupKey = entry.type .. "_" .. entry.id
+                    if not existingLookup[lookupKey] then
                         table.insert(targetList, {
                             type    = entry.type,
                             id      = entry.id,
-                            enabled = (entry.enabled ~= false),  -- default true
+                            enabled = (entry.enabled ~= false),
                             source  = "legacy_migration",
                         })
-                        existingLookup[key] = true
+                        existingLookup[lookupKey] = true
                         totalMigrated = totalMigrated + 1
-                    else
-                        totalSkipped = totalSkipped + 1
                     end
                 end
             end
         end
     end
 
-    -- Mark migration complete regardless of count
-    charDb._legacyCustomEntriesMigrated = true
+    -- ================================================================
+    -- Kill the OLD custom tracker so it doesn't double-render
+    -- ================================================================
+    KillOldCustomTracker()
+
+    -- ================================================================
+    -- Done
+    -- ================================================================
+    charDb._legacyCustomToMultiTracker = true
 
     if totalMigrated > 0 then
-        -- Enable the tracker if it was disabled, since user clearly had entries
-        local settings = db.settings[targetKey]
-        if settings and not settings.enabled then
-            settings.enabled = true
-        end
-
         TUICD:Print(string.format(
-            "Migrated |cffffcc00%d|r custom tracker %s to |cff00ccff%s|r.",
+            "Migrated |cffffcc00%d|r custom tracker %s to |cff00ccffOld Custom Tracker|r.",
             totalMigrated,
-            totalMigrated == 1 and "entry" or "entries",
-            "Custom Tracker"
+            totalMigrated == 1 and "entry" or "entries"
         ))
-        if totalSkipped > 0 then
-            TUICD:PrintDebug(totalSkipped .. " duplicate(s) skipped during migration.")
-        end
-    else
-        TUICD:PrintDebug("Legacy custom entries migration: nothing new to migrate.")
+        TUICD:Print("Use |cff00ccff/tuicd|r → Multi-Tracker to manage your old entries.")
     end
 end
 

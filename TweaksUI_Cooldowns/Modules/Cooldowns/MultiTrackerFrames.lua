@@ -733,18 +733,40 @@ local function LayoutTrackerIcons(trackerKey)
     local icons = trackerIcons[trackerKey]
     if not frame or not icons then return end
     
-    -- Collect visible icons
-    local visibleIcons = {}
+    -- Apply per-icon hidden state before layout (matching Cooldowns.lua pattern)
+    local CooldownHighlights = TUICD.CooldownHighlights
+    local allIcons = {}
     for _, iconFrame in pairs(icons) do
+        table.insert(allIcons, iconFrame)
+    end
+    
+    -- Sort by listIndex first so hidden check uses correct slot indices
+    table.sort(allIcons, function(a, b)
+        return (a.listIndex or 0) < (b.listIndex or 0)
+    end)
+    
+    -- Apply hidden state
+    for idx, iconFrame in ipairs(allIcons) do
+        local isHidden = CooldownHighlights and CooldownHighlights:IsIconHidden(trackerKey, idx)
+        if isHidden then
+            iconFrame:SetAlpha(0)
+            iconFrame._TUI_hiddenByPerIcon = true
+        else
+            if iconFrame._TUI_hiddenByPerIcon then
+                -- Was hidden, now unhidden — restore alpha
+                iconFrame:SetAlpha(1)
+            end
+            iconFrame._TUI_hiddenByPerIcon = false
+        end
+    end
+    
+    -- Collect visible icons (hidden icons at alpha=0 still show, so filter by IsShown)
+    local visibleIcons = {}
+    for _, iconFrame in ipairs(allIcons) do
         if iconFrame:IsShown() then
             table.insert(visibleIcons, iconFrame)
         end
     end
-    
-    -- Sort by listIndex
-    table.sort(visibleIcons, function(a, b)
-        return (a.listIndex or 0) < (b.listIndex or 0)
-    end)
     
     local iconCount = #visibleIcons
     if iconCount == 0 then
@@ -1061,46 +1083,53 @@ local function ShouldTrackerBeVisible(trackerKey)
         return false
     end
     
-    -- Check visibility rules
-    local useVisibility = MultiTracker:GetSetting(trackerKey, "useVisibility")
-    if not useVisibility then
-        return true  -- No rules = always visible
+    -- Force all visible mode bypasses all visibility conditions
+    if TUICD.forceAllVisible then
+        return true
     end
     
-    -- Combat check
-    local showInCombat = MultiTracker:GetSetting(trackerKey, "showInCombat")
-    local showOutCombat = MultiTracker:GetSetting(trackerKey, "showOutCombat")
+    -- Always show in Edit Mode for positioning
+    if EditModeManagerFrame and EditModeManagerFrame:IsShown() then
+        return true
+    end
+    
+    -- Check if visibility rules are enabled
+    local visibilityEnabled = MultiTracker:GetSetting(trackerKey, "visibilityEnabled")
+    if not visibilityEnabled then
+        return true  -- Visibility system disabled = always show
+    end
+    
+    -- Build current player state
     local inCombat = UnitAffectingCombat("player")
-    
-    if inCombat and not showInCombat then return false end
-    if not inCombat and not showOutCombat then return false end
-    
-    -- Group check
-    local showSolo = MultiTracker:GetSetting(trackerKey, "showSolo")
-    local showParty = MultiTracker:GetSetting(trackerKey, "showParty")
-    local showRaid = MultiTracker:GetSetting(trackerKey, "showRaid")
-    
     local inRaid = IsInRaid()
     local inGroup = IsInGroup()
-    
-    if inRaid and not showRaid then return false end
-    if inGroup and not inRaid and not showParty then return false end
-    if not inGroup and not showSolo then return false end
-    
-    -- Instance check
-    local showArena = MultiTracker:GetSetting(trackerKey, "showArena")
-    local showBG = MultiTracker:GetSetting(trackerKey, "showBattleground")
-    local showDungeon = MultiTracker:GetSetting(trackerKey, "showDungeon")
-    local showDelve = MultiTracker:GetSetting(trackerKey, "showDelve")
+    local isSolo = not inGroup
+    local hasTarget = UnitExists("target")
+    local isMounted = (TUICD.UnitAPI and TUICD.UnitAPI.IsMountedOrTravelForm)
+                      and TUICD.UnitAPI:IsMountedOrTravelForm() or IsMounted()
     
     local _, instanceType = IsInInstance()
+    local inInstance = (instanceType == "party" or instanceType == "raid")
+    local inArena = (instanceType == "arena")
+    local inBattleground = (instanceType == "pvp")
     
-    if instanceType == "arena" and not showArena then return false end
-    if instanceType == "pvp" and not showBG then return false end
-    if instanceType == "party" and not showDungeon then return false end
-    -- Delve detection (check for specific map type if available)
+    -- OR logic: if ANY checked condition matches current state, show the tracker
+    if inCombat and MultiTracker:GetSetting(trackerKey, "showInCombat") then return true end
+    if not inCombat and MultiTracker:GetSetting(trackerKey, "showOutOfCombat") then return true end
+    if isSolo and MultiTracker:GetSetting(trackerKey, "showSolo") then return true end
+    if inGroup and not inRaid and MultiTracker:GetSetting(trackerKey, "showInParty") then return true end
+    if inRaid and MultiTracker:GetSetting(trackerKey, "showInRaid") then return true end
+    if inInstance and MultiTracker:GetSetting(trackerKey, "showInInstance") then return true end
+    if inArena and MultiTracker:GetSetting(trackerKey, "showInArena") then return true end
+    if inBattleground and MultiTracker:GetSetting(trackerKey, "showInBattleground") then return true end
+    if instanceType == "party" and MultiTracker:GetSetting(trackerKey, "showInDungeon") then return true end
+    if hasTarget and MultiTracker:GetSetting(trackerKey, "showHasTarget") then return true end
+    if not hasTarget and MultiTracker:GetSetting(trackerKey, "showNoTarget") then return true end
+    if isMounted and MultiTracker:GetSetting(trackerKey, "showMounted") then return true end
+    if not isMounted and MultiTracker:GetSetting(trackerKey, "showNotMounted") then return true end
     
-    return true
+    -- No conditions matched = hide
+    return false
 end
 
 local function UpdateTrackerVisibility(trackerKey)
@@ -1126,6 +1155,42 @@ local function UpdateAllVisibility()
     for trackerKey, _ in pairs(trackerFrames) do
         pcall(UpdateTrackerVisibility, trackerKey)
     end
+end
+
+-- Visibility ticker: polls every 0.5s for state changes that don't have events
+-- (target changes, mount state) — matches the original Cooldowns.lua pattern
+local visibilityTicker = nil
+
+local function StartVisibilityTicker()
+    if visibilityTicker then return end
+    
+    -- Check if any multi-tracker has visibility enabled
+    local anyEnabled = false
+    for trackerKey, _ in pairs(trackerFrames) do
+        if MultiTracker:GetSetting(trackerKey, "visibilityEnabled") then
+            anyEnabled = true
+            break
+        end
+    end
+    
+    if not anyEnabled then return end
+    
+    visibilityTicker = C_Timer.NewTicker(0.5, function()
+        UpdateAllVisibility()
+    end)
+end
+
+local function StopVisibilityTicker()
+    if visibilityTicker then
+        visibilityTicker:Cancel()
+        visibilityTicker = nil
+    end
+end
+
+-- Restart the ticker when settings change (called from settings panel)
+function MultiTrackerFrames:RestartVisibilityTicker()
+    StopVisibilityTicker()
+    StartVisibilityTicker()
 end
 
 -- ============================================================================
@@ -1616,6 +1681,8 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
     elseif event == "PLAYER_TARGET_CHANGED" then
         -- Update range states when target changes
         UpdateAllRangeStates()
+        -- Also update visibility (for "Has Target" / "No Target" conditions)
+        pcall(UpdateAllVisibility)
         
     elseif event == "SPELL_UPDATE_COOLDOWN" or event == "BAG_UPDATE_COOLDOWN" then
         -- Throttle cooldown updates (these events can fire rapidly)
@@ -1630,6 +1697,10 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
            or event == "PLAYER_ENTERING_WORLD" then
         -- Update visibility when combat/group/zone state changes
         pcall(UpdateAllVisibility)
+        -- Start/restart visibility ticker on world enter
+        if event == "PLAYER_ENTERING_WORLD" then
+            pcall(StartVisibilityTicker)
+        end
     end
 end)
 
