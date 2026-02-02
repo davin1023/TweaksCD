@@ -142,6 +142,20 @@ local function GetFillStyle(dir)
     return (dir == "LEFT" or dir == "DOWN") and "REVERSE" or "STANDARD"
 end
 
+-- Border helpers (barBorder is a table of 4 edge textures)
+local function ShowBorder(border)
+    if not border then return end
+    for _, tex in ipairs(border) do tex:Show() end
+end
+local function HideBorder(border)
+    if not border then return end
+    for _, tex in ipairs(border) do tex:Hide() end
+end
+local function SetBorderColor(border, r, g, b, a)
+    if not border then return end
+    for _, tex in ipairs(border) do tex:SetColorTexture(r, g, b, a) end
+end
+
 -- ============================================================================
 -- BAR FRAME CREATION
 -- ============================================================================
@@ -230,13 +244,34 @@ local function CreateBarFrame(barKey)
     bgColorTex:SetColorTexture(bgColor.r, bgColor.g, bgColor.b, bgColor.a or 0.8)
     bgBar.colorTex = bgColorTex
 
-    -- Bar border
-    local barBorder = frame:CreateTexture(frameName .. "_BarBorder", "BACKGROUND")
-    barBorder:SetPoint("TOPLEFT", bgBar, "TOPLEFT", -BAR_BORDER_SIZE, BAR_BORDER_SIZE)
-    barBorder:SetPoint("BOTTOMRIGHT", bgBar, "BOTTOMRIGHT", BAR_BORDER_SIZE, -BAR_BORDER_SIZE)
+    -- Bar border (4 edge textures so nothing black sits behind bgBar interior)
     local bc = config.borderColor or { r = 0, g = 0, b = 0, a = 1 }
-    barBorder:SetColorTexture(bc.r, bc.g, bc.b, bc.a)
-    frame.barBorder = barBorder
+
+    local borderTop = frame:CreateTexture(nil, "BACKGROUND")
+    borderTop:SetPoint("TOPLEFT", bgBar, "TOPLEFT", -BAR_BORDER_SIZE, BAR_BORDER_SIZE)
+    borderTop:SetPoint("TOPRIGHT", bgBar, "TOPRIGHT", BAR_BORDER_SIZE, BAR_BORDER_SIZE)
+    borderTop:SetHeight(BAR_BORDER_SIZE)
+    borderTop:SetColorTexture(bc.r, bc.g, bc.b, bc.a)
+
+    local borderBottom = frame:CreateTexture(nil, "BACKGROUND")
+    borderBottom:SetPoint("BOTTOMLEFT", bgBar, "BOTTOMLEFT", -BAR_BORDER_SIZE, -BAR_BORDER_SIZE)
+    borderBottom:SetPoint("BOTTOMRIGHT", bgBar, "BOTTOMRIGHT", BAR_BORDER_SIZE, -BAR_BORDER_SIZE)
+    borderBottom:SetHeight(BAR_BORDER_SIZE)
+    borderBottom:SetColorTexture(bc.r, bc.g, bc.b, bc.a)
+
+    local borderLeft = frame:CreateTexture(nil, "BACKGROUND")
+    borderLeft:SetPoint("TOPLEFT", bgBar, "TOPLEFT", -BAR_BORDER_SIZE, 0)
+    borderLeft:SetPoint("BOTTOMLEFT", bgBar, "BOTTOMLEFT", -BAR_BORDER_SIZE, 0)
+    borderLeft:SetWidth(BAR_BORDER_SIZE)
+    borderLeft:SetColorTexture(bc.r, bc.g, bc.b, bc.a)
+
+    local borderRight = frame:CreateTexture(nil, "BACKGROUND")
+    borderRight:SetPoint("TOPRIGHT", bgBar, "TOPRIGHT", BAR_BORDER_SIZE, 0)
+    borderRight:SetPoint("BOTTOMRIGHT", bgBar, "BOTTOMRIGHT", BAR_BORDER_SIZE, 0)
+    borderRight:SetWidth(BAR_BORDER_SIZE)
+    borderRight:SetColorTexture(bc.r, bc.g, bc.b, bc.a)
+
+    frame.barBorder = { borderTop, borderBottom, borderLeft, borderRight }
 
     -- Fill bar
     local bar = CreateFrame("StatusBar", frameName .. "_Fill", bgBar)
@@ -453,7 +488,7 @@ function BarsFrames:ApplyConfig(barKey)
     frame.bar:SetStatusBarColor(bc.r, bc.g, bc.b, bc.a)
 
     local bdc = config.borderColor or { r = 0, g = 0, b = 0, a = 1 }
-    frame.barBorder:SetColorTexture(bdc.r, bdc.g, bdc.b, bdc.a)
+    SetBorderColor(frame.barBorder, bdc.r, bdc.g, bdc.b, bdc.a)
 
     -- ========================================
     -- Text anchoring (direction-aware + user offsets)
@@ -609,7 +644,7 @@ textUpdateFrame:SetScript("OnUpdate", function(self, elapsed)
                                 state.durationObj = nil
                                 if config.showWhenReady then
                                     frame.bgBar:Hide()
-                                    if frame.barBorder then frame.barBorder:Hide() end
+                                    HideBorder(frame.barBorder)
                                     frame.bar:SetMinMaxValues(0, 1)
                                     frame.bar:SetValue(0)
                                     frame.timeText:SetText("")
@@ -636,7 +671,7 @@ textUpdateFrame:SetScript("OnUpdate", function(self, elapsed)
                                 if dock then dock:OnBarHidden(barKey) end
                             else
                                 frame.bgBar:Hide()
-                                if frame.barBorder then frame.barBorder:Hide() end
+                                HideBorder(frame.barBorder)
                                 frame.bar:SetMinMaxValues(0, 1)
                                 frame.bar:SetValue(0)
                             end
@@ -700,7 +735,7 @@ function BarsFrames:UpdateBarDisplay(barKey)
         if frame.bgBar.colorTex then
             frame.bgBar.colorTex:SetColorTexture(bgc.r, bgc.g, bgc.b, bgc.a or 0.8)
         end
-        if frame.barBorder then frame.barBorder:Show() end
+        ShowBorder(frame.barBorder)
         frame.bar:SetMinMaxValues(0, 1)
         frame.bar:SetValue(0.65)
         frame.timeText:SetText("12s")
@@ -743,7 +778,7 @@ function BarsFrames:UpdateBarDisplay(barKey)
         if frame.bgBar.colorTex then
             frame.bgBar.colorTex:SetColorTexture(bgc.r, bgc.g, bgc.b, bgc.a or 0.8)
         end
-        if frame.barBorder then frame.barBorder:Show() end
+        ShowBorder(frame.barBorder)
 
         local isDrain = (config.fillMode ~= "fill")
 
@@ -805,7 +840,7 @@ function BarsFrames:UpdateBarDisplay(barKey)
     else
         -- Ready state (off cooldown): empty bar, no background
         frame.bgBar:Hide()
-        if frame.barBorder then frame.barBorder:Hide() end
+        HideBorder(frame.barBorder)
         frame.bar:SetMinMaxValues(0, 1)
         frame.bar:SetValue(0)
         frame.timeText:SetText("")
