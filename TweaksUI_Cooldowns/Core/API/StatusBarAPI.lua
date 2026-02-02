@@ -36,8 +36,8 @@ StatusBarAPI.FILL_STYLE = {
 -- ============================================================================
 
 StatusBarAPI.TIMER_DIRECTION = {
-    ELAPSED = nil,  -- Default - bar fills as time passes
-    REMAINING = Enum.StatusBarTimerDirection and Enum.StatusBarTimerDirection.Remaining or nil,
+    ELAPSED = Enum.StatusBarTimerDirection and Enum.StatusBarTimerDirection.ElapsedTime or nil,
+    REMAINING = Enum.StatusBarTimerDirection and (Enum.StatusBarTimerDirection.RemainingTime or Enum.StatusBarTimerDirection.Remaining) or nil,
 }
 
 -- ============================================================================

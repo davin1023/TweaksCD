@@ -58,6 +58,12 @@ function Bars:OnEnable()
             BarsFrames:OnSpellAdded(barKey)
         elseif action == "removed" then
             BarsFrames:OnSpellRemoved(barKey)
+        elseif action == "dock" or action == "dock_override" then
+            -- Dock settings changed: refresh all bars (override may affect visuals)
+            for id in pairs(BarsFrames:GetAllBars()) do
+                BarsFrames:ApplyConfig(id)
+                BarsFrames:UpdateBarDisplay(id)
+            end
         end
         BarsUI:Refresh()
     end)
@@ -66,31 +72,17 @@ function Bars:OnEnable()
     BarsFrames:CreateAllBars()
 
     -- ====================================================================
-    -- UNIFIED TICKER: detection + display in one pass, 5x per second
+    -- EVENT-DRIVEN: No tickers. Data updates are triggered by Blizzard
+    -- events (SPELL_UPDATE_COOLDOWN, SPELL_UPDATE_CHARGES, etc.) in
+    -- BarsData, which fires callbacks to BarsFrames. Text countdown is
+    -- handled by a demand-driven OnUpdate that only runs while bars are
+    -- actively on cooldown.
     -- ====================================================================
-    self.unifiedTicker = C_Timer.NewTicker(0.2, function()
-        local spells = BarsData:GetTrackedSpells()
-        for barKey, config in pairs(spells) do
-            if config.enabled then
-                BarsData:UpdateCooldownState(barKey)
-                BarsFrames:UpdateBarDisplay(barKey)
-            end
-        end
-    end)
 
-    -- Also start text ticker (updates time text at 10hz)
-    BarsFrames:StartTextTicker()
-
-    -- Initial state + display update (delayed for API readiness)
+    -- Initial state scan (delayed for API readiness)
     C_Timer.After(0.5, function()
-        local spells = BarsData:GetTrackedSpells()
-        for barKey, config in pairs(spells) do
-            if config.enabled then
-                BarsData:UpdateCooldownState(barKey)
-                BarsFrames:UpdateBarDisplay(barKey)
-            end
-        end
-        TUICD:Print("Bars active: " .. BarsData:GetSpellCount() .. " spells tracked, ticker running.")
+        BarsData:UpdateAll()
+        TUICD:Print("Bars active: " .. BarsData:GetSpellCount() .. " spells tracked.")
     end)
 
     -- Register with Layout Mode
@@ -108,11 +100,7 @@ function Bars:OnEnable()
 end
 
 function Bars:OnDisable()
-    if self.unifiedTicker then
-        self.unifiedTicker:Cancel()
-        self.unifiedTicker = nil
-    end
-    BarsFrames:StopTextTicker()
+    BarsFrames:StopTextUpdater()
     BarsFrames:DestroyAllBars()
     BarsData:UnregisterEvents()
     BarsData:UnregisterUpdateCallback("frames")
