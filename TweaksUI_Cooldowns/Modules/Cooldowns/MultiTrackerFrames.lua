@@ -40,6 +40,36 @@ local updateTicker = nil
 local enabled = false
 
 -- ============================================================================
+-- ICON STATE MODEL (Phase 1)
+-- ============================================================================
+
+local ICON_STATE = {
+    READY        = "ready",      -- Off cooldown, usable
+    ON_COOLDOWN  = "cooldown",   -- Active cooldown running (no charges)
+    ON_CHARGES_CD = "charges",   -- Has charges, charge cooldown running
+    PROC_ACTIVE  = "proc",       -- Spell proc is active (glow)
+    UNUSABLE     = "unusable",   -- Off cooldown but not usable (resources, etc.)
+}
+
+-- Map spellIDs to their icon frames for O(1) targeted updates
+-- [spellID] = { iconFrame1, iconFrame2, ... }
+local spellToIcons = {}
+
+-- Track active procs globally so we can reapply after rebuilds
+-- [spellID] = true/false
+local activeProcs = {}
+
+-- ============================================================================
+-- PROC GLOW STYLES (Phase 3)
+-- ============================================================================
+
+local GLOW_STYLE = {
+    BLIZZARD = "blizzard",   -- Yellow ants (ActionButton_ShowOverlayGlow)
+    PIXEL    = "pixel",      -- Colored border pulse
+    SHINE    = "shine",      -- Bright flash fade
+}
+
+-- ============================================================================
 -- UTILITY FUNCTIONS
 -- ============================================================================
 
@@ -47,6 +77,18 @@ local function dprint(msg)
     if TUICD.debugMode then
         print("|cff00ff00[TUI:CD MultiFrames]|r " .. msg)
     end
+end
+
+-- Safe wrapper: GetSpellDisplayCount returns strings ("2", "1", "") not numbers.
+-- Converts to number, returns 0 if empty/nil/non-numeric.
+local function SafeGetDisplayCount(spellID)
+    if not spellID or not C_Spell.GetSpellDisplayCount then return 0 end
+    local ok, result = pcall(C_Spell.GetSpellDisplayCount, spellID)
+    if ok and result then
+        local num = tonumber(result)
+        if num then return num end
+    end
+    return 0
 end
 
 -- Apply edge style with proper aspect ratio cropping (zoom into texture, not stretch)
@@ -248,6 +290,10 @@ end
 -- ICON CREATION
 -- ============================================================================
 
+-- Forward declarations (defined in COOLDOWN UPDATES section below)
+local UpdateIconChargeState
+local UpdateIconState
+
 local function CreateTrackerIcon(trackerKey, entry, parent)
     local displayName, displayTexture, trackingID = GetEntryDisplayInfo(entry)
     
@@ -399,6 +445,106 @@ local function CreateTrackerIcon(trackerKey, entry, parent)
     frame.trackID = trackID
     frame.trackerKey = trackerKey
     
+    -- ============================================================
+    -- STATE ENGINE FIELDS (Phase 1)
+    -- ============================================================
+    frame._state = ICON_STATE.READY
+    frame._prevState = nil
+    frame._spellID = (trackType == "spell") and trackID or nil
+    frame._chargeInfo = { current = 0, max = 0 }
+    frame._isChargeSpell = false
+    frame._procActive = false
+    frame._isOnCooldown = false
+    
+    -- Detect charge spells — IMPORTANT: GetSpellCharges returns non-nil even for
+    -- single-charge spells in Midnight (Metamorphosis, Sigils, etc.), so it's NOT
+    -- sufficient alone. We require displayCount >= 1 to confirm multi-charge status.
+    if frame._spellID then
+        local displayCount = SafeGetDisplayCount(frame._spellID)
+        
+        -- Primary: displayCount > 1 means multiple charges available (reliable at load)
+        if displayCount > 1 then
+            frame._isChargeSpell = true
+        end
+        
+        -- Secondary: GetSpellCharges non-nil + displayCount >= 1 catches the case
+        -- where one charge is spent (displayCount = 1) at reload time
+        if not frame._isChargeSpell and displayCount >= 1 and C_Spell.GetSpellCharges then
+            pcall(function()
+                local info = C_Spell.GetSpellCharges(frame._spellID)
+                if info then frame._isChargeSpell = true end
+            end)
+        end
+        
+        if frame._isChargeSpell then
+            frame._chargeInfo = { current = displayCount, max = 2 }
+        end
+    end
+    
+    -- ============================================================
+    -- CHARGE DISPLAY (Phase 2)
+    -- ============================================================
+    -- Separate charge count display (bottom-right, action bar style)
+    -- This is distinct from the existing .count which handles item stacks
+    local chargeCountColorR = MultiTracker:GetSetting(trackerKey, "chargeCountColorR") or 1.0
+    local chargeCountColorG = MultiTracker:GetSetting(trackerKey, "chargeCountColorG") or 1.0
+    local chargeCountColorB = MultiTracker:GetSetting(trackerKey, "chargeCountColorB") or 1.0
+    local chargeCountFontSize = MultiTracker:GetSetting(trackerKey, "chargeCountFontSize") or 12
+    
+    local chargeCount = frame:CreateFontString(nil, "OVERLAY")
+    chargeCount:SetFont(STANDARD_TEXT_FONT, chargeCountFontSize, "OUTLINE")
+    chargeCount:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -1, 1)
+    chargeCount:SetJustifyH("RIGHT")
+    chargeCount:SetTextColor(chargeCountColorR, chargeCountColorG, chargeCountColorB, 1)
+    chargeCount:SetShadowOffset(1, -1)
+    chargeCount:SetShadowColor(0, 0, 0, 1)
+    chargeCount:SetDrawLayer("OVERLAY", 7)
+    chargeCount:Hide()
+    frame.chargeCount = chargeCount
+    
+    -- Charge cooldown frame (separate from main cooldown, for per-charge recharge)
+    local chargeCooldown = CreateFrame("Cooldown", nil, frame, "CooldownFrameTemplate")
+    chargeCooldown:SetAllPoints(frame)
+    chargeCooldown:SetDrawSwipe(true)
+    chargeCooldown:SetDrawEdge(false)
+    chargeCooldown:SetSwipeColor(0, 0, 0, 0.5)
+    chargeCooldown:SetHideCountdownNumbers(true)  -- Main CD shows countdown
+    chargeCooldown:SetFrameLevel(frame:GetFrameLevel() + 1)
+    chargeCooldown:EnableMouse(false)
+    frame.chargeCooldown = chargeCooldown
+    
+    -- ============================================================
+    -- OnCooldownDone CALLBACKS (Phase 1)
+    -- ============================================================
+    cd:SetScript("OnCooldownDone", function(self)
+        local iconFrame = self:GetParent()
+        if not iconFrame or not iconFrame._state then return end
+        
+        -- If this is a charge spell, refresh charge state instead of going READY
+        if iconFrame._isChargeSpell then
+            UpdateIconChargeState(iconFrame)
+        else
+            -- Simple cooldown finished — transition to ready
+            iconFrame._isOnCooldown = false
+            UpdateIconState(iconFrame, ICON_STATE.READY)
+        end
+    end)
+    
+    chargeCooldown:SetScript("OnCooldownDone", function(self)
+        local iconFrame = self:GetParent()
+        if not iconFrame or not iconFrame._state then return end
+        -- Charge recharge finished — refresh charge state
+        UpdateIconChargeState(iconFrame)
+    end)
+    
+    -- Register in spellToIcons lookup for targeted event handling
+    if frame._spellID then
+        if not spellToIcons[frame._spellID] then
+            spellToIcons[frame._spellID] = {}
+        end
+        table.insert(spellToIcons[frame._spellID], frame)
+    end
+    
     -- Enable mouse for tooltips (unless clickthrough is enabled)
     local clickthrough = MultiTracker:GetSetting(trackerKey, "clickthrough") or false
     frame:EnableMouse(not clickthrough)
@@ -456,7 +602,361 @@ local function CreateTrackerIcon(trackerKey, entry, parent)
 end
 
 -- ============================================================================
--- COOLDOWN UPDATES
+-- COOLDOWN UPDATES (State Engine + Charges + Proc Glows)
+-- ============================================================================
+
+-- ============================================================================
+-- PROC GLOW: Show / Hide (Phase 3)
+-- ============================================================================
+
+local function ShowProcGlow(iconFrame)
+    if not iconFrame then return end
+    local trackerKey = iconFrame.trackerKey
+    
+    -- Check if proc glow is enabled
+    local showProcGlow = MultiTracker:GetSetting(trackerKey, "showProcGlow")
+    if showProcGlow == false then return end
+    
+    local glowStyle = MultiTracker:GetSetting(trackerKey, "procGlowStyle") or GLOW_STYLE.BLIZZARD
+    
+    -- TODO: Per-icon overrides would go here in Phase 5
+    
+    if glowStyle == GLOW_STYLE.PIXEL then
+        -- Pixel glow: colored border pulse
+        local r = MultiTracker:GetSetting(trackerKey, "procGlowColorR") or 1.0
+        local g = MultiTracker:GetSetting(trackerKey, "procGlowColorG") or 0.82
+        local b = MultiTracker:GetSetting(trackerKey, "procGlowColorB") or 0.0
+        
+        -- Create pixel glow border if it doesn't exist
+        if not iconFrame._pixelGlow then
+            local glow = CreateFrame("Frame", nil, iconFrame, "BackdropTemplate")
+            glow:SetPoint("TOPLEFT", -2, 2)
+            glow:SetPoint("BOTTOMRIGHT", 2, -2)
+            glow:SetBackdrop({
+                edgeFile = "Interface\\Buttons\\WHITE8x8",
+                edgeSize = 2,
+            })
+            glow:SetFrameLevel(iconFrame:GetFrameLevel() + 5)
+            iconFrame._pixelGlow = glow
+            
+            -- Pulse animation
+            local ag = glow:CreateAnimationGroup()
+            ag:SetLooping("BOUNCE")
+            local alpha = ag:CreateAnimation("Alpha")
+            alpha:SetFromAlpha(1)
+            alpha:SetToAlpha(0.3)
+            alpha:SetDuration(0.6)
+            alpha:SetSmoothing("IN_OUT")
+            glow._pulseAG = ag
+        end
+        
+        iconFrame._pixelGlow:SetBackdropBorderColor(r, g, b, 1)
+        iconFrame._pixelGlow:Show()
+        iconFrame._pixelGlow._pulseAG:Play()
+        
+        -- Hide Blizzard glow if it was showing
+        pcall(function()
+            if ActionButton_HideOverlayGlow then
+                ActionButton_HideOverlayGlow(iconFrame)
+            end
+        end)
+        
+    elseif glowStyle == GLOW_STYLE.SHINE then
+        -- Shine glow: bright flash that fades
+        if not iconFrame._shineGlow then
+            local shine = iconFrame:CreateTexture(nil, "OVERLAY")
+            shine:SetAllPoints()
+            shine:SetColorTexture(1, 1, 1, 0.6)
+            shine:SetBlendMode("ADD")
+            shine:SetDrawLayer("OVERLAY", 6)
+            iconFrame._shineGlow = shine
+            
+            local ag = shine:CreateAnimationGroup()
+            ag:SetLooping("BOUNCE")
+            local alpha = ag:CreateAnimation("Alpha")
+            alpha:SetFromAlpha(0.6)
+            alpha:SetToAlpha(0.1)
+            alpha:SetDuration(0.8)
+            alpha:SetSmoothing("IN_OUT")
+            shine._pulseAG = ag
+        end
+        
+        iconFrame._shineGlow:Show()
+        iconFrame._shineGlow._pulseAG:Play()
+        
+        -- Hide other glow types
+        pcall(function()
+            if ActionButton_HideOverlayGlow then
+                ActionButton_HideOverlayGlow(iconFrame)
+            end
+        end)
+        if iconFrame._pixelGlow then iconFrame._pixelGlow:Hide() end
+        
+    else
+        -- Default: Blizzard yellow ants glow
+        pcall(function()
+            if ActionButton_ShowOverlayGlow then
+                ActionButton_ShowOverlayGlow(iconFrame)
+            end
+        end)
+        -- Hide custom glows
+        if iconFrame._pixelGlow then iconFrame._pixelGlow:Hide() end
+        if iconFrame._shineGlow then iconFrame._shineGlow:Hide() end
+    end
+    
+    iconFrame._glowShowing = true
+end
+
+local function HideProcGlow(iconFrame)
+    if not iconFrame or not iconFrame._glowShowing then return end
+    
+    -- Hide all glow types
+    pcall(function()
+        if ActionButton_HideOverlayGlow then
+            ActionButton_HideOverlayGlow(iconFrame)
+        end
+    end)
+    
+    if iconFrame._pixelGlow then
+        if iconFrame._pixelGlow._pulseAG then
+            iconFrame._pixelGlow._pulseAG:Stop()
+        end
+        iconFrame._pixelGlow:Hide()
+    end
+    
+    if iconFrame._shineGlow then
+        if iconFrame._shineGlow._pulseAG then
+            iconFrame._shineGlow._pulseAG:Stop()
+        end
+        iconFrame._shineGlow:Hide()
+    end
+    
+    iconFrame._glowShowing = false
+end
+
+-- ============================================================================
+-- PROC GLOW: State Management (Phase 3)
+-- ============================================================================
+
+-- Set proc state for a spellID — updates all icons tracking that spell
+local function SetProcState(spellID, active)
+    if not spellID then return end
+    
+    -- Track globally for reapply after rebuild
+    activeProcs[spellID] = active or nil
+    
+    local icons = spellToIcons[spellID]
+    if not icons then return end
+    
+    for _, iconFrame in ipairs(icons) do
+        iconFrame._procActive = active
+        
+        if active then
+            ShowProcGlow(iconFrame)
+            -- Proc active overrides cooldown desaturation
+            if iconFrame.icon and iconFrame.icon.SetDesaturated then
+                pcall(function() iconFrame.icon:SetDesaturated(false) end)
+            end
+        else
+            HideProcGlow(iconFrame)
+            -- Restore desaturation based on current cooldown state
+            if iconFrame._isOnCooldown and iconFrame.icon and iconFrame.icon.SetDesaturated then
+                pcall(function() iconFrame.icon:SetDesaturated(true) end)
+            end
+        end
+    end
+end
+
+-- Reapply proc states after icon rebuild (e.g., after RebuildTracker)
+local function ReapplyProcStates()
+    for spellID, active in pairs(activeProcs) do
+        if active then
+            local icons = spellToIcons[spellID]
+            if icons then
+                for _, iconFrame in ipairs(icons) do
+                    iconFrame._procActive = true
+                    ShowProcGlow(iconFrame)
+                    if iconFrame.icon and iconFrame.icon.SetDesaturated then
+                        pcall(function() iconFrame.icon:SetDesaturated(false) end)
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- Rebuild spellToIcons lookup from current trackerIcons
+local function RebuildSpellToIcons()
+    wipe(spellToIcons)
+    for trackerKey, icons in pairs(trackerIcons) do
+        for _, iconFrame in pairs(icons) do
+            if iconFrame._spellID then
+                if not spellToIcons[iconFrame._spellID] then
+                    spellToIcons[iconFrame._spellID] = {}
+                end
+                table.insert(spellToIcons[iconFrame._spellID], iconFrame)
+            end
+        end
+    end
+end
+
+-- ============================================================================
+-- VISUAL STATE ENGINE (Phase 4)
+-- ============================================================================
+
+-- Unified visual update — called only when state transitions
+local function ApplyIconVisuals(iconFrame)
+    if not iconFrame then return end
+    
+    local state = iconFrame._state
+    local trackerKey = iconFrame.trackerKey
+    
+    pcall(function()
+        -- Desaturation
+        if iconFrame.icon and iconFrame.icon.SetDesaturated then
+            if state == ICON_STATE.ON_COOLDOWN then
+                iconFrame.icon:SetDesaturated(true)
+            elseif state == ICON_STATE.ON_CHARGES_CD then
+                -- Charges: desaturate only if zero charges and setting enabled
+                local desatAtZero = MultiTracker:GetSetting(trackerKey, "desaturateAtZeroCharges")
+                if desatAtZero ~= false and iconFrame._chargeInfo.current == 0 then
+                    iconFrame.icon:SetDesaturated(true)
+                else
+                    iconFrame.icon:SetDesaturated(false)
+                end
+            elseif state == ICON_STATE.PROC_ACTIVE then
+                -- Procs always show saturated (ability is highlighted)
+                iconFrame.icon:SetDesaturated(false)
+            else
+                -- READY, UNUSABLE
+                iconFrame.icon:SetDesaturated(false)
+            end
+        end
+        
+        -- Proc glow
+        if iconFrame._procActive then
+            ShowProcGlow(iconFrame)
+        else
+            HideProcGlow(iconFrame)
+        end
+        
+        -- Charge count visibility
+        if iconFrame.chargeCount then
+            local showCharges = MultiTracker:GetSetting(trackerKey, "showChargeCount") ~= false
+            iconFrame.chargeCount:SetShown(showCharges and iconFrame._isChargeSpell)
+        end
+    end)
+end
+
+-- State transition with caching — only apply visuals when state actually changes
+UpdateIconState = function(iconFrame, newState)
+    if not iconFrame then return end
+    if iconFrame._state == newState then return end  -- No change, skip
+    
+    local oldState = iconFrame._state
+    iconFrame._prevState = oldState
+    iconFrame._state = newState
+    
+    -- Clean up previous state artifacts
+    if oldState == ICON_STATE.ON_COOLDOWN and newState == ICON_STATE.READY then
+        -- Cooldown finished — OnCooldownDone already handled the frame
+    end
+    
+    -- Apply visuals for new state
+    ApplyIconVisuals(iconFrame)
+end
+
+-- ============================================================================
+-- CHARGE STATE (Phase 2)
+-- ============================================================================
+
+UpdateIconChargeState = function(iconFrame)
+    local spellID = iconFrame._spellID
+    if not spellID then return end
+    
+    -- ================================================================
+    -- SECRET-SAFE DESIGN (Midnight):
+    -- GetSpellDisplayCount returns a SECRET STRING in combat.
+    -- We CANNOT compare, tonumber, or do arithmetic on secrets.
+    -- We CAN pass secrets directly to FontString:SetText().
+    -- We use issecretvalue() to gate all comparison logic.
+    -- ================================================================
+    
+    -- Get raw display count — may be a secret string in combat
+    local rawCount = nil
+    if C_Spell.GetSpellDisplayCount then
+        pcall(function()
+            rawCount = C_Spell.GetSpellDisplayCount(spellID)
+        end)
+    end
+    
+    -- Check if the returned value is secret (combat restriction)
+    local valueIsSecret = false
+    if rawCount ~= nil and issecretvalue then
+        pcall(function() valueIsSecret = issecretvalue(rawCount) end)
+    end
+    
+    -- DEBUG: Print charge state info (remove after verified working)
+    if TUICD and TUICD.debugMode then
+        local name = C_Spell.GetSpellName and C_Spell.GetSpellName(spellID) or tostring(spellID)
+        if not valueIsSecret then
+            dprint(string.format("ChargeState: %s raw=%s secret=%s state=%s",
+                tostring(name), tostring(rawCount), tostring(valueIsSecret), tostring(iconFrame._state)))
+        else
+            dprint(string.format("ChargeState: %s raw=<SECRET> secret=true state=%s",
+                tostring(name), tostring(iconFrame._state)))
+        end
+    end
+    
+    -- ================================================================
+    -- 1. BADGE TEXT: Pass raw value straight to FontString
+    --    FontString:SetText() accepts secret values in Midnight.
+    --    The text will display normally even though we can't read it back.
+    -- ================================================================
+    local showCharges = MultiTracker:GetSetting(iconFrame.trackerKey, "showChargeCount") ~= false
+    if iconFrame.chargeCount then
+        if showCharges then
+            if rawCount ~= nil then
+                -- Pass-through: secret or non-secret, SetText handles both
+                pcall(function()
+                    iconFrame.chargeCount:SetText(rawCount)
+                    iconFrame.chargeCount:Show()
+                end)
+            end
+            -- If rawCount is nil (API failed entirely), keep previous text/state
+        else
+            iconFrame.chargeCount:Hide()
+        end
+    end
+    
+    -- Hide old item-stack count for charge spells (avoid overlap)
+    if iconFrame.count then pcall(function() iconFrame.count:Hide() end) end
+    
+    -- ================================================================
+    -- 2. STATE MANAGEMENT: Only change state when value is NOT secret.
+    --    In combat (value is secret): freeze state, let cooldown frames
+    --    handle visuals via Duration Object pass-through.
+    -- ================================================================
+    if not valueIsSecret and rawCount ~= nil then
+        -- Non-secret: safe to convert and compare
+        local numericCount = tonumber(rawCount) or 0
+        iconFrame._chargeInfo.current = numericCount
+        
+        if numericCount == 0 then
+            iconFrame._isOnCooldown = true
+            UpdateIconState(iconFrame, ICON_STATE.ON_CHARGES_CD)
+        else
+            iconFrame._isOnCooldown = false
+            UpdateIconState(iconFrame, ICON_STATE.READY)
+        end
+    end
+    -- When valueIsSecret (combat): maintain last known state.
+    -- Badge text updates via pass-through above.
+    -- Cooldown sweep handled by Duration Object in UpdateIconCooldown.
+end
+
+-- ============================================================================
+-- USABILITY / RANGE (unchanged from original)
 -- ============================================================================
 
 -- Update usability state (desaturate when no resources)
@@ -467,7 +967,6 @@ local function UpdateIconUsabilityState(iconFrame)
     local showUnusable = MultiTracker:GetSetting(trackerKey, "showUnusableState")
     
     if not showUnusable then
-        -- Not tracking usability, just clear state
         iconFrame.unusableOverlay:Hide()
         iconFrame.isUnusable = false
         return
@@ -481,7 +980,6 @@ local function UpdateIconUsabilityState(iconFrame)
             iconFrame.isUnusable = insufficientPower or (not usable)
             
             if iconFrame.isUnusable then
-                -- Update overlay color from settings
                 local r = MultiTracker:GetSetting(trackerKey, "unusableColorR") or 0.0
                 local g = MultiTracker:GetSetting(trackerKey, "unusableColorG") or 0.0
                 local b = MultiTracker:GetSetting(trackerKey, "unusableColorB") or 0.0
@@ -493,7 +991,6 @@ local function UpdateIconUsabilityState(iconFrame)
             end
         end)
     elseif trackType == "item" and trackID then
-        -- Items: check if count > 0
         pcall(function()
             local count = C_Item.GetItemCount(trackID, false, false, false)
             iconFrame.isUnusable = (count == 0)
@@ -532,14 +1029,10 @@ local function UpdateIconRangeState(iconFrame)
     
     if trackType == "spell" and trackID then
         pcall(function()
-            -- IsSpellInRange returns: true = in range, false = out of range, nil = no range requirement or no target
             local inRange = C_Spell.IsSpellInRange(trackID, "target")
             
             if inRange == false then
-                -- Explicitly out of range
                 iconFrame.isOutOfRange = true
-                
-                -- Update overlay color from settings
                 local r = MultiTracker:GetSetting(trackerKey, "outOfRangeColorR") or 1.0
                 local g = MultiTracker:GetSetting(trackerKey, "outOfRangeColorG") or 0.3
                 local b = MultiTracker:GetSetting(trackerKey, "outOfRangeColorB") or 0.3
@@ -547,7 +1040,6 @@ local function UpdateIconRangeState(iconFrame)
                 iconFrame.rangeOverlay:SetColorTexture(r, g, b, a)
                 iconFrame.rangeOverlay:Show()
             else
-                -- In range, no target, or no range requirement
                 iconFrame.isOutOfRange = false
                 iconFrame.rangeOverlay:Hide()
             end
@@ -557,6 +1049,10 @@ local function UpdateIconRangeState(iconFrame)
         iconFrame.rangeOverlay:Hide()
     end
 end
+
+-- ============================================================================
+-- COOLDOWN UPDATE (Refactored with state engine)
+-- ============================================================================
 
 local function UpdateIconCooldown(iconFrame)
     if not iconFrame or not iconFrame.cooldown then return end
@@ -572,6 +1068,10 @@ local function UpdateIconCooldown(iconFrame)
         end
         iconFrame.trackID = newTrackID
         trackID = newTrackID
+        -- Update spellID tracking for equipped items
+        if iconFrame._spellID ~= newTrackID then
+            iconFrame._spellID = newTrackID
+        end
     end
     
     if not trackType or not trackID then
@@ -581,17 +1081,14 @@ local function UpdateIconCooldown(iconFrame)
             if iconFrame.icon and iconFrame.icon.SetDesaturated then
                 iconFrame.icon:SetDesaturated(false)
             end
-            if iconFrame.rangeOverlay then
-                iconFrame.rangeOverlay:Hide()
-            end
-            if iconFrame.unusableOverlay then
-                iconFrame.unusableOverlay:Hide()
-            end
+            if iconFrame.rangeOverlay then iconFrame.rangeOverlay:Hide() end
+            if iconFrame.unusableOverlay then iconFrame.unusableOverlay:Hide() end
+            if iconFrame.chargeCount then iconFrame.chargeCount:Hide() end
         end)
+        iconFrame._isOnCooldown = false
+        UpdateIconState(iconFrame, ICON_STATE.READY)
         return
     end
-    
-    local isOnCooldown = false
     
     if trackType == "item" then
         local start, duration, enable = C_Container.GetItemCooldown(trackID)
@@ -599,13 +1096,15 @@ local function UpdateIconCooldown(iconFrame)
             pcall(function() iconFrame.cooldown:SetCooldown(start, duration) end)
             local remaining = (start + duration) - GetTime()
             if duration > GCD_THRESHOLD and remaining > 0.1 then
-                isOnCooldown = true
+                iconFrame._isOnCooldown = true
+                UpdateIconState(iconFrame, ICON_STATE.ON_COOLDOWN)
             end
         else
             pcall(function() iconFrame.cooldown:Clear() end)
+            -- Don't force READY here — OnCooldownDone is authoritative
         end
         
-        -- Update count
+        -- Update item count
         pcall(function()
             local count = C_Item.GetItemCount(trackID, false, false, false)
             if count and count > 1 then
@@ -617,78 +1116,97 @@ local function UpdateIconCooldown(iconFrame)
         end)
         
     elseif trackType == "spell" then
-        local cooldownSet = false
-        local isRestricted = InCombatLockdown()
+        -- Use the pre-detected _isChargeSpell flag (set at creation with fallbacks)
+        -- Also try runtime detection for spells that might have been missed
+        local isChargeSpell = iconFrame._isChargeSpell or false
         
-        -- Try Duration Objects first (Midnight API)
-        if C_Spell.GetSpellChargesCooldownDuration then
-            pcall(function()
-                local chargeDuration = C_Spell.GetSpellChargesCooldownDuration(trackID)
-                if chargeDuration then
-                    iconFrame.cooldown:SetCooldownFromDurationObject(chargeDuration, true)
-                    cooldownSet = true
-                end
-            end)
-        end
-        
-        if not cooldownSet and C_Spell.GetSpellCooldownDuration then
-            pcall(function()
-                local duration = C_Spell.GetSpellCooldownDuration(trackID)
-                if duration then
-                    iconFrame.cooldown:SetCooldownFromDurationObject(duration, true)
-                    cooldownSet = true
-                end
-            end)
-        end
-        
-        -- Traditional API fallback (only outside combat)
-        if not cooldownSet and not isRestricted then
-            pcall(function()
-                local info = C_Spell.GetSpellCooldown(trackID)
-                if info and info.duration and info.startTime then
-                    if info.duration > 0 then
-                        iconFrame.cooldown:SetCooldown(info.startTime, info.duration)
-                        local remaining = (info.startTime + info.duration) - GetTime()
-                        if info.duration > GCD_THRESHOLD and remaining > 0.1 then
-                            isOnCooldown = true
-                        end
-                    else
-                        iconFrame.cooldown:Clear()
-                    end
-                end
-            end)
-        end
-        
-        -- Update charges
-        pcall(function()
-            local chargeInfo = C_Spell.GetSpellCharges(trackID)
-            if chargeInfo and chargeInfo.maxCharges and chargeInfo.maxCharges > 1 then
-                if chargeInfo.currentCharges and chargeInfo.currentCharges < chargeInfo.maxCharges then
-                    iconFrame.count:SetText(chargeInfo.currentCharges)
-                    iconFrame.count:Show()
-                else
-                    iconFrame.count:Hide()
-                end
-            else
-                iconFrame.count:Hide()
+        -- Runtime fallback: if not detected at creation, try now
+        if not isChargeSpell then
+            local displayCount = SafeGetDisplayCount(trackID)
+            
+            -- Primary: displayCount > 1 means multiple charges available
+            if displayCount > 1 then
+                isChargeSpell = true
             end
-        end)
+            
+            -- Secondary: GetSpellCharges + displayCount >= 1 (one charge spent)
+            if not isChargeSpell and displayCount >= 1 and C_Spell.GetSpellCharges then
+                pcall(function()
+                    local info = C_Spell.GetSpellCharges(trackID)
+                    if info then isChargeSpell = true end
+                end)
+            end
+            
+            -- Update the flag for future calls
+            if isChargeSpell then
+                iconFrame._isChargeSpell = true
+                iconFrame._chargeInfo.max = 2
+            end
+        end
+        
+        if isChargeSpell then
+            -- Charge spell: set main cooldown sweep via Duration Object first
+            -- (shows recharge timer, works with secret values in combat)
+            if C_Spell.GetSpellCooldownDuration then
+                pcall(function()
+                    local duration = C_Spell.GetSpellCooldownDuration(trackID)
+                    if duration then
+                        iconFrame.cooldown:SetCooldownFromDurationObject(duration, true)
+                    end
+                end)
+            end
+            -- Then handle charge-specific badge and state
+            UpdateIconChargeState(iconFrame)
+        else
+            -- Non-charge spell — standard cooldown handling
+            local cooldownSet = false
+            
+            -- Try Duration Objects first (Midnight API)
+            if C_Spell.GetSpellCooldownDuration then
+                pcall(function()
+                    local duration = C_Spell.GetSpellCooldownDuration(trackID)
+                    if duration then
+                        iconFrame.cooldown:SetCooldownFromDurationObject(duration, true)
+                        cooldownSet = true
+                    end
+                end)
+            end
+            
+            -- Traditional API fallback (only outside combat)
+            if not cooldownSet and not InCombatLockdown() then
+                pcall(function()
+                    local info = C_Spell.GetSpellCooldown(trackID)
+                    if info and info.duration and info.startTime then
+                        if info.duration > 0 then
+                            iconFrame.cooldown:SetCooldown(info.startTime, info.duration)
+                            local remaining = (info.startTime + info.duration) - GetTime()
+                            if info.duration > GCD_THRESHOLD and remaining > 0.1 then
+                                iconFrame._isOnCooldown = true
+                                UpdateIconState(iconFrame, ICON_STATE.ON_COOLDOWN)
+                            end
+                        else
+                            iconFrame.cooldown:Clear()
+                        end
+                    end
+                end)
+            end
+            
+            -- Hide charge display for non-charge spells
+            if iconFrame.chargeCount then iconFrame.chargeCount:Hide() end
+            if iconFrame.chargeCooldown then
+                pcall(function() iconFrame.chargeCooldown:Clear() end)
+            end
+        end
     end
     
-    -- Store cooldown state
-    iconFrame.isOnCooldown = isOnCooldown
-    
-    -- Update usability and range states (these use overlays now)
+    -- Update usability and range states (overlays)
     UpdateIconUsabilityState(iconFrame)
     UpdateIconRangeState(iconFrame)
-    
-    -- Apply desaturation only for cooldown state
-    pcall(function()
-        if iconFrame.icon and iconFrame.icon.SetDesaturated then
-            iconFrame.icon:SetDesaturated(isOnCooldown)
-        end
-    end)
 end
+
+-- ============================================================================
+-- BULK UPDATE FUNCTIONS
+-- ============================================================================
 
 -- Update just usability states for all icons (event-driven)
 local function UpdateAllUsabilityStates()
@@ -714,11 +1232,25 @@ local function UpdateAllRangeStates()
     end
 end
 
+-- Update all cooldowns (called on SPELL_UPDATE_COOLDOWN)
 local function UpdateAllCooldowns()
     for trackerKey, icons in pairs(trackerIcons) do
         if MultiTracker:GetSetting(trackerKey, "enabled") then
             for _, iconFrame in pairs(icons) do
                 pcall(UpdateIconCooldown, iconFrame)
+            end
+        end
+    end
+end
+
+-- Update all charge states (called on SPELL_UPDATE_CHARGES)
+local function UpdateAllIconCharges()
+    for trackerKey, icons in pairs(trackerIcons) do
+        if MultiTracker:GetSetting(trackerKey, "enabled") then
+            for _, iconFrame in pairs(icons) do
+                if iconFrame._spellID and iconFrame._isChargeSpell then
+                    pcall(UpdateIconChargeState, iconFrame)
+                end
             end
         end
     end
@@ -1261,6 +1793,12 @@ function MultiTrackerFrames:RebuildTracker(trackerKey)
     -- Update visibility
     UpdateTrackerVisibility(trackerKey)
     
+    -- Rebuild spellToIcons lookup (Phase 1)
+    RebuildSpellToIcons()
+    
+    -- Reapply active proc glows after rebuild (Phase 3)
+    ReapplyProcStates()
+    
     dprint(string.format("Rebuilt %s: %d icons from %d entries", trackerKey, displayIndex, #entries))
 end
 
@@ -1498,6 +2036,15 @@ function MultiTrackerFrames:Enable()
     -- Build all trackers
     self:RebuildAllTrackers()
     
+    -- Silence Blizzard CDM viewers for enabled source-based trackers
+    -- This must happen after RebuildAllTrackers so the viewers exist
+    -- Deferred slightly to ensure Blizzard's viewers have finished their own init
+    C_Timer.After(0.2, function()
+        if TUICD.MultiTracker and TUICD.MultiTracker.SilenceEnabledSourceViewers then
+            TUICD.MultiTracker:SilenceEnabledSourceViewers()
+        end
+    end)
+    
     -- Register with Layout after frames exist
     C_Timer.After(0.5, function()
         self:RegisterAllWithLayout()
@@ -1564,9 +2111,10 @@ end
 function MultiTrackerFrames:OnTrackerDeleted(trackerKey)
     self:UnregisterFromLayout(trackerKey)
     
-    -- Clean up icons
+    -- Clean up icons (hide proc glows before destroying)
     if trackerIcons[trackerKey] then
         for _, iconFrame in pairs(trackerIcons[trackerKey]) do
+            HideProcGlow(iconFrame)
             iconFrame:Hide()
             iconFrame:SetParent(nil)
         end
@@ -1578,6 +2126,9 @@ function MultiTrackerFrames:OnTrackerDeleted(trackerKey)
         trackerFrames[trackerKey]:Hide()
         trackerFrames[trackerKey] = nil
     end
+    
+    -- Rebuild spellToIcons since icons were removed
+    RebuildSpellToIcons()
 end
 
 -- Called when tracker settings change
@@ -1631,7 +2182,11 @@ eventFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
 eventFrame:RegisterEvent("UNIT_POWER_UPDATE")
 -- Cooldown events (event-driven cooldown updates)
 eventFrame:RegisterEvent("SPELL_UPDATE_COOLDOWN")
+eventFrame:RegisterEvent("SPELL_UPDATE_CHARGES")
 eventFrame:RegisterEvent("BAG_UPDATE_COOLDOWN")
+-- Proc glow events (Phase 3)
+eventFrame:RegisterEvent("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW")
+eventFrame:RegisterEvent("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE")
 -- Visibility events (event-driven visibility updates)
 eventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
 eventFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
@@ -1643,6 +2198,8 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
     
     if event == "PLAYER_SPECIALIZATION_CHANGED" then
         dprint("Spec changed, rebuilding all multi-trackers")
+        -- Wipe active procs on spec change
+        wipe(activeProcs)
         MultiTrackerFrames:RebuildAllTrackers()
         
     elseif event == "PLAYER_EQUIPMENT_CHANGED" then
@@ -1690,6 +2247,26 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
         if now - lastCooldownUpdate >= COOLDOWN_THROTTLE then
             lastCooldownUpdate = now
             pcall(UpdateAllCooldowns)
+        end
+        
+    elseif event == "SPELL_UPDATE_CHARGES" then
+        -- Charge count changed — update charge spells
+        pcall(UpdateAllIconCharges)
+        
+    elseif event == "SPELL_ACTIVATION_OVERLAY_GLOW_SHOW" then
+        -- Proc activated for a spellID (Phase 3)
+        local spellID = ...
+        if spellID then
+            dprint("Proc glow SHOW: spellID=" .. tostring(spellID))
+            SetProcState(spellID, true)
+        end
+        
+    elseif event == "SPELL_ACTIVATION_OVERLAY_GLOW_HIDE" then
+        -- Proc deactivated for a spellID (Phase 3)
+        local spellID = ...
+        if spellID then
+            dprint("Proc glow HIDE: spellID=" .. tostring(spellID))
+            SetProcState(spellID, false)
         end
         
     elseif event == "PLAYER_REGEN_ENABLED" or event == "PLAYER_REGEN_DISABLED" 
@@ -1808,12 +2385,61 @@ SlashCmdList["TUICDMULTIFRAMES"] = function(msg)
         local count = 0
         for _ in pairs(trackerFrames) do count = count + 1 end
         print("  Active frames: " .. count)
+    elseif msg == "chargetest" then
+        print("|cff00ccff[TUI:CD]|r Charge Detection Report:")
+        print("  APIs available:")
+        print("    GetSpellCharges: " .. (C_Spell.GetSpellCharges and "YES" or "NO"))
+        print("    GetSpellDisplayCount: " .. (C_Spell.GetSpellDisplayCount and "YES" or "NO"))
+        print("    GetSpellChargesCooldownDuration: " .. (C_Spell.GetSpellChargesCooldownDuration and "YES" or "NO"))
+        local total, chargeSpells = 0, 0
+        for trackerKey, icons in pairs(trackerIcons) do
+            for _, iconFrame in pairs(icons) do
+                if iconFrame._spellID then
+                    total = total + 1
+                    local name = C_Spell.GetSpellName and C_Spell.GetSpellName(iconFrame._spellID) or tostring(iconFrame._spellID)
+                    local detected = iconFrame._isChargeSpell and "YES" or "no"
+                    local displayCount = SafeGetDisplayCount(iconFrame._spellID)
+                    local rawResult = "?"
+                    if C_Spell.GetSpellDisplayCount then
+                        pcall(function()
+                            local raw = C_Spell.GetSpellDisplayCount(iconFrame._spellID)
+                            rawResult = type(raw) .. ":" .. tostring(raw)
+                        end)
+                    end
+                    local hasChargeInfo = "no"
+                    if C_Spell.GetSpellCharges then
+                        pcall(function()
+                            local info = C_Spell.GetSpellCharges(iconFrame._spellID)
+                            if info then hasChargeInfo = "YES" end
+                        end)
+                    end
+                    local hasDurObj = "no"
+                    if C_Spell.GetSpellChargesCooldownDuration then
+                        pcall(function()
+                            local dur = C_Spell.GetSpellChargesCooldownDuration(iconFrame._spellID)
+                            if dur then hasDurObj = "YES" end
+                        end)
+                    end
+                    -- Print ALL spells so we can see what's happening
+                    print(string.format("  |cffffd100%s|r (ID:%d) charge=%s raw=%s chargeAPI=%s durObj=%s",
+                        name or "?", iconFrame._spellID, detected, rawResult, hasChargeInfo, hasDurObj))
+                    if iconFrame._isChargeSpell then
+                        chargeSpells = chargeSpells + 1
+                    end
+                end
+            end
+        end
+        if chargeSpells == 0 then
+            print("  |cffff8888No charge spells detected in any tracker|r")
+        end
+        print(string.format("  Total spell icons: %d, Charge detected: %d", total, chargeSpells))
     else
         print("|cff00ccff[TUI:CD]|r MultiTrackerFrames commands:")
         print("  /tuicdmultiframes rebuild - Rebuild all frames")
         print("  /tuicdmultiframes enable - Enable system")
         print("  /tuicdmultiframes disable - Disable system")
         print("  /tuicdmultiframes status - Show status")
+        print("  /tuicdmultiframes chargetest - Diagnose charge detection")
     end
 end
 

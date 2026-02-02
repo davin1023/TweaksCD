@@ -26,6 +26,41 @@ local DEFAULT_TRACKERS = {
     { key = "multiCustom3", name = "Utility Custom Tracker", source = "utility" },
 }
 
+-- Map source keys to Blizzard viewer global names
+local SOURCE_VIEWER_MAP = {
+    essential = "EssentialCooldownViewer",
+    utility   = "UtilityCooldownViewer",
+}
+
+-- Track which viewers we've silenced so we can warn on restore
+local silencedViewers = {}
+
+-- Silence or restore events on a Blizzard CDM viewer
+-- When a source-based multi-tracker is enabled, the Blizzard viewer is hidden via per-icon
+-- but its event handlers still fire and process secret values in a tainted context,
+-- causing "attempt to compare secret value" errors. Unregistering events prevents this.
+local function SilenceBlizzardViewer(source, silence)
+    local viewerName = SOURCE_VIEWER_MAP[source]
+    if not viewerName then return end
+    
+    local viewer = _G[viewerName]
+    if not viewer then return end
+    
+    if silence then
+        if not silencedViewers[source] then
+            viewer:UnregisterAllEvents()
+            silencedViewers[source] = true
+            TUICD:PrintDebug(string.format("Silenced events on %s (Multi-Tracker active)", viewerName))
+        end
+    else
+        if silencedViewers[source] then
+            silencedViewers[source] = nil
+            -- Cannot reliably re-register Blizzard's events; advise reload
+            TUICD:Print(string.format("|cffffcc00%s|r events restored on next |cff00ccff/reload|r", viewerName))
+        end
+    end
+end
+
 -- Default settings for new trackers (mirrors TRACKER_DEFAULTS from Cooldowns.lua)
 local TRACKER_DEFAULTS = {
     enabled = true,
@@ -85,6 +120,19 @@ local TRACKER_DEFAULTS = {
     -- Cooldown sweep
     hideSweep = false,
     showCountdownText = true,
+    -- Charge Display (Phase 2)
+    showChargeCount = true,
+    chargeCountFontSize = 12,
+    chargeCountColorR = 1.0,
+    chargeCountColorG = 1.0,
+    chargeCountColorB = 1.0,
+    desaturateAtZeroCharges = true,
+    -- Proc Glow (Phase 3)
+    showProcGlow = true,
+    procGlowStyle = "blizzard",     -- "blizzard", "pixel", "shine"
+    procGlowColorR = 1.0,
+    procGlowColorG = 0.82,
+    procGlowColorB = 0.0,
     -- Visibility
     visibilityEnabled = false,
     showInCombat = true,
@@ -945,6 +993,12 @@ function MultiTracker:SyncSourceTrackerVisibility(trackerKey, enabled)
         value = enabled
     })
     
+    -- Silence/restore Blizzard viewer events to prevent secret value errors
+    -- When the multi-tracker replaces Essential/Utility, the Blizzard viewer's
+    -- event handlers still fire in a tainted context and hit secret value
+    -- comparison errors in CacheChargeValues / SpellIDMatchesAnyAssociatedSpellIDs
+    SilenceBlizzardViewer(sourceKey, enabled)
+    
     -- Persist the change
     if TUICD.Cooldowns and TUICD.Cooldowns.SaveSettings then
         TUICD.Cooldowns:SaveSettings()
@@ -954,6 +1008,22 @@ function MultiTracker:SyncSourceTrackerVisibility(trackerKey, enabled)
     local checkFrame = _G["TweaksCD_" .. sourceKey .. "_HideTrackerCheck"]
     if checkFrame then
         checkFrame:SetChecked(enabled)
+    end
+end
+
+-- Silence Blizzard viewers for all currently-enabled source-based trackers
+-- Called at init time so viewers are silenced on login if multi-trackers were previously enabled
+function MultiTracker:SilenceEnabledSourceViewers()
+    local db = GetMultiTrackerDB()
+    if not db or not db.registry then return end
+    
+    for _, tracker in ipairs(db.registry) do
+        if tracker.source and db.settings[tracker.key] then
+            local settings = db.settings[tracker.key]
+            if settings.enabled then
+                SilenceBlizzardViewer(tracker.source, true)
+            end
+        end
     end
 end
 

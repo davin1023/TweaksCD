@@ -10818,17 +10818,12 @@ function Cooldowns:CreateCustomTrackersPanel()
         y = y - 10
         y = CreateHeader(parent, y, "Usability States")
         
-        y = CreateCheckbox(parent, y, "Tint When Unusable",
+        y = CreateCheckbox(parent, y, "Tint When Unusable  |cff888888(not enough resources)|r",
             function() return GetTrackerSetting("showUnusableState") or false end,
             function(v) 
                 SetTrackerSetting("showUnusableState", v)
                 RefreshLayout()
             end)
-        
-        local unusableHint = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        unusableHint:SetPoint("TOPLEFT", 40, y + 3)
-        unusableHint:SetText("|cff888888(overlay when not enough resources)|r")
-        y = y - 5
         
         -- Unusable color picker
         local unusableColorLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -10882,17 +10877,12 @@ function Cooldowns:CreateCustomTrackersPanel()
         
         y = y - 30
         
-        y = CreateCheckbox(parent, y, "Tint When Out of Range",
+        y = CreateCheckbox(parent, y, "Tint When Out of Range  |cff888888(target out of range)|r",
             function() return GetTrackerSetting("showOutOfRange") or false end,
             function(v) 
                 SetTrackerSetting("showOutOfRange", v)
                 RefreshLayout()
             end)
-        
-        local rangeHint = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        rangeHint:SetPoint("TOPLEFT", 40, y + 3)
-        rangeHint:SetText("|cff888888(overlay when target is out of range)|r")
-        y = y - 5
         
         -- Range color picker
         local rangeColorLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -10960,6 +10950,191 @@ function Cooldowns:CreateCustomTrackersPanel()
                     end
                 end)
         end
+        
+        -- ========================================
+        -- CHARGE DISPLAY SECTION
+        -- ========================================
+        y = y - 10
+        y = CreateHeader(parent, y, "Charge Display")
+        
+        y = CreateCheckbox(parent, y, "Show Charge Count  |cff888888(charge-based spells)|r",
+            function() return GetTrackerSetting("showChargeCount") ~= false end,
+            function(v) 
+                SetTrackerSetting("showChargeCount", v)
+                RefreshLayout()
+            end)
+        
+        y = CreateSlider(parent, y, "Charge Font Size", 8, 20, 1,
+            function() return GetTrackerSetting("chargeCountFontSize") or 12 end,
+            function(v) 
+                SetTrackerSetting("chargeCountFontSize", v)
+                RefreshLayout()
+            end)
+        
+        -- Charge count color picker
+        local chargeColorLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        chargeColorLabel:SetPoint("TOPLEFT", 20, y)
+        chargeColorLabel:SetText("Count Color:")
+        
+        local chargeColorSwatch = CreateFrame("Button", nil, parent)
+        chargeColorSwatch:SetPoint("LEFT", chargeColorLabel, "RIGHT", 10, 0)
+        chargeColorSwatch:SetSize(24, 24)
+        
+        local chargeBorder = chargeColorSwatch:CreateTexture(nil, "BACKGROUND")
+        chargeBorder:SetPoint("TOPLEFT", -2, 2)
+        chargeBorder:SetPoint("BOTTOMRIGHT", 2, -2)
+        chargeBorder:SetColorTexture(0.5, 0.5, 0.5, 1)
+        
+        local chargeTex = chargeColorSwatch:CreateTexture(nil, "ARTWORK")
+        chargeTex:SetAllPoints()
+        chargeColorSwatch.tex = chargeTex
+        
+        local function UpdateChargeSwatchColor()
+            local r = GetTrackerSetting("chargeCountColorR") or 1.0
+            local g = GetTrackerSetting("chargeCountColorG") or 1.0
+            local b = GetTrackerSetting("chargeCountColorB") or 1.0
+            chargeTex:SetColorTexture(r, g, b, 1)
+        end
+        UpdateChargeSwatchColor()
+        
+        chargeColorSwatch:SetScript("OnClick", function()
+            local r = GetTrackerSetting("chargeCountColorR") or 1.0
+            local g = GetTrackerSetting("chargeCountColorG") or 1.0
+            local b = GetTrackerSetting("chargeCountColorB") or 1.0
+            ColorPickerFrame:SetupColorPickerAndShow({
+                r = r, g = g, b = b,
+                swatchFunc = function()
+                    local nr, ng, nb = ColorPickerFrame:GetColorRGB()
+                    SetTrackerSetting("chargeCountColorR", nr)
+                    SetTrackerSetting("chargeCountColorG", ng)
+                    SetTrackerSetting("chargeCountColorB", nb)
+                    UpdateChargeSwatchColor()
+                    RefreshLayout()
+                end,
+                cancelFunc = function(prev)
+                    SetTrackerSetting("chargeCountColorR", prev.r)
+                    SetTrackerSetting("chargeCountColorG", prev.g)
+                    SetTrackerSetting("chargeCountColorB", prev.b)
+                    UpdateChargeSwatchColor()
+                    RefreshLayout()
+                end,
+            })
+        end)
+        y = y - 30
+        
+        y = CreateCheckbox(parent, y, "Desaturate at Zero Charges  |cff888888(grey out when spent)|r",
+            function() return GetTrackerSetting("desaturateAtZeroCharges") ~= false end,
+            function(v) 
+                SetTrackerSetting("desaturateAtZeroCharges", v)
+                RefreshLayout()
+            end)
+        
+        -- ========================================
+        -- PROC GLOW SECTION
+        -- ========================================
+        y = y - 10
+        y = CreateHeader(parent, y, "Proc Glow")
+        
+        y = CreateCheckbox(parent, y, "Show Proc Glow  |cff888888(highlight on proc)|r",
+            function() return GetTrackerSetting("showProcGlow") ~= false end,
+            function(v) 
+                SetTrackerSetting("showProcGlow", v)
+                RefreshLayout()
+            end)
+        
+        local glowStyleLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        glowStyleLabel:SetPoint("TOPLEFT", 10, y - 5)
+        glowStyleLabel:SetText("Glow Style")
+        y = y - 20
+        
+        local glowStyles = {
+            {value = "blizzard", label = "Blizzard Glow"},
+            {value = "pixel", label = "Pixel Border"},
+            {value = "shine", label = "Shine Flash"},
+        }
+        
+        local glowDropdown = CreateFrame("Frame", "TweaksUI_CustomTracker_GlowStyle_" .. tostring(math.random(99999)), parent, "UIDropDownMenuTemplate")
+        glowDropdown:SetPoint("TOPLEFT", 0, y)
+        UIDropDownMenu_SetWidth(glowDropdown, 150)
+        
+        local currentGlow = GetTrackerSetting("procGlowStyle") or "blizzard"
+        for _, opt in ipairs(glowStyles) do
+            if opt.value == currentGlow then
+                UIDropDownMenu_SetText(glowDropdown, opt.label)
+                break
+            end
+        end
+        
+        UIDropDownMenu_Initialize(glowDropdown, function(self, level)
+            for _, opt in ipairs(glowStyles) do
+                local info = UIDropDownMenu_CreateInfo()
+                info.text = opt.label
+                info.value = opt.value
+                info.func = function(self)
+                    SetTrackerSetting("procGlowStyle", self.value)
+                    UIDropDownMenu_SetText(glowDropdown, self:GetText())
+                    RefreshLayout()
+                end
+                info.checked = (GetTrackerSetting("procGlowStyle") or "blizzard") == opt.value
+                UIDropDownMenu_AddButton(info, level)
+            end
+        end)
+        y = y - 35
+        
+        -- Proc glow color picker
+        local procColorLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        procColorLabel:SetPoint("TOPLEFT", 20, y)
+        procColorLabel:SetText("Glow Color:")
+        
+        local procColorSwatch = CreateFrame("Button", nil, parent)
+        procColorSwatch:SetPoint("LEFT", procColorLabel, "RIGHT", 10, 0)
+        procColorSwatch:SetSize(24, 24)
+        
+        local procBorder = procColorSwatch:CreateTexture(nil, "BACKGROUND")
+        procBorder:SetPoint("TOPLEFT", -2, 2)
+        procBorder:SetPoint("BOTTOMRIGHT", 2, -2)
+        procBorder:SetColorTexture(0.5, 0.5, 0.5, 1)
+        
+        local procTex = procColorSwatch:CreateTexture(nil, "ARTWORK")
+        procTex:SetAllPoints()
+        procColorSwatch.tex = procTex
+        
+        local function UpdateProcSwatchColor()
+            local r = GetTrackerSetting("procGlowColorR") or 1.0
+            local g = GetTrackerSetting("procGlowColorG") or 0.82
+            local b = GetTrackerSetting("procGlowColorB") or 0.0
+            procTex:SetColorTexture(r, g, b, 1)
+        end
+        UpdateProcSwatchColor()
+        
+        procColorSwatch:SetScript("OnClick", function()
+            local r = GetTrackerSetting("procGlowColorR") or 1.0
+            local g = GetTrackerSetting("procGlowColorG") or 0.82
+            local b = GetTrackerSetting("procGlowColorB") or 0.0
+            ColorPickerFrame:SetupColorPickerAndShow({
+                r = r, g = g, b = b,
+                swatchFunc = function()
+                    local nr, ng, nb = ColorPickerFrame:GetColorRGB()
+                    SetTrackerSetting("procGlowColorR", nr)
+                    SetTrackerSetting("procGlowColorG", ng)
+                    SetTrackerSetting("procGlowColorB", nb)
+                    UpdateProcSwatchColor()
+                    RefreshLayout()
+                end,
+                cancelFunc = function(prev)
+                    SetTrackerSetting("procGlowColorR", prev.r)
+                    SetTrackerSetting("procGlowColorG", prev.g)
+                    SetTrackerSetting("procGlowColorB", prev.b)
+                    UpdateProcSwatchColor()
+                    RefreshLayout()
+                end,
+            })
+        end)
+        
+        local procColorHint = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        procColorHint:SetPoint("LEFT", procColorSwatch, "RIGHT", 10, 0)
+        procColorHint:SetText("|cff888888(for Pixel / Shine styles)|r")
+        y = y - 30
         
         parent:SetHeight(math.abs(y) + 20)
     end
