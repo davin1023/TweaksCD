@@ -87,10 +87,15 @@ Modules\Cooldowns\CDMScraper.lua
 # ============================================================================
 # Modules - Timer Bars
 # ============================================================================
+Modules\Bars\BarsHub.lua
 Modules\Bars\BarsData.lua
-Modules\Bars\BarsDock.lua
 Modules\Bars\BarsFrames.lua
+Modules\Bars\BarsDock.lua
 Modules\Bars\BarsUI.lua
+Modules\Bars\BuffBarsData.lua
+Modules\Bars\BuffBarsFrames.lua
+Modules\Bars\BuffBarsDock.lua
+Modules\Bars\BuffBarsUI.lua
 Modules\Bars\Bars.lua
 
 # ============================================================================

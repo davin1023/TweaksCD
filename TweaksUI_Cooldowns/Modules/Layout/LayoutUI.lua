@@ -1356,7 +1356,7 @@ function LayoutUI:CreateCoordPanel()
     if coordPanel then return coordPanel end
     
     coordPanel = CreateFrame("Frame", "TweaksUI_LayoutCoordPanel", containerFrame, "BackdropTemplate")
-    coordPanel:SetSize(220, 750)  -- Increased height for auto-snap section
+    coordPanel:SetSize(220, 800)  -- Increased height to prevent text overlap
     coordPanel:SetPoint("RIGHT", UIParent, "RIGHT", -20, 0)
     coordPanel:SetBackdrop({
         bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
@@ -1881,30 +1881,37 @@ function LayoutUI:CreateCoordPanel()
     -- END COLOR LEGEND SECTION
     -- ========================================================================
     
-    -- Size display
-    local sizeLabel = coordPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    sizeLabel:SetPoint("BOTTOM", coordPanel, "BOTTOM", 0, 100)
-    sizeLabel:SetText("Size: -- x --")
-    sizeLabel:SetTextColor(0.6, 0.6, 0.6)
-    coordPanel.sizeLabel = sizeLabel
+    -- Separator between legend and controls
+    local controlsSeparator = coordPanel:CreateTexture(nil, "ARTWORK")
+    controlsSeparator:SetSize(190, 1)
+    controlsSeparator:SetPoint("TOP", childLegend, "BOTTOM", 0, -10)
+    controlsSeparator:SetColorTexture(0.3, 0.3, 0.3, 0.6)
+    coordPanel.controlsSeparator = controlsSeparator
     
-    -- Arrow key hints (two lines)
+    -- Arrow key hints (two lines) - anchored below separator
     local arrowHint1 = coordPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    arrowHint1:SetPoint("BOTTOM", coordPanel, "BOTTOM", 0, 130)
+    arrowHint1:SetPoint("TOP", controlsSeparator, "BOTTOM", 0, -6)
     arrowHint1:SetText("Arrow Keys: Nudge 1px")
     arrowHint1:SetTextColor(0.5, 0.7, 0.5)
     coordPanel.arrowHint1 = arrowHint1
     
     local arrowHint2 = coordPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    arrowHint2:SetPoint("BOTTOM", coordPanel, "BOTTOM", 0, 115)
+    arrowHint2:SetPoint("TOP", arrowHint1, "BOTTOM", 0, -2)
     arrowHint2:SetText("Shift+Arrows: Nudge 10px")
     arrowHint2:SetTextColor(0.5, 0.7, 0.5)
     coordPanel.arrowHint2 = arrowHint2
     
+    -- Size display
+    local sizeLabel = coordPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    sizeLabel:SetPoint("TOP", arrowHint2, "BOTTOM", 0, -6)
+    sizeLabel:SetText("Size: -- x --")
+    sizeLabel:SetTextColor(0.6, 0.6, 0.6)
+    coordPanel.sizeLabel = sizeLabel
+    
     -- Clear All Locks button (removes attachments but keeps positions)
     local clearLocksBtn = CreateFrame("Button", nil, coordPanel, "UIPanelButtonTemplate")
     clearLocksBtn:SetSize(180, 22)
-    clearLocksBtn:SetPoint("BOTTOM", coordPanel, "BOTTOM", 0, 70)
+    clearLocksBtn:SetPoint("TOP", sizeLabel, "BOTTOM", 0, -10)
     clearLocksBtn:SetText("Clear All Locks")
     clearLocksBtn:GetFontString():SetTextColor(1, 0.7, 0.3)
     clearLocksBtn:SetScript("OnClick", function()
@@ -1946,7 +1953,7 @@ function LayoutUI:CreateCoordPanel()
     -- Clear All Positions button (for debugging position issues)
     local clearPosBtn = CreateFrame("Button", nil, coordPanel, "UIPanelButtonTemplate")
     clearPosBtn:SetSize(180, 22)
-    clearPosBtn:SetPoint("BOTTOM", coordPanel, "BOTTOM", 0, 40)
+    clearPosBtn:SetPoint("TOP", clearLocksBtn, "BOTTOM", 0, -6)
     clearPosBtn:SetText("Clear All Positions")
     clearPosBtn:GetFontString():SetTextColor(1, 0.5, 0.5)
     clearPosBtn:SetScript("OnClick", function()
@@ -1996,7 +2003,7 @@ function LayoutUI:CreateCoordPanel()
     -- Exit Layout Mode button
     local exitBtn = CreateFrame("Button", nil, coordPanel, "UIPanelButtonTemplate")
     exitBtn:SetSize(180, 26)
-    exitBtn:SetPoint("BOTTOM", coordPanel, "BOTTOM", 0, 12)
+    exitBtn:SetPoint("TOP", clearPosBtn, "BOTTOM", 0, -10)
     exitBtn:SetText("Exit Layout Mode")
     exitBtn:SetScript("OnClick", function()
         if TUICD.Layout then

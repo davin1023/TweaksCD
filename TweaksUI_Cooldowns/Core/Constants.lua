@@ -64,6 +64,9 @@ TUICD.EVENTS = {
     -- Bars module events
     BARS_SETTINGS_CHANGED = "TUICD_BarsSettingsChanged",
     BARS_DATA_UPDATED = "TUICD_BarsDataUpdated",
+    -- BuffBars module events
+    BUFFBARS_SETTINGS_CHANGED = "TUICD_BuffBarsSettingsChanged",
+    BUFFBARS_DATA_UPDATED = "TUICD_BuffBarsDataUpdated",
 }
 
 -- Default colors

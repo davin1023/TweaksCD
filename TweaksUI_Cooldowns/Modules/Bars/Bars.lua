@@ -114,10 +114,17 @@ end
 -- ============================================================================
 
 function Bars:TogglePanel()
-    BarsUI:Toggle()
+    if TUICD.BarsHub then
+        TUICD.BarsHub:Toggle()
+    else
+        BarsUI:Toggle()
+    end
 end
 
 function Bars:HideAllPanels()
+    if TUICD.BarsHub then
+        TUICD.BarsHub:Hide()
+    end
     BarsUI:HideAllPanels()
 end
 

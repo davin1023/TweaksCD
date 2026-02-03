@@ -59,6 +59,45 @@ local function GetJustifyAnchorPoint(justify, orientation)
     end
 end
 
+-- Helper: Build center-out order mapping
+-- Returns a table where [arrivalIndex] = visualSlot
+-- First arrival goes to center, then alternate left/right (or up/down for vertical)
+local function BuildCenterOutOrder(count)
+    if count <= 0 then return {} end
+    if count == 1 then return { [1] = 1 } end
+    
+    local order = {}
+    local center = math.ceil(count / 2)
+    order[1] = center  -- First arrival goes to center
+    
+    local left = center - 1
+    local right = center + 1
+    
+    for i = 2, count do
+        if i % 2 == 0 then
+            -- Even arrivals go left first
+            if left >= 1 then
+                order[i] = left
+                left = left - 1
+            elseif right <= count then
+                order[i] = right
+                right = right + 1
+            end
+        else
+            -- Odd arrivals go right
+            if right <= count then
+                order[i] = right
+                right = right + 1
+            elseif left >= 1 then
+                order[i] = left
+                left = left - 1
+            end
+        end
+    end
+    
+    return order
+end
+
 -- ============================================================================
 -- STATE
 -- ============================================================================
@@ -434,22 +473,24 @@ local function CreateDockLayoutWrapper(dockIndex)
             y = -100 * dockIndex,  -- Stack docks vertically by default
         },
         
-        -- Get the anchor point (always CENTER for consistent positioning)
+        -- Get the anchor point based on justify setting
         GetAnchorPoint = function(self)
-            return "CENTER"
+            local settings = GetDockSettings(dockIndex)
+            return GetJustifyAnchorPoint(settings.justify or JUSTIFY.CENTER, settings.orientation or ORIENTATION.HORIZONTAL)
         end,
         
-        -- Position management - always use CENTER-to-CENTER for predictable positioning
+        -- Position management - use justify-based anchor for consistent positioning
         SetPosition = function(self, point, relFrame, relPoint, x, y)
             if InCombatLockdown() then return end
             
-            -- Always anchor from our CENTER to UIParent's CENTER
-            -- The x, y offsets position the dock relative to screen center
+            local settings = GetDockSettings(dockIndex)
+            local anchor = GetJustifyAnchorPoint(settings.justify or JUSTIFY.CENTER, settings.orientation or ORIENTATION.HORIZONTAL)
+            
             x = x or 0
             y = y or 0
             
             dock:ClearAllPoints()
-            dock:SetPoint("CENTER", UIParent, "CENTER", x, y)
+            dock:SetPoint(anchor, UIParent, "CENTER", x, y)
             
             -- Save to dock settings
             SetDockSetting(dockIndex, "point", "CENTER")
@@ -458,43 +499,54 @@ local function CreateDockLayoutWrapper(dockIndex)
         end,
         
         GetSaveData = function(self)
-            -- Calculate the dock's CENTER position relative to UIParent's CENTER
-            -- This is needed because after dragging, WoW changes the anchor to BOTTOMLEFT
+            -- Calculate the position of the justify edge relative to UIParent's CENTER
             local left, bottom, width, height = dock:GetRect()
             if not left or not width then
-                return {
-                    point = "CENTER",
-                    x = 0,
-                    y = 0,
-                }
+                return { point = "CENTER", x = 0, y = 0 }
             end
             
-            -- Calculate dock's center in screen coordinates
-            local dockCenterX = left + width / 2
-            local dockCenterY = bottom + height / 2
-            
-            -- Calculate offset from UIParent's center
+            local settings = GetDockSettings(dockIndex)
+            local anchor = GetJustifyAnchorPoint(settings.justify or JUSTIFY.CENTER, settings.orientation or ORIENTATION.HORIZONTAL)
             local screenWidth, screenHeight = UIParent:GetWidth(), UIParent:GetHeight()
-            local x = dockCenterX - screenWidth / 2
-            local y = dockCenterY - screenHeight / 2
             
-            return {
-                point = "CENTER",  -- Always save relative to CENTER
-                x = x,
-                y = y,
-            }
+            -- Calculate the screen position of the justify edge
+            local edgeX, edgeY
+            if anchor == "TOP" then
+                edgeX = left + width / 2
+                edgeY = bottom + height  -- Top edge Y
+            elseif anchor == "BOTTOM" then
+                edgeX = left + width / 2
+                edgeY = bottom  -- Bottom edge Y
+            elseif anchor == "LEFT" then
+                edgeX = left  -- Left edge X
+                edgeY = bottom + height / 2
+            elseif anchor == "RIGHT" then
+                edgeX = left + width  -- Right edge X
+                edgeY = bottom + height / 2
+            else  -- CENTER
+                edgeX = left + width / 2
+                edgeY = bottom + height / 2
+            end
+            
+            -- Convert to offset from UIParent's center
+            local x = edgeX - screenWidth / 2
+            local y = edgeY - screenHeight / 2
+            
+            return { point = "CENTER", x = x, y = y }
         end,
         
         LoadSaveData = function(self, data)
             if not data then return end
             if InCombatLockdown() then return end
             
-            -- Always use CENTER-to-CENTER positioning
+            local settings = GetDockSettings(dockIndex)
+            local anchor = GetJustifyAnchorPoint(settings.justify or JUSTIFY.CENTER, settings.orientation or ORIENTATION.HORIZONTAL)
+            
             local x = data.x or 0
             local y = data.y or 0
             
             dock:ClearAllPoints()
-            dock:SetPoint("CENTER", UIParent, "CENTER", x, y)
+            dock:SetPoint(anchor, UIParent, "CENTER", x, y)
             
             -- Save to dock settings
             SetDockSetting(dockIndex, "point", "CENTER")
@@ -893,52 +945,176 @@ function Docks:LayoutDock(dockIndex)
     dock:SetPoint(anchorPoint, UIParent, savedPoint, savedX, savedY)
     dock:SetSize(dockW, dockH)
     
-    -- Position each icon (DO NOT resize - let per-icon settings control size)
-    -- Icons are always placed linearly (left-to-right for horizontal, top-to-bottom for vertical)
-    -- Justify affects CROSS-AXIS alignment only:
-    --   Horizontal dock: justify affects vertical alignment (TOP/BOTTOM/CENTER)
-    --   Vertical dock: justify affects horizontal alignment (LEFT/RIGHT/CENTER)
-    local xOffset = 4
-    local yOffset = -4
+    -- Position each icon based on justify (growth direction)
+    -- Justify controls WHERE the FIRST icon appears:
+    --   Horizontal: Left = 1st at left, grow right | Center = center-out | Right = 1st at right, grow left
+    --   Vertical: Top = 1st at top, grow down | Middle = center-out | Bottom = 1st at bottom, grow up
     
-    for i, iconInfo in ipairs(visible) do
-        if iconInfo and iconInfo.frame then
-            local frame = iconInfo.frame
-            local frameW, frameH = frame:GetSize()
-            
-            -- Safety: ensure valid size
-            if frameW < 1 then frameW = 40 end
-            if frameH < 1 then frameH = 40 end
-            
-            -- Position within dock (respect frame's own size)
-            frame:ClearAllPoints()
-            
-            if orientation == ORIENTATION.HORIZONTAL then
-                -- Horizontal dock: place left-to-right, justify affects vertical position
-                local y
-                if justify == JUSTIFY.TOP or justify == JUSTIFY.LEFT then
-                    y = -4
-                elseif justify == JUSTIFY.BOTTOM or justify == JUSTIFY.RIGHT then
-                    y = -(dockH - frameH - 4)
-                else
-                    -- CENTER
-                    y = -(dockH - frameH) / 2
+    if orientation == ORIENTATION.HORIZONTAL then
+        if justify == JUSTIFY.LEFT then
+            -- Start from left, grow rightward
+            local xOffset = 4
+            for i, iconInfo in ipairs(visible) do
+                if iconInfo and iconInfo.frame then
+                    local frame = iconInfo.frame
+                    local frameW, frameH = frame:GetSize()
+                    if frameW < 1 then frameW = 40 end
+                    if frameH < 1 then frameH = 40 end
+                    
+                    frame:ClearAllPoints()
+                    local y = -(dockH - frameH) / 2  -- Center vertically
+                    frame:SetPoint("TOPLEFT", dock, "TOPLEFT", xOffset, y)
+                    xOffset = xOffset + frameW + spacing
                 end
-                frame:SetPoint("TOPLEFT", dock, "TOPLEFT", xOffset, y)
-                xOffset = xOffset + frameW + spacing
-            else
-                -- Vertical dock: place top-to-bottom, justify affects horizontal position
-                local x
-                if justify == JUSTIFY.LEFT or justify == JUSTIFY.TOP then
-                    x = 4
-                elseif justify == JUSTIFY.RIGHT or justify == JUSTIFY.BOTTOM then
-                    x = dockW - frameW - 4
-                else
-                    -- CENTER
-                    x = (dockW - frameW) / 2
+            end
+        elseif justify == JUSTIFY.RIGHT then
+            -- RIGHT: First icon at right (slot n), grow leftward
+            local xOffset = 4
+            for i, iconInfo in ipairs(visible) do
+                if iconInfo and iconInfo.frame then
+                    local frame = iconInfo.frame
+                    local frameW, frameH = frame:GetSize()
+                    if frameW < 1 then frameW = 40 end
+                    if frameH < 1 then frameH = 40 end
+                    
+                    frame:ClearAllPoints()
+                    local y = -(dockH - frameH) / 2  -- Center vertically
+                    frame:SetPoint("TOPRIGHT", dock, "TOPRIGHT", -xOffset, y)
+                    xOffset = xOffset + frameW + spacing
                 end
-                frame:SetPoint("TOPLEFT", dock, "TOPLEFT", x, yOffset)
-                yOffset = yOffset - frameH - spacing
+            end
+        else
+            -- CENTER: Center-out placement (first arrival = center)
+            local centerOutOrder = BuildCenterOutOrder(#visible)
+            local positions = {}  -- [slot] = { iconInfo, x }
+            
+            -- Calculate positions for each slot
+            local totalWidth = 0
+            for i, iconInfo in ipairs(visible) do
+                if iconInfo and iconInfo.frame then
+                    local w = iconInfo.frame:GetWidth()
+                    if w < 1 then w = 40 end
+                    totalWidth = totalWidth + w
+                end
+            end
+            totalWidth = totalWidth + (#visible - 1) * spacing
+            
+            -- Starting x from left edge
+            local xStart = (dockW - totalWidth) / 2
+            local slotX = {}
+            local x = xStart
+            for slot = 1, #visible do
+                slotX[slot] = x
+                local iconInfo = nil
+                for i, info in ipairs(visible) do
+                    if centerOutOrder[i] == slot then
+                        iconInfo = info
+                        break
+                    end
+                end
+                if iconInfo and iconInfo.frame then
+                    local w = iconInfo.frame:GetWidth()
+                    if w < 1 then w = 40 end
+                    x = x + w + spacing
+                end
+            end
+            
+            -- Place icons in their center-out slots
+            for i, iconInfo in ipairs(visible) do
+                if iconInfo and iconInfo.frame then
+                    local frame = iconInfo.frame
+                    local frameW, frameH = frame:GetSize()
+                    if frameW < 1 then frameW = 40 end
+                    if frameH < 1 then frameH = 40 end
+                    
+                    local slot = centerOutOrder[i]
+                    frame:ClearAllPoints()
+                    local y = -(dockH - frameH) / 2  -- Center vertically
+                    frame:SetPoint("TOPLEFT", dock, "TOPLEFT", slotX[slot], y)
+                end
+            end
+        end
+    else  -- VERTICAL
+        if justify == JUSTIFY.TOP then
+            -- TOP: First icon at top (slot 1), grow downward
+            local yOffset = -4
+            for i, iconInfo in ipairs(visible) do
+                if iconInfo and iconInfo.frame then
+                    local frame = iconInfo.frame
+                    local frameW, frameH = frame:GetSize()
+                    if frameW < 1 then frameW = 40 end
+                    if frameH < 1 then frameH = 40 end
+                    
+                    frame:ClearAllPoints()
+                    local x = (dockW - frameW) / 2  -- Center horizontally
+                    frame:SetPoint("TOPLEFT", dock, "TOPLEFT", x, yOffset)
+                    yOffset = yOffset - frameH - spacing
+                end
+            end
+        elseif justify == JUSTIFY.BOTTOM then
+            -- BOTTOM: First icon at bottom (slot n), grow upward
+            local yOffset = 4
+            for i, iconInfo in ipairs(visible) do
+                if iconInfo and iconInfo.frame then
+                    local frame = iconInfo.frame
+                    local frameW, frameH = frame:GetSize()
+                    if frameW < 1 then frameW = 40 end
+                    if frameH < 1 then frameH = 40 end
+                    
+                    frame:ClearAllPoints()
+                    local x = (dockW - frameW) / 2  -- Center horizontally
+                    frame:SetPoint("BOTTOMLEFT", dock, "BOTTOMLEFT", x, yOffset)
+                    yOffset = yOffset + frameH + spacing
+                end
+            end
+        else
+            -- MIDDLE: Center-out placement (first arrival = center)
+            local centerOutOrder = BuildCenterOutOrder(#visible)
+            
+            -- Calculate total height
+            local totalHeight = 0
+            for i, iconInfo in ipairs(visible) do
+                if iconInfo and iconInfo.frame then
+                    local h = iconInfo.frame:GetHeight()
+                    if h < 1 then h = 40 end
+                    totalHeight = totalHeight + h
+                end
+            end
+            totalHeight = totalHeight + (#visible - 1) * spacing
+            
+            -- Starting y from top
+            local yStart = -(dockH - totalHeight) / 2
+            local slotY = {}
+            local y = yStart
+            for slot = 1, #visible do
+                slotY[slot] = y
+                local iconInfo = nil
+                for i, info in ipairs(visible) do
+                    if centerOutOrder[i] == slot then
+                        iconInfo = info
+                        break
+                    end
+                end
+                if iconInfo and iconInfo.frame then
+                    local h = iconInfo.frame:GetHeight()
+                    if h < 1 then h = 40 end
+                    y = y - h - spacing
+                end
+            end
+            
+            -- Place icons in their center-out slots
+            for i, iconInfo in ipairs(visible) do
+                if iconInfo and iconInfo.frame then
+                    local frame = iconInfo.frame
+                    local frameW, frameH = frame:GetSize()
+                    if frameW < 1 then frameW = 40 end
+                    if frameH < 1 then frameH = 40 end
+                    
+                    local slot = centerOutOrder[i]
+                    frame:ClearAllPoints()
+                    local x = (dockW - frameW) / 2  -- Center horizontally
+                    frame:SetPoint("TOPLEFT", dock, "TOPLEFT", x, slotY[slot])
+                end
             end
         end
     end

@@ -308,6 +308,9 @@ function Settings:CreatePanel()
         TUICD.GlobalScale:RegisterSettingsPanel(hubPanel, 1.0)
     end
     
+    -- Expose hubPanel so other modules can dock to it
+    Settings.hubPanel = hubPanel
+    
     return hubPanel
 end
 
@@ -336,21 +339,33 @@ function Settings:OpenPersonalResourcesPanel()
 end
 
 -- ============================================================
--- OPEN BARS PANEL
+-- OPEN BARS PANEL (opens BarsHub sub-hub)
 -- ============================================================
 function Settings:OpenBarsPanel()
-    if TUICD.Bars and TUICD.Bars.TogglePanel then
-        -- Close other panels first
-        if TUICD.Cooldowns and TUICD.Cooldowns.ToggleSettingsPanel then
-            local cooldownsPanel = TUICD.Cooldowns.settingsPanel
-            if cooldownsPanel and cooldownsPanel:IsShown() then cooldownsPanel:Hide() end
+    -- Close other module panels first
+    if TUICD.Cooldowns and TUICD.Cooldowns.settingsPanel then
+        if TUICD.Cooldowns.settingsPanel:IsShown() then
+            TUICD.Cooldowns.settingsPanel:Hide()
         end
-        if TUICD.PersonalResources and TUICD.PersonalResources.settingsPanel then
+    end
+    if TUICD.PersonalResources and TUICD.PersonalResources.settingsPanel then
+        if TUICD.PersonalResources.settingsPanel:IsShown() then
             TUICD.PersonalResources.settingsPanel:Hide()
         end
-        TUICD.Bars:TogglePanel()
+    end
+
+    if TUICD.BarsHub then
+        if TUICD.BarsHub:IsShown() then
+            TUICD.BarsHub:Hide()
+        else
+            TUICD.BarsHub:Show()
+        end
     else
-        TUICD:PrintError("Timer Bars module not available")
+        -- Fallback: open BarsUI directly (BarsHub not loaded)
+        TUICD:PrintError("BarsHub not loaded - check TOC load order")
+        if TUICD.Bars and TUICD.Bars.TogglePanel then
+            TUICD.Bars:TogglePanel()
+        end
     end
 end
 

@@ -366,6 +366,44 @@ local function Initialize()
         TUICD.MinimapButton:Initialize()
     end
     
+    -- Initialize BuffBarsFrames (connects to BuffBarsData callbacks)
+    if TUICD.BuffBarsFrames then
+        TUICD.BuffBarsFrames:Initialize()
+    end
+    
+    -- Register BuffBarsData events (discovery, hooks, poll auto-start on PLAYER_ENTERING_WORLD)
+    if TUICD.BuffBarsData then
+        TUICD.BuffBarsData:RegisterEvents()
+    end
+    
+    -- Initialize BuffBarsDock (creates dock frame if dock was previously enabled)
+    if TUICD.BuffBarsDock then
+        TUICD.BuffBarsDock:Init()
+    end
+    
+    -- Register BuffBarsFrames with Layout Mode
+    if TUICD.Layout and TUICD.BuffBarsFrames then
+        TUICD.Layout:RegisterCallback("OnLayoutModeEnter", function()
+            TUICD.BuffBarsFrames:EnterLayoutMode()
+        end)
+        TUICD.Layout:RegisterCallback("OnLayoutModeExit", function()
+            TUICD.BuffBarsFrames:ExitLayoutMode()
+        end)
+    end
+    
+    -- Wire BuffBars dock_override events to refresh all bars
+    if TUICD.Events and TUICD.EVENTS.BUFFBARS_DATA_UPDATED then
+        TUICD.Events:Register(TUICD.EVENTS.BUFFBARS_DATA_UPDATED, function(barKey, action)
+            if action == "dock_override" and TUICD.BuffBarsFrames then
+                -- Refresh all BuffBars when override settings change
+                for key in pairs(TUICD.BuffBarsFrames:GetAllBarFrames()) do
+                    TUICD.BuffBarsFrames:ApplyConfig(key)
+                    TUICD.BuffBarsFrames:UpdateBarDisplay(key)
+                end
+            end
+        end)
+    end
+    
     -- Apply snap attachments after frames are created
     if TUICD.SnapLocking then
         C_Timer.After(2, function()
@@ -429,6 +467,8 @@ local function HandleSlashCommand(msg)
         TUICD:Print("|cffffff00/tuicd status|r - Show debug status info")
         TUICD:Print("|cffffff00/tuicd debug|r - Toggle debug mode")
         TUICD:Print("|cffffff00/tuicd dock|r - Dock management commands")
+        TUICD:Print("|cffffff00/tuicd bars|r - Timer bars commands")
+        TUICD:Print("|cffffff00/tuicd buffbars|r - Buff timer bars commands")
         TUICD:Print("|cffffff00/tuicd remigrate|r - Re-import positions from TweaksUI")
         TUICD:Print("|cffffff00/tuicd migrateprofiles|r - Convert old profiles to 3.0 format")
         TUICD:Print("|cffffff00/tuicd version|r - Show version info")
@@ -776,6 +816,22 @@ local function HandleSlashCommand(msg)
             TUICD:Print("Type /tuicd dock help for commands")
         end
         
+    elseif cmd == "buffbars" or cmd == "bb" then
+        -- Route to BuffBarsData slash handler
+        if TUICD.BuffBarsData then
+            TUICD.BuffBarsData:HandleSlashCommand(args)
+        else
+            TUICD:PrintError("BuffBarsData not loaded")
+        end
+
+    elseif cmd == "bars" then
+        -- Route to Bars module slash handler
+        if TUICD.Bars and TUICD.Bars.HandleSlashCommand then
+            TUICD.Bars:HandleSlashCommand(args)
+        else
+            TUICD:PrintError("Bars module not loaded")
+        end
+
     else
         TUICD:Print("Unknown command: " .. cmd)
         TUICD:Print("Type /tuicd help for commands")

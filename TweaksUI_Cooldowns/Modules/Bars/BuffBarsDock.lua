@@ -1,16 +1,16 @@
 -- ============================================================================
--- TUICD: Timer Bars - Dock Container
+-- TUICD: Buff Timer Bars - Dock Container
 -- Groups bars into a single movable container with automatic layout.
 -- Uses the same FIFO / center-out placement logic as icon docks.
 -- ============================================================================
 
 local ADDON_NAME, TUICD = ...
 
-TUICD.BarsDock = TUICD.BarsDock or {}
-local BarsDock = TUICD.BarsDock
+TUICD.BuffBarsDock = TUICD.BuffBarsDock or {}
+local BuffBarsDock = TUICD.BuffBarsDock
 
-local BarsData = TUICD.BarsData
-local BarsFrames -- forward ref, resolved on init
+local BuffBarsData = TUICD.BuffBarsData
+local BuffBarsFrames -- forward ref, resolved on init
 
 -- ============================================================================
 -- CONSTANTS
@@ -26,7 +26,7 @@ local DEFAULT_LEVEL = 10
 -- ============================================================================
 
 local function GetJustifyAnchor(justify, orientation)
-    local isVert = (orientation == "VERTICAL")
+    local isVert = (orientation == "VERTICAL" or orientation == "DOWN" or orientation == "UP")
     if justify == "CENTER" then
         return "CENTER"
     elseif justify == "END" then
@@ -95,16 +95,16 @@ end
 -- DOCK FRAME
 -- ============================================================================
 
-function BarsDock:GetDock()
+function BuffBarsDock:GetDock()
     return dockFrame
 end
 
-function BarsDock:CreateDock()
+function BuffBarsDock:CreateDock()
     if dockFrame then return dockFrame end
 
-    BarsFrames = TUICD.BarsFrames  -- resolve forward ref
+    BuffBarsFrames = TUICD.BuffBarsFrames  -- resolve forward ref
 
-    dockFrame = CreateFrame("Frame", "TUICD_BarsDock", UIParent, "BackdropTemplate")
+    dockFrame = CreateFrame("Frame", "TUICD_BuffBarsDock", UIParent, "BackdropTemplate")
     dockFrame:SetSize(200, 50)
     dockFrame:SetFrameStrata(DEFAULT_STRATA)
     dockFrame:SetFrameLevel(DEFAULT_LEVEL)
@@ -122,22 +122,22 @@ function BarsDock:CreateDock()
     -- Label (shown in layout mode)
     dockFrame.label = dockFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     dockFrame.label:SetPoint("TOP", dockFrame, "BOTTOM", 0, -2)
-    dockFrame.label:SetText("|cff00ccffTimer Bars|r")
+    dockFrame.label:SetText("|cff00ccffBuff Bars|r")
     dockFrame.label:Hide()
 
     -- Empty placeholder (layout mode)
     dockFrame.emptyText = dockFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     dockFrame.emptyText:SetPoint("CENTER")
-    dockFrame.emptyText:SetText("|cff555555(No Active Bars)|r")
+    dockFrame.emptyText:SetText("|cff555555(No Active Buff Bars)|r")
     dockFrame.emptyText:Hide()
 
-    -- Layout mode dragging (registered from BarsFrames layout mode)
+    -- Layout mode dragging (registered from BuffBarsFrames layout mode)
     dockFrame:RegisterForDrag("LeftButton")
     dockFrame:SetScript("OnDragStart", function(self) self:StartMoving() end)
     dockFrame:SetScript("OnDragStop", function(self)
         self:StopMovingOrSizing()
         -- Re-anchor to the correct justify point after drag
-        BarsDock:ReanchorAfterDrag()
+        BuffBarsDock:ReanchorAfterDrag()
     end)
 
     -- Load saved position
@@ -157,30 +157,29 @@ end
 -- Creates a TUIFrame-compatible wrapper for snapping, nudging, locking
 -- ============================================================================
 
-function BarsDock:CreateLayoutWrapper()
+function BuffBarsDock:CreateLayoutWrapper()
     if not dockFrame then return nil end
     if layoutWrapper then return layoutWrapper end
     
-    local wrapperId = "BarsDock"
+    local wrapperId = "BuffBarsDock"
     
     -- Create TUIFrame-compatible wrapper object
     layoutWrapper = {
         id = wrapperId,
         frame = dockFrame,
-        name = "Timer Bars Dock",
+        name = "Buff Bars Dock",
         category = "Timer Bar",
         
         -- Default position
         defaultPosition = {
             point = "CENTER",
             x = 0,
-            y = 100,
+            y = 50,
         },
         
         -- Get the anchor point (always CENTER for consistent positioning)
         GetAnchorPoint = function(self)
-            local dockSettings = BarsData:GetDockSettings()
-            return GetJustifyAnchor(dockSettings.justify or "CENTER", dockSettings.orientation or "VERTICAL")
+            return "CENTER"
         end,
         
         -- Position management
@@ -190,37 +189,38 @@ function BarsDock:CreateLayoutWrapper()
             x = x or 0
             y = y or 0
             
-            local dockSettings = BarsData:GetDockSettings()
-            local anchor = GetJustifyAnchor(dockSettings.justify or "CENTER", dockSettings.orientation or "VERTICAL")
-            
             dockFrame:ClearAllPoints()
-            dockFrame:SetPoint(anchor, UIParent, "CENTER", x, y)
+            dockFrame:SetPoint("CENTER", UIParent, "CENTER", x, y)
             
             -- Save to dock settings
-            BarsDock:SavePosition()
+            BuffBarsDock:SavePosition()
         end,
         
         GetSaveData = function(self)
-            local point, _, relPoint, x, y = dockFrame:GetPoint()
-            if not point then
+            local left, bottom, width, height = dockFrame:GetRect()
+            if not left or not width then
                 return { point = "CENTER", x = 0, y = 0 }
             end
-            return { point = point, relPoint = relPoint, x = x or 0, y = y or 0 }
+            
+            local screenWidth, screenHeight = UIParent:GetWidth(), UIParent:GetHeight()
+            local dockCenterX = left + width / 2
+            local dockCenterY = bottom + height / 2
+            local x = dockCenterX - screenWidth / 2
+            local y = dockCenterY - screenHeight / 2
+            
+            return { point = "CENTER", x = x, y = y }
         end,
         
         LoadSaveData = function(self, data)
             if not data then return end
             if InCombatLockdown() then return end
             
-            local dockSettings = BarsData:GetDockSettings()
-            local anchor = GetJustifyAnchor(dockSettings.justify or "CENTER", dockSettings.orientation or "VERTICAL")
-            
             local x = data.x or 0
             local y = data.y or 0
             
             dockFrame:ClearAllPoints()
-            dockFrame:SetPoint(data.point or anchor, UIParent, data.relPoint or "CENTER", x, y)
-            BarsDock:SavePosition()
+            dockFrame:SetPoint("CENTER", UIParent, "CENTER", x, y)
+            BuffBarsDock:SavePosition()
         end,
         
         -- Size management
@@ -269,7 +269,7 @@ function BarsDock:CreateLayoutWrapper()
         
         -- Position changed callback
         onPositionChanged = function(self, point, relFrame, relPoint, x, y)
-            BarsDock:SavePosition()
+            BuffBarsDock:SavePosition()
         end,
         
         -- Size locking for SnapLocking compatibility
@@ -305,7 +305,7 @@ function BarsDock:CreateLayoutWrapper()
     return layoutWrapper
 end
 
-function BarsDock:RegisterWithLayout()
+function BuffBarsDock:RegisterWithLayout()
     local Layout = TUICD.Layout
     if not Layout or not Layout.RegisterElement then return false end
     if not dockFrame then return false end
@@ -314,11 +314,11 @@ function BarsDock:RegisterWithLayout()
     local wrapper = self:CreateLayoutWrapper()
     if not wrapper then return false end
     
-    local wrapperId = "BarsDock"
+    local wrapperId = "BuffBarsDock"
     
     -- Register with Layout
     Layout:RegisterElement(wrapperId, {
-        name = "Timer Bars Dock",
+        name = "Buff Bars Dock",
         category = Layout.CATEGORIES and Layout.CATEGORIES.BARS or "Timer Bar",
         tuiFrame = wrapper,
         defaultPosition = wrapper.defaultPosition,
@@ -332,15 +332,15 @@ function BarsDock:RegisterWithLayout()
     return true
 end
 
-function BarsDock:UnregisterFromLayout()
+function BuffBarsDock:UnregisterFromLayout()
     local Layout = TUICD.Layout
     if not Layout or not Layout.UnregisterElement then return end
     
-    Layout:UnregisterElement("BarsDock")
+    Layout:UnregisterElement("BuffBarsDock")
     layoutWrapper = nil
 end
 
-function BarsDock:DestroyDock()
+function BuffBarsDock:DestroyDock()
     self:UnregisterFromLayout()
     if dockFrame then
         dockFrame:Hide()
@@ -355,21 +355,21 @@ end
 -- POSITION PERSISTENCE
 -- ============================================================================
 
-function BarsDock:SavePosition()
+function BuffBarsDock:SavePosition()
     if not dockFrame then return end
     local point, _, relPoint, x, y = dockFrame:GetPoint()
-    local db = BarsData:GetDB()
+    local db = BuffBarsData:GetDB()
     db.dockPosition = { point = point, relPoint = relPoint, x = x, y = y }
 end
 
 -- Re-anchor dock after drag to maintain justify anchor point
-function BarsDock:ReanchorAfterDrag()
+function BuffBarsDock:ReanchorAfterDrag()
     if not dockFrame then return end
     
-    local dockSettings = BarsData:GetDockSettings()
+    local dockSettings = BuffBarsData:GetDockSettings()
+    local direction = dockSettings.direction or "DOWN"
+    local orientation = (direction == "DOWN" or direction == "UP") and "VERTICAL" or "HORIZONTAL"
     local justify = dockSettings.justify or "CENTER"
-    local orientation = dockSettings.orientation or "VERTICAL"
-    local isVert = (orientation == "VERTICAL")
     local anchor = GetJustifyAnchor(justify, orientation)
     
     -- Get current frame position
@@ -408,12 +408,14 @@ function BarsDock:ReanchorAfterDrag()
     self:SavePosition()
 end
 
-function BarsDock:LoadPosition()
+function BuffBarsDock:LoadPosition()
     if not dockFrame then return end
-    local db = BarsData:GetDB()
+    local db = BuffBarsData:GetDB()
     local pos = db.dockPosition
-    local dockSettings = BarsData:GetDockSettings()
-    local anchor = GetJustifyAnchor(dockSettings.justify or "CENTER", dockSettings.orientation or "VERTICAL")
+    local dockSettings = BuffBarsData:GetDockSettings()
+    local direction = dockSettings.direction or "DOWN"
+    local orientation = (direction == "DOWN" or direction == "UP") and "VERTICAL" or "HORIZONTAL"
+    local anchor = GetJustifyAnchor(dockSettings.justify or "CENTER", orientation)
     
     dockFrame:ClearAllPoints()
     if pos then
@@ -426,10 +428,12 @@ function BarsDock:LoadPosition()
 end
 
 -- Re-anchor dock based on current justify (call when justify changes)
-function BarsDock:ReanchorForJustify()
+function BuffBarsDock:ReanchorForJustify()
     if not dockFrame then return end
-    local dockSettings = BarsData:GetDockSettings()
-    local anchor = GetJustifyAnchor(dockSettings.justify or "CENTER", dockSettings.orientation or "VERTICAL")
+    local dockSettings = BuffBarsData:GetDockSettings()
+    local direction = dockSettings.direction or "DOWN"
+    local orientation = (direction == "DOWN" or direction == "UP") and "VERTICAL" or "HORIZONTAL"
+    local anchor = GetJustifyAnchor(dockSettings.justify or "CENTER", orientation)
     
     -- Get current visual center position
     local cx, cy = dockFrame:GetCenter()
@@ -464,7 +468,7 @@ end
 -- ============================================================================
 
 -- Record a bar becoming visible (adds to arrival order if not already there)
-function BarsDock:RecordArrival(barKey)
+function BuffBarsDock:RecordArrival(barKey)
     for _, key in ipairs(arrivalOrder) do
         if key == barKey then return end  -- Already tracked
     end
@@ -473,7 +477,7 @@ function BarsDock:RecordArrival(barKey)
 end
 
 -- Remove a bar from arrival order (when it hides)
-function BarsDock:RemoveArrival(barKey)
+function BuffBarsDock:RemoveArrival(barKey)
     for i, key in ipairs(arrivalOrder) do
         if key == barKey then
             table.remove(arrivalOrder, i)
@@ -486,31 +490,31 @@ end
 -- LAYOUT
 -- ============================================================================
 
-function BarsDock:QueueLayout()
+function BuffBarsDock:QueueLayout()
     if layoutQueued then return end
     layoutQueued = true
 
     C_Timer.After(LAYOUT_THROTTLE, function()
         layoutQueued = false
-        BarsDock:DoLayout()
+        BuffBarsDock:DoLayout()
     end)
 end
 
 -- Get visible bars in the correct order
 local function GetVisibleBars()
-    BarsFrames = BarsFrames or TUICD.BarsFrames
-    if not BarsFrames then return {} end
+    BuffBarsFrames = BuffBarsFrames or TUICD.BuffBarsFrames
+    if not BuffBarsFrames then return {} end
 
-    local allBars = BarsFrames:GetAllBars()
-    local dockSettings = BarsData:GetDockSettings()
-    local isLayout = TUICD.BarsDock._isLayoutMode
+    local allBars = BuffBarsFrames:GetAllBarFrames()
+    local dockSettings = BuffBarsData:GetDockSettings()
+    local isLayout = TUICD.BuffBarsDock._isLayoutMode
 
     if dockSettings.sortMode == "list" then
         -- Spell list order (alphabetical by display name)
         local sorted = {}
         for barKey, frame in pairs(allBars) do
             if frame:IsShown() or isLayout then
-                local config = BarsData:GetSpellConfig(barKey)
+                local config = BuffBarsData:GetSpellConfig(barKey)
                 table.insert(sorted, {
                     barKey = barKey,
                     frame = frame,
@@ -541,7 +545,7 @@ local function GetVisibleBars()
                     if key == barKey then found = true; break end
                 end
                 if not found then
-                    BarsDock:RecordArrival(barKey)
+                    BuffBarsDock:RecordArrival(barKey)
                     table.insert(visible, frame)
                 end
             end
@@ -550,18 +554,18 @@ local function GetVisibleBars()
     end
 end
 
-function BarsDock:DoLayout()
+function BuffBarsDock:DoLayout()
     if not dockFrame then return end
 
-    local dockSettings = BarsData:GetDockSettings()
+    local dockSettings = BuffBarsData:GetDockSettings()
     local isLayout = self._isLayoutMode
     local visible = GetVisibleBars()
     local n = #visible
 
-    local orientation = dockSettings.orientation or "VERTICAL"
+    local direction = dockSettings.direction or "DOWN"
     local spacing = dockSettings.spacing or 2
     local justify = dockSettings.justify or "CENTER"
-    local isVert = (orientation == "VERTICAL")
+    local isVert = (direction == "DOWN" or direction == "UP")
 
     -- Handle empty dock
     if n == 0 then
@@ -688,26 +692,26 @@ function BarsDock:DoLayout()
 end
 
 -- ============================================================================
--- VISIBILITY HOOKS (called from BarsFrames)
+-- VISIBILITY HOOKS (called from BuffBarsFrames)
 -- ============================================================================
 
 -- Called when a bar becomes visible
-function BarsDock:OnBarShown(barKey)
-    if not BarsData:IsDockEnabled() then return end
+function BuffBarsDock:OnBarShown(barKey)
+    if not BuffBarsData:IsDockEnabled() then return end
     self:RecordArrival(barKey)
     self:QueueLayout()
 end
 
 -- Called when a bar hides
-function BarsDock:OnBarHidden(barKey)
-    if not BarsData:IsDockEnabled() then return end
+function BuffBarsDock:OnBarHidden(barKey)
+    if not BuffBarsData:IsDockEnabled() then return end
     self:RemoveArrival(barKey)
     self:QueueLayout()
 end
 
 -- Called when bar config changes (size, direction, etc.)
-function BarsDock:OnBarConfigChanged(barKey)
-    if not BarsData:IsDockEnabled() then return end
+function BuffBarsDock:OnBarConfigChanged(barKey)
+    if not BuffBarsData:IsDockEnabled() then return end
     self:QueueLayout()
 end
 
@@ -715,7 +719,7 @@ end
 -- LAYOUT MODE
 -- ============================================================================
 
-function BarsDock:EnterLayoutMode()
+function BuffBarsDock:EnterLayoutMode()
     self._isLayoutMode = true
     if not dockFrame then self:CreateDock() end
 
@@ -726,7 +730,7 @@ function BarsDock:EnterLayoutMode()
     self:DoLayout()
 end
 
-function BarsDock:ExitLayoutMode()
+function BuffBarsDock:ExitLayoutMode()
     self._isLayoutMode = false
     if not dockFrame then return end
 
@@ -741,24 +745,24 @@ end
 -- INIT / TEARDOWN
 -- ============================================================================
 
-function BarsDock:Init()
-    BarsFrames = TUICD.BarsFrames
-    if BarsData:IsDockEnabled() then
+function BuffBarsDock:Init()
+    BuffBarsFrames = TUICD.BuffBarsFrames
+    if BuffBarsData:IsDockEnabled() then
         self:CreateDock()
     end
 end
 
-function BarsDock:Enable()
+function BuffBarsDock:Enable()
     if not dockFrame then self:CreateDock() end
     -- Re-parent all existing bars into dock
-    BarsFrames = BarsFrames or TUICD.BarsFrames
-    if BarsFrames then
-        local allBars = BarsFrames:GetAllBars()
+    BuffBarsFrames = BuffBarsFrames or TUICD.BuffBarsFrames
+    if BuffBarsFrames then
+        local allBars = BuffBarsFrames:GetAllBarFrames()
         for barKey, frame in pairs(allBars) do
             frame:SetParent(dockFrame)
             -- Unregister individual TUIFrames (dock owns positioning now)
             if frame._tuiFrame then
-                local safeKey = BarsData.SanitizeKey(barKey)
+                local safeKey = BuffBarsData.SanitizeKey(barKey)
                 if TUICD.Layout and TUICD.Layout.UnregisterElement then
                     TUICD.Layout:UnregisterElement("bar_" .. safeKey)
                 end
@@ -770,15 +774,15 @@ function BarsDock:Enable()
     self:DoLayout()
 end
 
-function BarsDock:Disable()
+function BuffBarsDock:Disable()
     -- Re-parent bars back to UIParent as standalone
-    BarsFrames = BarsFrames or TUICD.BarsFrames
-    if BarsFrames then
-        local allBars = BarsFrames:GetAllBars()
+    BuffBarsFrames = BuffBarsFrames or TUICD.BuffBarsFrames
+    if BuffBarsFrames then
+        local allBars = BuffBarsFrames:GetAllBarFrames()
         for barKey, frame in pairs(allBars) do
             frame:SetParent(UIParent)
             -- Recreate individual positioning
-            local pos = BarsData:GetSpellPosition(barKey)
+            local pos = BuffBarsData:GetSpellPosition(barKey)
             frame:ClearAllPoints()
             if pos then
                 frame:SetPoint(pos.point or "CENTER", UIParent, pos.point or "CENTER",
@@ -794,4 +798,4 @@ function BarsDock:Disable()
     wipe(arrivalOrder)
 end
 
-return BarsDock
+return BuffBarsDock
