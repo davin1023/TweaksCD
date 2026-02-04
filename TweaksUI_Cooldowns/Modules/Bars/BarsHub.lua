@@ -44,6 +44,9 @@ local function HideActiveSubPanel()
     elseif activePanel == "buffs" then
         local BuffBarsUI = TUICD.BuffBarsUI
         if BuffBarsUI and BuffBarsUI:IsShown() then BuffBarsUI:Hide() end
+    elseif activePanel == "timeline" then
+        local TimelineUI = TUICD.TimelineUI
+        if TimelineUI and TimelineUI:IsShown() then TimelineUI:Hide() end
     end
     activePanel = nil
 end
@@ -52,8 +55,6 @@ local function HighlightButton(name)
     for key, btn in pairs(buttons) do
         if key == name then
             btn:GetFontString():SetTextColor(1, 0.82, 0)  -- Gold
-        elseif key == "timeline" then
-            btn:GetFontString():SetTextColor(0.35, 0.35, 0.35)  -- Dark grey (disabled)
         else
             btn:GetFontString():SetTextColor(0.8, 0.8, 0.8)  -- Light grey
         end
@@ -91,6 +92,20 @@ local function OpenBuffs()
 
     local BuffBarsUI = TUICD.BuffBarsUI
     if BuffBarsUI then BuffBarsUI:Show() end
+end
+
+local function OpenTimeline()
+    if activePanel == "timeline" then
+        HideActiveSubPanel()
+        HighlightButton(nil)
+        return
+    end
+    HideActiveSubPanel()
+    activePanel = "timeline"
+    HighlightButton("timeline")
+
+    local TimelineUI = TUICD.TimelineUI
+    if TimelineUI then TimelineUI:Show() end
 end
 
 -- ============================================================
@@ -138,17 +153,17 @@ local function CreateHubPanel()
     buttons.cooldowns = cdBtn
     yOffset = yOffset - BUTTON_HEIGHT - BUTTON_SPACING
 
-    -- Timeline (disabled)
+    -- Timeline (now enabled!)
     local tlBtn = CreateFrame("Button", nil, hubPanel, "UIPanelButtonTemplate")
     tlBtn:SetPoint("TOP", 0, yOffset)
     tlBtn:SetSize(BUTTON_WIDTH, BUTTON_HEIGHT)
     tlBtn:SetText("Timeline")
-    tlBtn:Disable()
-    tlBtn:GetFontString():SetTextColor(0.35, 0.35, 0.35)
+    tlBtn:GetFontString():SetTextColor(0.8, 0.8, 0.8)  -- Light grey (inactive)
+    tlBtn:SetScript("OnClick", OpenTimeline)
     tlBtn:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
         GameTooltip:SetText("Timeline", 1, 0.82, 0)
-        GameTooltip:AddLine("Coming in a future update.", 0.6, 0.6, 0.6, true)
+        GameTooltip:AddLine("Horizontal cooldown timeline display.", 1, 1, 1, true)
         GameTooltip:Show()
     end)
     tlBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)

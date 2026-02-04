@@ -279,6 +279,9 @@ end
 
 -- Get module-specific settings (from character database)
 function DB:GetModuleSettings(moduleId)
+    if not self.charDb then
+        return {}
+    end
     if not self.charDb.settings then
         self.charDb.settings = {}
     end
@@ -291,6 +294,7 @@ end
 -- Set all module-specific settings at once (replaces entire settings table)
 function DB:SetModuleSettings(moduleId, settingsTable)
     if not settingsTable then return end
+    if not self.charDb then return end
     if not self.charDb.settings then
         self.charDb.settings = {}
     end
@@ -300,6 +304,7 @@ end
 
 -- Set a specific module setting
 function DB:SetModuleSetting(moduleId, key, value)
+    if not self.charDb then return end
     if not self.charDb.settings then
         self.charDb.settings = {}
     end
@@ -312,7 +317,7 @@ end
 
 -- Get a specific module setting
 function DB:GetModuleSetting(moduleId, key)
-    if not self.charDb.settings or not self.charDb.settings[moduleId] then
+    if not self.charDb or not self.charDb.settings or not self.charDb.settings[moduleId] then
         return nil
     end
     return self.charDb.settings[moduleId][key]

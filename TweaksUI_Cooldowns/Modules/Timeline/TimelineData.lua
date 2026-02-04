@@ -1,0 +1,527 @@
+-- ============================================================================
+-- TUI:CD Timeline - Data Layer
+-- Cooldown state tracking with GCD filtering using CooldownFrame sensor
+--
+-- KEY INSIGHT: Feed Duration Objects into a hidden CooldownFrame, then read
+-- back NON-SECRET milliseconds via GetCooldownTimes(). Filter out GCD by
+-- checking duration > 3000ms (GCD is ~1500ms).
+--
+-- DATA SOURCE: Reads from MultiTracker entries (which already handles
+-- Essential, Utility, and Custom trackers). No duplicate CDM scraping.
+-- ============================================================================
+
+local ADDON_NAME, TUICD = ...
+
+TUICD.TimelineData = TUICD.TimelineData or {}
+local TimelineData = TUICD.TimelineData
+
+-- ============================================================================
+-- CONSTANTS
+-- ============================================================================
+
+-- GCD is ~1500ms; anything over 3000ms is a real cooldown
+local GCD_THRESHOLD_MS = 3000
+
+-- Minimum remaining time to consider "on cooldown" (avoid float precision issues)
+local MIN_REMAINING_SEC = 0.1
+
+-- ============================================================================
+-- COOLDOWN SENSOR
+-- Hidden CooldownFrame used to convert secret Duration Objects into readable
+-- millisecond values via GetCooldownTimes()
+-- ============================================================================
+
+local sensorParent = CreateFrame("Frame", nil, UIParent)
+sensorParent:SetSize(1, 1)
+sensorParent:SetPoint("TOPLEFT", UIParent, "TOPLEFT", -100, 100)
+sensorParent:Hide()
+
+local cdSensor = CreateFrame("Cooldown", "TUICD_TimelineCDSensor", sensorParent, "CooldownFrameTemplate")
+cdSensor:SetAllPoints()
+cdSensor:SetAlpha(0)
+
+-- Disable all visual components (Midnight uses alpha, not shown state)
+pcall(function() cdSensor:SetDrawSwipe(false) end)
+pcall(function() cdSensor:SetDrawBling(false) end)
+pcall(function() cdSensor:SetDrawEdge(false) end)
+
+-- ============================================================================
+-- STATE
+-- ============================================================================
+
+-- Tracked spells: { [spellID] = { name, icon, source, trackerKey } }
+local trackedSpells = {}
+
+-- Cooldown states: { [spellID] = { isOnCD, remaining, duration, startTime } }
+local cooldownStates = {}
+
+-- Callbacks for state changes
+local stateCallbacks = {}
+
+-- Debug mode
+local debugMode = false
+
+-- ============================================================================
+-- DEBUG
+-- ============================================================================
+
+local function dprint(...)
+    if debugMode then
+        print("|cff00ccff[Timeline]|r", ...)
+    end
+end
+
+function TimelineData:SetDebug(enabled)
+    debugMode = enabled
+    dprint("Debug mode:", enabled and "ON" or "OFF")
+end
+
+function TimelineData:IsDebug()
+    return debugMode
+end
+
+-- ============================================================================
+-- SPELL INFO HELPER (Midnight API compatibility)
+-- ============================================================================
+
+-- Safe spell info lookup (handles Midnight's C_Spell.GetSpellInfo which returns a table)
+local function SafeGetSpellInfo(spellID)
+    if not spellID then return nil, nil end
+    
+    -- Try SpellAPI first (our wrapper)
+    if TUICD.SpellAPI and TUICD.SpellAPI.GetSpellInfo then
+        local info = TUICD.SpellAPI:GetSpellInfo(spellID)
+        if info then
+            local icon = TUICD.SpellAPI:GetSpellTexture(spellID) or info.iconID
+            return info.name, icon
+        end
+    end
+    
+    -- Try Midnight API (C_Spell.GetSpellInfo returns a table)
+    if C_Spell and C_Spell.GetSpellInfo then
+        local info = C_Spell.GetSpellInfo(spellID)
+        if info then
+            return info.name, info.iconID
+        end
+    end
+    
+    return nil, nil
+end
+
+-- ============================================================================
+-- SPELL TRACKING - Read from MultiTracker
+-- ============================================================================
+
+-- Rebuild tracked spell list from MultiTracker entries
+function TimelineData:RebuildSpellList()
+    wipe(trackedSpells)
+    wipe(cooldownStates)
+    
+    local MultiTracker = TUICD.MultiTracker
+    if MultiTracker then
+        -- Get all registered trackers
+        local trackerList = MultiTracker:GetTrackerList()
+        
+        for _, tracker in ipairs(trackerList) do
+            local trackerKey = tracker.key
+            local trackerName = tracker.name
+            
+            -- Get entries for this tracker (current spec)
+            local entries = MultiTracker:GetEntries(trackerKey)
+            
+            for _, entry in ipairs(entries) do
+                -- Only track enabled spell entries (not items)
+                if entry.enabled ~= false and entry.type == "spell" and entry.id then
+                    local spellID = entry.id
+                    
+                    -- Don't duplicate if already tracked from another tracker
+                    if not trackedSpells[spellID] then
+                        -- Look up spell info (entry may not have name/texture)
+                        local spellName = entry.name
+                        local spellIcon = entry.texture
+                        
+                        if not spellName or not spellIcon then
+                            -- Use safe spell info lookup
+                            local name, icon = SafeGetSpellInfo(spellID)
+                            spellName = spellName or name
+                            spellIcon = spellIcon or icon
+                        end
+                        
+                        trackedSpells[spellID] = {
+                            name = spellName or ("Spell " .. spellID),
+                            icon = spellIcon,
+                            source = tracker.source or "tracker",
+                            trackerKey = trackerKey,
+                            trackerName = trackerName,
+                        }
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Also add custom spells from database directly (more reliable than TimelineUI)
+    local customSpells = {}
+    local DB = TUICD.Database
+    
+    -- Try TimelineUI first
+    local TimelineUI = TUICD.TimelineUI
+    if TimelineUI and TimelineUI.GetSetting then
+        customSpells = TimelineUI:GetSetting("customSpells") or {}
+    end
+    
+    -- Fallback: try database directly
+    if not next(customSpells) and DB and DB.GetModuleSetting then
+        customSpells = DB:GetModuleSetting("timeline", "customSpells") or {}
+    end
+    
+    -- Debug: show what we found
+    local customCount = 0
+    for _ in pairs(customSpells) do customCount = customCount + 1 end
+    dprint("Found", customCount, "custom spells in database")
+    
+    for key, val in pairs(customSpells) do
+        -- Handle both numeric and string keys (SavedVariables can convert numeric keys to strings)
+        local spellID = tonumber(key)
+        if spellID and val and not trackedSpells[spellID] then
+            local name, icon = SafeGetSpellInfo(spellID)
+            if name then
+                trackedSpells[spellID] = {
+                    name = name,
+                    icon = icon,
+                    source = "custom",
+                    trackerKey = "custom",
+                    trackerName = "Custom",
+                    isCustom = true,
+                }
+                dprint(string.format("Tracking custom: %s (%d)", name, spellID))
+            end
+        end
+    end
+    
+    local count = 0
+    for _ in pairs(trackedSpells) do count = count + 1 end
+    dprint("Rebuilt spell list:", count, "spells tracked")
+    
+    return trackedSpells
+end
+
+-- Get current tracked spells
+function TimelineData:GetTrackedSpells()
+    return trackedSpells
+end
+
+-- Get spell info
+function TimelineData:GetSpellInfo(spellID)
+    return trackedSpells[spellID]
+end
+
+-- ============================================================================
+-- COOLDOWN STATE DETECTION
+-- Core function: uses CooldownFrame sensor to convert secret Duration Objects
+-- into readable milliseconds, then filters GCD
+-- ============================================================================
+
+function TimelineData:GetCooldownState(spellID)
+    if not C_Spell or not C_Spell.GetSpellCooldownDuration then
+        return false, 0, 0
+    end
+    
+    -- Step 1: Get Duration Object (may contain secret values)
+    local ok, dObj = pcall(C_Spell.GetSpellCooldownDuration, spellID)
+    if not ok or not dObj then
+        return false, 0, 0
+    end
+    
+    -- Step 2: Feed into hidden CooldownFrame sensor
+    pcall(function()
+        cdSensor:SetCooldownFromDurationObject(dObj, true)
+    end)
+    
+    -- Step 3: Read back NON-SECRET milliseconds via GetCooldownTimes()
+    local isOnCD = false
+    local remaining = 0
+    local totalDuration = 0
+    
+    pcall(function()
+        if cdSensor.GetCooldownTimes then
+            local startMs, durationMs = cdSensor:GetCooldownTimes()
+            
+            if startMs and durationMs 
+               and type(startMs) == "number" 
+               and type(durationMs) == "number" then
+                
+                -- Step 4: Filter GCD - only real cooldowns (> 3 sec)
+                if durationMs > GCD_THRESHOLD_MS then
+                    local startSec = startMs / 1000
+                    local durationSec = durationMs / 1000
+                    remaining = (startSec + durationSec) - GetTime()
+                    
+                    if remaining > MIN_REMAINING_SEC then
+                        isOnCD = true
+                        totalDuration = durationSec
+                    end
+                end
+            end
+        end
+    end)
+    
+    return isOnCD, remaining, totalDuration
+end
+
+-- ============================================================================
+-- STATE UPDATE
+-- Update all tracked spell states and fire callbacks on changes
+-- ============================================================================
+
+function TimelineData:UpdateAllStates()
+    local changes = {}
+    
+    for spellID, spellData in pairs(trackedSpells) do
+        local isOnCD, remaining, duration = self:GetCooldownState(spellID)
+        
+        local oldState = cooldownStates[spellID]
+        local wasOnCD = oldState and oldState.isOnCD or false
+        
+        -- Detect state transitions
+        if isOnCD ~= wasOnCD then
+            changes[spellID] = {
+                isOnCD = isOnCD,
+                remaining = remaining,
+                duration = duration,
+                name = spellData.name,
+                icon = spellData.icon,
+                source = spellData.source,
+                trackerKey = spellData.trackerKey,
+                transition = isOnCD and "started" or "ended"
+            }
+            dprint(string.format("%s (%d): %s -> %s (%.1fs remaining)",
+                spellData.name, spellID,
+                wasOnCD and "ON_CD" or "READY",
+                isOnCD and "ON_CD" or "READY",
+                remaining))
+        end
+        
+        -- Update state
+        cooldownStates[spellID] = {
+            isOnCD = isOnCD,
+            remaining = remaining,
+            duration = duration,
+            lastUpdate = GetTime()
+        }
+    end
+    
+    -- Fire callbacks for changes
+    if next(changes) then
+        self:FireStateChanges(changes)
+    end
+    
+    return changes
+end
+
+-- Update single spell state
+function TimelineData:UpdateSpellState(spellID)
+    local spellData = trackedSpells[spellID]
+    if not spellData then return nil end
+    
+    local isOnCD, remaining, duration = self:GetCooldownState(spellID)
+    
+    local oldState = cooldownStates[spellID]
+    local wasOnCD = oldState and oldState.isOnCD or false
+    
+    cooldownStates[spellID] = {
+        isOnCD = isOnCD,
+        remaining = remaining,
+        duration = duration,
+        lastUpdate = GetTime()
+    }
+    
+    -- Return change info if state transitioned
+    if isOnCD ~= wasOnCD then
+        return {
+            spellID = spellID,
+            isOnCD = isOnCD,
+            remaining = remaining,
+            duration = duration,
+            name = spellData.name,
+            icon = spellData.icon,
+            source = spellData.source,
+            trackerKey = spellData.trackerKey,
+            transition = isOnCD and "started" or "ended"
+        }
+    end
+    
+    return nil
+end
+
+-- Get current state for a spell
+function TimelineData:GetState(spellID)
+    return cooldownStates[spellID]
+end
+
+-- Get all current states
+function TimelineData:GetAllStates()
+    return cooldownStates
+end
+
+-- Get all spells currently on cooldown
+function TimelineData:GetActiveCooldowns()
+    local active = {}
+    
+    -- Get TimelineUI reference for enabled check
+    local TimelineUI = TUICD.TimelineUI
+    
+    for spellID, state in pairs(cooldownStates) do
+        if state.isOnCD then
+            local spellData = trackedSpells[spellID]
+            if spellData then
+                -- Check if spell is enabled in UI settings
+                local isEnabled = true
+                if TimelineUI and TimelineUI.IsSpellEnabled then
+                    isEnabled = TimelineUI:IsSpellEnabled(spellID)
+                end
+                
+                if isEnabled then
+                    -- Recalculate remaining time (may have changed since last update)
+                    local isOnCD, remaining, duration = self:GetCooldownState(spellID)
+                    if isOnCD then
+                        active[spellID] = {
+                            spellID = spellID,
+                            name = spellData.name,
+                            icon = spellData.icon,
+                            source = spellData.source,
+                            trackerKey = spellData.trackerKey,
+                            remaining = remaining,
+                            duration = duration
+                        }
+                    end
+                end
+            end
+        end
+    end
+    
+    return active
+end
+
+-- Get all spells currently ready (not on cooldown)
+function TimelineData:GetReadySpells()
+    local ready = {}
+    
+    -- Get TimelineUI reference for enabled check
+    local TimelineUI = TUICD.TimelineUI
+    
+    for spellID, state in pairs(cooldownStates) do
+        if not state.isOnCD then
+            local spellData = trackedSpells[spellID]
+            if spellData then
+                -- Check if spell is enabled in UI settings
+                local isEnabled = true
+                if TimelineUI and TimelineUI.IsSpellEnabled then
+                    isEnabled = TimelineUI:IsSpellEnabled(spellID)
+                end
+                
+                if isEnabled then
+                    ready[spellID] = {
+                        spellID = spellID,
+                        name = spellData.name,
+                        icon = spellData.icon,
+                        source = spellData.source,
+                        trackerKey = spellData.trackerKey,
+                    }
+                end
+            end
+        end
+    end
+    
+    return ready
+end
+
+-- ============================================================================
+-- CALLBACKS
+-- ============================================================================
+
+function TimelineData:RegisterCallback(callback)
+    table.insert(stateCallbacks, callback)
+end
+
+function TimelineData:UnregisterCallback(callback)
+    for i, cb in ipairs(stateCallbacks) do
+        if cb == callback then
+            table.remove(stateCallbacks, i)
+            return
+        end
+    end
+end
+
+function TimelineData:FireStateChanges(changes)
+    for _, callback in ipairs(stateCallbacks) do
+        pcall(callback, changes)
+    end
+end
+
+-- ============================================================================
+-- DEBUG COMMANDS
+-- ============================================================================
+
+function TimelineData:DumpTrackedSpells()
+    print("|cff00ccff[Timeline]|r Tracked Spells (from MultiTracker):")
+    local count = 0
+    for spellID, data in pairs(trackedSpells) do
+        count = count + 1
+        local sourceLabel = data.source or "custom"
+        print(string.format("  %d. %s (%d) - %s [%s]", 
+            count, data.name, spellID, sourceLabel, data.trackerName or "?"))
+    end
+    print(string.format("Total: %d spells", count))
+end
+
+function TimelineData:DumpCooldownStates()
+    print("|cff00ccff[Timeline]|r Cooldown States:")
+    local onCD, ready = 0, 0
+    
+    for spellID, state in pairs(cooldownStates) do
+        local spellData = trackedSpells[spellID]
+        local name = spellData and spellData.name or "Unknown"
+        
+        if state.isOnCD then
+            onCD = onCD + 1
+            print(string.format("  |cffff8800ON CD|r: %s (%d) - %.1fs remaining",
+                name, spellID, state.remaining))
+        else
+            ready = ready + 1
+            print(string.format("  |cff00ff00READY|r: %s (%d)", name, spellID))
+        end
+    end
+    
+    print(string.format("On Cooldown: %d | Ready: %d", onCD, ready))
+end
+
+function TimelineData:TestGCDFilter()
+    print("|cff00ccff[Timeline]|r Testing GCD filter on all tracked spells...")
+    
+    for spellID, data in pairs(trackedSpells) do
+        local isOnCD, remaining, duration = self:GetCooldownState(spellID)
+        
+        -- Also get raw values for comparison
+        local rawStart, rawDuration = 0, 0
+        pcall(function()
+            local dObj = C_Spell.GetSpellCooldownDuration(spellID)
+            if dObj then
+                cdSensor:SetCooldownFromDurationObject(dObj, true)
+                rawStart, rawDuration = cdSensor:GetCooldownTimes()
+            end
+        end)
+        
+        local status = isOnCD and "|cffff8800ON CD|r" or "|cff00ff00READY|r"
+        local rawMs = rawDuration and string.format("(raw: %dms)", rawDuration) or "(no data)"
+        
+        print(string.format("  %s: %s - remaining: %.1fs, duration: %.1fs %s",
+            data.name, status, remaining, duration, rawMs))
+    end
+end
+
+-- ============================================================================
+-- RETURN
+-- ============================================================================
+
+return TimelineData

@@ -381,6 +381,9 @@ local function Initialize()
         TUICD.BuffBarsDock:Init()
     end
     
+    -- NOTE: Timeline is NOT initialized here - it registers for TUICD_INITIALIZED
+    -- and initializes itself when that event fires (after database is fully ready)
+    
     -- Register BuffBarsFrames with Layout Mode
     if TUICD.Layout and TUICD.BuffBarsFrames then
         TUICD.Layout:RegisterCallback("OnLayoutModeEnter", function()
@@ -413,6 +416,15 @@ local function Initialize()
     
     -- Load forceAllVisible state
     TUICD:LoadForceAllVisibleState()
+    
+    -- Fire initialization complete event - modules can now auto-enable
+    print("|cff00ccff[TUICD Main]|r Firing TUICD_INITIALIZED event...")
+    if TUICD.Events then
+        TUICD.Events:Fire("TUICD_INITIALIZED")
+        print("|cff00ccff[TUICD Main]|r TUICD_INITIALIZED fired")
+    else
+        print("|cffff0000[TUICD Main]|r ERROR: TUICD.Events not available!")
+    end
     
     TUICD:Print("v" .. TUICD.VERSION .. " Loaded - Type |cffFFFFFF/tuicd|r to open settings")
 end

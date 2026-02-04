@@ -174,15 +174,25 @@ function BuffBarsData:DiscoverSlots()
             pcall(function()
                 local auraData = C_UnitAuras.GetAuraDataByAuraInstanceID("player", auraInstanceID)
                 if auraData then
-                    spellID = auraData.spellId
-                    if auraData.name then spellName = auraData.name end
-                    if auraData.icon then texture = texture or auraData.icon end
+                    -- Check for secret values and skip if secret (Midnight restriction)
+                    local sid = auraData.spellId
+                    if sid and not issecretvalue(sid) then
+                        spellID = sid
+                    end
+                    local aName = auraData.name
+                    if aName and not issecretvalue(aName) then
+                        spellName = aName
+                    end
+                    local aIcon = auraData.icon
+                    if aIcon and not issecretvalue(aIcon) then
+                        texture = texture or aIcon
+                    end
                 end
             end)
         end
 
         -- Also try GetPlayerAuraBySpellID if we resolved a spellID
-        if spellID and not isActive and C_UnitAuras and C_UnitAuras.GetPlayerAuraBySpellID then
+        if spellID and not issecretvalue(spellID) and not isActive and C_UnitAuras and C_UnitAuras.GetPlayerAuraBySpellID then
             pcall(function()
                 local auraData = C_UnitAuras.GetPlayerAuraBySpellID(spellID)
                 if auraData then
@@ -193,7 +203,7 @@ function BuffBarsData:DiscoverSlots()
         end
 
         -- Look up spell name via SpellAPI if still missing
-        if spellID and not spellName and SpellAPI then
+        if spellID and not issecretvalue(spellID) and not spellName and SpellAPI then
             local info = SpellAPI:GetSpellInfo(spellID)
             if info then spellName = info.name end
             if not texture then
@@ -203,9 +213,9 @@ function BuffBarsData:DiscoverSlots()
 
         discoveredSlots[i] = {
             slotIndex = i,
-            spellID = spellID,
-            name = spellName or ("Buff Slot " .. i),
-            texture = texture,
+            spellID = (spellID and not issecretvalue(spellID)) and spellID or nil,
+            name = (spellName and not issecretvalue(spellName)) and spellName or ("Buff Slot " .. i),
+            texture = (texture and not issecretvalue(texture)) and texture or nil,
             isActive = isActive,
             auraInstanceID = auraInstanceID,
         }
@@ -263,9 +273,10 @@ end
 -- Re-discover and remap existing configs if slots shifted (e.g. talent change)
 function BuffBarsData:RediscoverSlots()
     -- Remember old spellID -> slotIndex mapping
+    -- Skip any entries with secret spellIDs (can't use as table keys)
     local oldMapping = {}
     for idx, info in pairs(discoveredSlots) do
-        if info.spellID then
+        if info.spellID and not issecretvalue(info.spellID) then
             oldMapping[info.spellID] = idx
         end
     end
@@ -278,7 +289,8 @@ function BuffBarsData:RediscoverSlots()
 
     local remaps = {}
     for newIdx, info in pairs(discoveredSlots) do
-        if info.spellID and oldMapping[info.spellID] then
+        -- Only process non-secret spellIDs
+        if info.spellID and not issecretvalue(info.spellID) and oldMapping[info.spellID] then
             local oldIdx = oldMapping[info.spellID]
             if oldIdx ~= newIdx then
                 remaps[oldIdx] = newIdx
@@ -356,6 +368,21 @@ local DB_DEFAULTS = {
         spacing = 2,
         justify = "CENTER",       -- "START", "CENTER", "END" (arrival order placement)
         sortMode = "arrival",     -- "arrival" (FIFO center-out) or "list" (spell list order)
+        -- Visibility settings
+        visibilityEnabled = false,  -- Master toggle (false = always show)
+        showInCombat = true,
+        showOutOfCombat = true,
+        showSolo = true,
+        showInParty = true,
+        showInRaid = true,
+        showInDungeon = true,
+        showInDelve = true,
+        showInArena = true,
+        showInBattleground = true,
+        showHasTarget = true,
+        showNoTarget = true,
+        showMounted = true,
+        showNotMounted = true,
         -- Override system: when enabled, dock settings override individual bar settings
         overrideBarSettings = false,
         barOverrides = {
@@ -821,22 +848,26 @@ function BuffBarsData:UpdateSlotState(barKey)
             pcall(function()
                 local auraData = C_UnitAuras.GetAuraDataByAuraInstanceID("player", auraInstanceID)
                 if auraData then
-                    if auraData.spellId then
-                        config.cachedSpellID = auraData.spellId
+                    -- Only use non-secret values
+                    local resolvedSpellID = auraData.spellId
+                    if resolvedSpellID and not issecretvalue(resolvedSpellID) then
+                        config.cachedSpellID = resolvedSpellID
                         -- Also update display name if we only had "Buff Slot N"
-                        if auraData.name and config.name and config.name:match("^Buff Slot %d+$") then
-                            config.name = auraData.name
+                        local resolvedName = auraData.name
+                        if resolvedName and not issecretvalue(resolvedName) and config.name and config.name:match("^Buff Slot %d+$") then
+                            config.name = resolvedName
                             -- Update discovered slot info too
                             local slotInfo = discoveredSlots[slotIndex]
                             if slotInfo then
-                                slotInfo.spellID = auraData.spellId
-                                slotInfo.name = auraData.name
+                                slotInfo.spellID = resolvedSpellID
+                                slotInfo.name = resolvedName
                             end
                         end
                     end
-                    if auraData.icon and (not config.texture or config.texture == nil) then
-                        config.texture = auraData.icon
-                        config.iconID = auraData.icon
+                    local resolvedIcon = auraData.icon
+                    if resolvedIcon and not issecretvalue(resolvedIcon) and (not config.texture or config.texture == nil) then
+                        config.texture = resolvedIcon
+                        config.iconID = resolvedIcon
                     end
                 end
             end)
@@ -1333,6 +1364,26 @@ function BuffBarsData:HandleSlashCommand(args)
             TUICD:Print("Poll: |cff888888STOPPED|r")
         end
 
+    elseif cmd == "reset" then
+        -- Clear all saved buff bar data and rediscover
+        local db = self:GetDB()
+        if db then
+            -- Clear saved spells (keeps dock settings)
+            db.spells = {}
+            wipe(discoveredSlots)
+            wipe(spellStates)
+            wipe(cdmIcons)
+            discoveryDone = false
+            
+            -- Rediscover
+            C_Timer.After(0.5, function()
+                local count = self:DiscoverSlots()
+                TUICD:Print("Reset complete. Rediscovered " .. count .. " buff slot(s).")
+                TUICD:Print("Use '/tuicd buffbars list' to see slots, then '/tuicd buffbars enable N' to enable.")
+            end)
+        end
+        TUICD:Print("Clearing saved buff bar data...")
+
     elseif cmd == "layout" or cmd == "show" or cmd == "hide" then
         -- Forward to BuffBarsFrames
         local frames = TUICD.BuffBarsFrames
@@ -1351,6 +1402,7 @@ function BuffBarsData:HandleSlashCommand(args)
         print("  state     - Show current bar states")
         print("  probe N   - Deep diagnostic for slot N")
         print("  poll      - Show poll status")
+        print("  reset     - Clear saved data and rediscover")
         print("  colortime - Toggle color-by-time (green->yellow->red)")
         print("  layout    - Toggle layout/drag mode")
         print("  show      - Force show all bars (debug)")

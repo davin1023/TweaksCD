@@ -62,37 +62,6 @@ local TRACKERS = {
 }
 
 -- ============================================================================
--- VERY EARLY HIDING: Start hiding trackers at FILE LOAD TIME
--- This runs before OnEnable and catches trackers the moment they're created
--- ============================================================================
-do
-    local earlyHideFrame = CreateFrame("Frame")
-    earlyHideFrame.elapsed = 0
-    earlyHideFrame:SetScript("OnUpdate", function(self, elapsed)
-        -- Check if TUIFrame init is complete
-        if TUICD.TUIFrame and TUICD.TUIFrame.IsInitializationComplete 
-           and TUICD.TUIFrame.IsInitializationComplete() then
-            self:SetScript("OnUpdate", nil)
-            return
-        end
-        
-        -- Hide all Blizzard viewers every single frame
-        for _, tracker in ipairs(TRACKERS) do
-            local viewer = _G[tracker.name]
-            if viewer and viewer:GetAlpha() > 0 then
-                viewer:SetAlpha(0)
-            end
-        end
-        
-        -- Safety timeout after 10 seconds
-        self.elapsed = self.elapsed + elapsed
-        if self.elapsed > 10.0 then
-            self:SetScript("OnUpdate", nil)
-        end
-    end)
-end
-
--- ============================================================================
 -- CONSTANTS
 -- ============================================================================
 
@@ -4447,6 +4416,100 @@ local function ApplyAllClickthrough()
     ApplyClickthrough("customTrackers")
 end
 
+-- ============================================================================
+-- EVENT SUPPRESSION FOR BLIZZARD VIEWERS
+-- ============================================================================
+-- When visibility settings hide the Essential/Utility trackers, we need to
+-- suppress Blizzard's event processing to prevent secret value comparison errors.
+-- Blizzard's CooldownViewer code tries to compare spellIDs and charges when
+-- processing UNIT_AURA and SPELL_UPDATE_COOLDOWN events, which fails with
+-- secret values during combat.
+--
+-- We use UnregisterAllEvents() to completely stop event processing, which is
+-- more reliable than replacing the OnEvent handler.
+--
+-- IMPORTANT: We do NOT suppress events when the buffs tracker is hidden via
+-- the "Hide Buff Tracker (use individual icons only)" setting. That setting
+-- needs events to keep processing so that per-icon highlights can still track
+-- aura data from the hidden icons. Event suppression is ONLY for visibility
+-- settings (show in combat, show in group, etc.).
+
+local suppressedViewerEvents = {}  -- Track which viewers have suppressed events
+
+-- Check if buffs tracker is hidden specifically by the hideTracker setting
+-- (as opposed to visibility settings like "show in combat")
+local function IsBuffsHiddenByHideTrackerSetting()
+    local BuffHighlights = TUICD.BuffHighlights
+    if BuffHighlights and BuffHighlights.IsTrackerHidden and BuffHighlights:IsTrackerHidden() then
+        -- Check if we're in layout mode - if so, it's not actually hidden
+        local layoutContainer = _G["TweaksUI_LayoutContainer"]
+        if layoutContainer and layoutContainer:IsShown() then
+            return false
+        end
+        return true
+    end
+    return false
+end
+
+-- Known events that Blizzard's CooldownViewer registers for
+local COOLDOWN_VIEWER_EVENTS = {
+    "SPELL_UPDATE_COOLDOWN",
+    "SPELL_UPDATE_CHARGES",
+    "UNIT_AURA",
+    "PLAYER_TARGET_CHANGED",
+    "PLAYER_ENTERING_WORLD",
+    "ACTIONBAR_UPDATE_COOLDOWN",
+    "BAG_UPDATE_COOLDOWN",
+    "LOSS_OF_CONTROL_ADDED",
+    "LOSS_OF_CONTROL_UPDATE",
+}
+
+-- Suppress Blizzard's event processing on a viewer
+local function SuppressViewerEvents(viewer, trackerKey)
+    if not viewer then return end
+    if suppressedViewerEvents[trackerKey] then return end  -- Already suppressed
+    
+    -- Unregister all events to completely stop Blizzard's event processing
+    -- This is the same approach used by MultiTracker
+    pcall(function()
+        viewer:UnregisterAllEvents()
+    end)
+    
+    suppressedViewerEvents[trackerKey] = true
+    dprint(string.format("[%s] Events suppressed via UnregisterAllEvents (visibility hidden)", trackerKey))
+end
+
+-- Restore Blizzard's event processing on a viewer
+local function RestoreViewerEvents(viewer, trackerKey)
+    if not viewer then return end
+    if not suppressedViewerEvents[trackerKey] then return end  -- Not suppressed
+    
+    -- Re-register all known CooldownViewer events
+    pcall(function()
+        for _, event in ipairs(COOLDOWN_VIEWER_EVENTS) do
+            viewer:RegisterEvent(event)
+        end
+    end)
+    
+    suppressedViewerEvents[trackerKey] = nil
+    dprint(string.format("[%s] Events restored via RegisterEvent (visibility shown)", trackerKey))
+    
+    -- NOTE: We intentionally do NOT call RefreshAllData() or Layout() here.
+    -- Calling those functions during combat triggers Blizzard's code paths that
+    -- compare secret values (spellID, charges), causing "attempt to compare secret value" errors.
+    -- Instead, we let the natural event flow (SPELL_UPDATE_COOLDOWN, UNIT_AURA) update
+    -- the viewer gradually. The icons will update on the next cooldown change or aura event.
+end
+
+-- Check if a viewer's events are currently suppressed
+local function AreViewerEventsSuppressed(trackerKey)
+    return suppressedViewerEvents[trackerKey] == true
+end
+
+-- ============================================================================
+-- VISIBILITY UPDATES
+-- ============================================================================
+
 -- Update visibility for a single tracker (called from ticker and events)
 local function UpdateTrackerVisibility(trackerKey)
     local trackerInfo = GetTrackerInfo(trackerKey)
@@ -4454,9 +4517,7 @@ local function UpdateTrackerVisibility(trackerKey)
     
     local viewer = _G[trackerInfo.name]
     if not viewer then return end
-    if TUICD.CooldownHighlights and TUICD.CooldownHighlights.SetContainerVisibility then
-        TUICD.CooldownHighlights:SetContainerVisibility(trackerKey)
-    end
+    
     -- During initialization, keep everything hidden
     local TUIFrame = TUICD.TUIFrame
     if TUIFrame and not TUIFrame.IsInitializationComplete() then
@@ -4466,11 +4527,66 @@ local function UpdateTrackerVisibility(trackerKey)
     
     local targetAlpha = GetTargetAlpha(trackerKey)
     local currentAlpha = viewer:GetAlpha()
+    local isInCombat = InCombatLockdown() or UnitAffectingCombat("player")
     
-    -- Only update if there's a meaningful difference
+    -- CRITICAL FIX for Midnight secret value errors:
+    -- The error occurs when:
+    -- 1. Tracker is hidden (alpha=0) outside combat with events suppressed
+    -- 2. Combat starts, tracker becomes visible (alpha=1)
+    -- 3. Events are restored, triggering Blizzard's RefreshData
+    -- 4. RefreshData compares spellID/charges which are SECRET during combat → ERROR
+    --
+    -- Solution: 
+    -- - When hiding: suppress events AND set alpha to 0
+    -- - When showing during combat: set alpha but DON'T restore events yet
+    -- - When combat ends: restore events (handled by PLAYER_REGEN_ENABLED)
+    --
+    -- This way, Blizzard's viewer is visible but not processing events during combat,
+    -- so no secret value comparisons happen.
+    
+    local wasHidden = currentAlpha < 0.5
+    local willBeHidden = targetAlpha < 0.5
+    
+    -- Handle event suppression based on visibility state
+    -- IMPORTANT: Don't suppress events for buffs tracker when hidden by the hideTracker setting
+    -- (the "Hide Buff Tracker (use individual icons only)" checkbox). Per-icon highlights
+    -- need the events to keep processing so they can track aura data from the hidden icons.
+    local shouldSuppressEvents = true
+    if trackerKey == "buffs" and IsBuffsHiddenByHideTrackerSetting() then
+        shouldSuppressEvents = false
+        -- Also make sure events are restored if they were previously suppressed
+        if AreViewerEventsSuppressed(trackerKey) then
+            RestoreViewerEvents(viewer, trackerKey)
+            dprint("[buffs] Hidden by hideTracker - restoring events for per-icon highlights")
+        end
+    end
+    
+    if willBeHidden and shouldSuppressEvents then
+        -- Going hidden: suppress events to prevent any refresh attempts
+        SuppressViewerEvents(viewer, trackerKey)
+    elseif wasHidden and not willBeHidden then
+        -- Going from hidden to visible
+        if isInCombat then
+            -- During combat: DON'T restore events - they'll be restored when combat ends
+            -- This prevents RefreshData from running with secret values
+            dprint(string.format("[%s] Showing during combat - events stay suppressed", trackerKey))
+        else
+            -- Outside combat: safe to restore events
+            RestoreViewerEvents(viewer, trackerKey)
+        end
+    end
+    
+    -- Update alpha
     if math.abs(currentAlpha - targetAlpha) > 0.01 then
         viewer:SetAlpha(targetAlpha)
-        dprint(string.format("[%s] Alpha: %.2f -> %.2f", trackerKey, currentAlpha, targetAlpha))
+        dprint(string.format("[%s] Alpha: %.2f -> %.2f (combat: %s)", trackerKey, currentAlpha, targetAlpha, tostring(isInCombat)))
+        
+        -- Disable/enable mouse based on visibility
+        if targetAlpha == 0 then
+            viewer:EnableMouse(false)
+        else
+            viewer:EnableMouse(true)
+        end
     end
     
     -- Handle mouse interaction for buff tracker when hidden by Individual Icons settings
@@ -4481,7 +4597,6 @@ local function UpdateTrackerVisibility(trackerKey)
             local isLayoutMode = layoutContainer and layoutContainer:IsShown()
             if not isLayoutMode then
                 viewer:EnableMouse(false)
-                -- Also disable mouse on the container frame
                 local container = _G["TweaksUI_BuffsContainer"]
                 if container then
                     container:EnableMouse(false)
@@ -4496,7 +4611,6 @@ local function UpdateTrackerVisibility(trackerKey)
                 end
             end
         else
-            -- Restore mouse interaction when not hidden
             if targetAlpha > 0 then
                 viewer:EnableMouse(true)
             end
@@ -4701,20 +4815,10 @@ local function HookViewer(viewer, trackerKey)
         pcall(ApplyGridLayout, viewer, trackerKey)
     end
     
-    -- Set visibility based on initialization state
-    -- During init, keep viewers hidden - they'll be revealed by TUIFrame.RevealAllFrames()
-    -- After init, apply normal visibility rules
-    local TUIFrame = TUICD.TUIFrame
-    if TUIFrame and not TUIFrame.IsInitializationComplete() then
-        -- Keep hidden during initialization
-        viewer:SetAlpha(0)
-        dprint(string.format("[%s] Init phase - keeping hidden", trackerKey))
-    else
-        -- Apply normal visibility
-        local targetAlpha = GetTargetAlpha(trackerKey)
-        viewer:SetAlpha(targetAlpha)
-        dprint(string.format("[%s] Initial alpha: %.2f", trackerKey, targetAlpha))
-    end
+    -- Apply normal visibility
+    local targetAlpha = GetTargetAlpha(trackerKey)
+    viewer:SetAlpha(targetAlpha)
+    dprint(string.format("[%s] Initial alpha: %.2f", trackerKey, targetAlpha))
 end
 
 local function HookAllViewers()
@@ -4764,16 +4868,7 @@ local function OnEvent(self, event, arg1, ...)
         C_Timer.After(0.5, HookAllViewers)
         
     elseif event == "PLAYER_ENTERING_WORLD" then
-        -- Hide trackers immediately to prevent showing in wrong position
-        -- They'll be revealed by TUIFrame.RevealAllFrames() after layout is complete
-        for _, tracker in ipairs(TRACKERS) do
-            local viewer = _G[tracker.name]
-            if viewer then
-                viewer:SetAlpha(0)
-            end
-        end
-        
-        -- Hook viewers and apply initial layout (but keep hidden)
+        -- Hook viewers and apply initial layout
         C_Timer.After(0.5, function()
             HookAllViewers()
             -- Apply layout to all visible viewers
@@ -4783,8 +4878,6 @@ local function OnEvent(self, event, arg1, ...)
                     ApplyGridLayout(viewer, tracker.key)
                 end
             end
-            -- Note: Don't restore alpha here - TUIFrame.RevealAllFrames() handles visibility
-            -- after all modules have finished positioning at 3.5s
         end)
         
         -- DELAYED CACHE RESET: Clear session caches and recapture after positions are stable
@@ -4838,8 +4931,18 @@ local function OnEvent(self, event, arg1, ...)
         -- Left combat - safe to do UI updates
         for _, tracker in ipairs(TRACKERS) do
             local viewer = _G[tracker.name]
-            if viewer and viewer:IsShown() then
-                ApplyGridLayout(viewer, tracker.key)
+            if viewer then
+                -- Restore events for visible trackers that had them suppressed during combat
+                -- This is safe now because we're outside combat (no secret values)
+                local targetAlpha = GetTargetAlpha(tracker.key)
+                if targetAlpha > 0 and AreViewerEventsSuppressed(tracker.key) then
+                    RestoreViewerEvents(viewer, tracker.key)
+                    dprint(string.format("[%s] Combat ended - restoring events for visible tracker", tracker.key))
+                end
+                
+                if viewer:IsShown() then
+                    ApplyGridLayout(viewer, tracker.key)
+                end
             end
         end
         -- Update visibility (combat state changed)
@@ -11871,33 +11974,6 @@ end
 
 
 function Cooldowns:OnEnable()
-    -- AGGRESSIVE EARLY HIDING: Use OnUpdate for frame-by-frame hiding
-    -- This is more aggressive than a ticker and catches the very first frame
-    local hideFrame = CreateFrame("Frame")
-    hideFrame.elapsed = 0
-    hideFrame:SetScript("OnUpdate", function(self, elapsed)
-        local TUIFrame = TUICD.TUIFrame
-        if TUIFrame and TUIFrame.IsInitializationComplete and TUIFrame.IsInitializationComplete() then
-            -- Init complete, stop hiding
-            self:SetScript("OnUpdate", nil)
-            return
-        end
-        
-        -- Hide all Blizzard viewers every single frame
-        for _, tracker in ipairs(TRACKERS) do
-            local viewer = _G[tracker.name]
-            if viewer and viewer:GetAlpha() > 0 then
-                viewer:SetAlpha(0)
-            end
-        end
-        
-        -- Safety timeout after 5 seconds
-        self.elapsed = self.elapsed + elapsed
-        if self.elapsed > 5.0 then
-            self:SetScript("OnUpdate", nil)
-        end
-    end)
-    
     -- Register events
     eventFrame:RegisterEvent("ADDON_LOADED")
     eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")

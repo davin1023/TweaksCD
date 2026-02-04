@@ -814,17 +814,22 @@ function CooldownHighlights:SetContainerVisibility(trackerKey)
     local shouldHideEverything = shouldEverythingBeHidden(trackerKey)
     local shouldHideOnlyContainer = CooldownHighlights:GetState(trackerKey, "hideTracker")
     local viewer = GetViewer(trackerKey)
-    if viewer and not shouldHideEverything and not shouldHideOnlyContainer then
-        CooldownHighlights:invokeProtectedContainerShow(viewer)
-        viewer:SetAlpha(1)
-        viewer:EnableMouse(true)
-        CooldownHighlights:StopHideEnforcement(trackerKey)
-    elseif viewer and (shouldHideEverything or shouldHideOnlyContainer) then 
-        viewer:Hide()
-        viewer:SetAlpha(0)
-        viewer:EnableMouse(false)
-        CooldownHighlights:StartHideEnforcement(trackerKey)
+    
+    if viewer then
+        if not shouldHideEverything and not shouldHideOnlyContainer then
+            -- SHOW: Set alpha to 1 and enable mouse
+            viewer:SetAlpha(1)
+            viewer:EnableMouse(true)
+            CooldownHighlights:StopHideEnforcement(trackerKey)
+        else
+            -- HIDE: Set alpha to 0 and disable mouse
+            -- Event suppression is handled by UpdateTrackerVisibility to prevent secret value errors
+            viewer:SetAlpha(0)
+            viewer:EnableMouse(false)
+            CooldownHighlights:StartHideEnforcement(trackerKey)
+        end
     end
+    
     return shouldHideEverything, shouldHideOnlyContainer
 end
 

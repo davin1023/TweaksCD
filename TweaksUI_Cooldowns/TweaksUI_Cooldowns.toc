@@ -1,8 +1,8 @@
 ## Interface: 120000
 ## Title: TweaksUI: Cooldowns
-## Notes: Enhanced cooldown tracking with custom layouts, visibility controls, and proc alerts.|n|cff00ccffv3.0.40:|r Performance optimization - massive CPU reduction
+## Notes: Enhanced cooldown tracking with custom layouts, visibility controls, and proc alerts.|n|cff00ccffv3.0.45:|r Timeline delayed spell loading fix
 ## Author: Meltheran
-## Version: 3.0.40
+## Version: 3.0.55
 ## SavedVariables: TweaksUI_Cooldowns_DB
 ## SavedVariablesPerCharacter: TweaksUI_Cooldowns_CharDB
 ## OptionalDeps: Masque, LibSharedMedia-3.0, CMT, !TweaksUI
@@ -97,6 +97,14 @@ Modules\Bars\BuffBarsFrames.lua
 Modules\Bars\BuffBarsDock.lua
 Modules\Bars\BuffBarsUI.lua
 Modules\Bars\Bars.lua
+
+# ============================================================================
+# Modules - Timeline (Phase 3: Settings Panel & Persistence)
+# ============================================================================
+Modules\Timeline\TimelineData.lua
+Modules\Timeline\Timeline.lua
+Modules\Timeline\TimelineFrames.lua
+Modules\Timeline\TimelineUI.lua
 
 # ============================================================================
 # Modules - Profiles UI

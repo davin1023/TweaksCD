@@ -524,21 +524,40 @@ end
 function BarsUI:RefreshConfigPanel()
     if not configScrollChild then return end
 
-    -- Hide ALL children from both scroll containers to prevent bleed-through
+    -- Hide ALL children from all scroll containers to prevent bleed-through
     for _, child in ipairs({configScrollChild:GetChildren()}) do child:Hide() end
     if dockScrollChild then
         for _, child in ipairs({dockScrollChild:GetChildren()}) do child:Hide() end
+    end
+    if self._visibilityScrollChild then
+        for _, child in ipairs({self._visibilityScrollChild:GetChildren()}) do child:Hide() end
     end
     CloseActivePopup()
 
     if activeTab == "dock" then
         -- Dock tab: swap scroll child and rebuild dock UI
+        if configScrollChild then configScrollChild:Hide() end
+        if self._visibilityScrollChild then self._visibilityScrollChild:Hide() end
+        if dockScrollChild then dockScrollChild:Show() end
         configFrame:SetScrollChild(dockScrollChild)
         self:BuildDockSettingsUI(dockScrollChild)
         return
     end
 
+    if activeTab == "visibility" then
+        -- Visibility tab: swap scroll child and build visibility UI
+        if configScrollChild then configScrollChild:Hide() end
+        if dockScrollChild then dockScrollChild:Hide() end
+        if self._visibilityScrollChild then self._visibilityScrollChild:Show() end
+        configFrame:SetScrollChild(self._visibilityScrollChild)
+        self:BuildVisibilityUI(self._visibilityScrollChild)
+        return
+    end
+
     -- Spell tab: swap scroll child back
+    if dockScrollChild then dockScrollChild:Hide() end
+    if self._visibilityScrollChild then self._visibilityScrollChild:Hide() end
+    if configScrollChild then configScrollChild:Show() end
     configFrame:SetScrollChild(configScrollChild)
 
     if not selectedBarKey then
@@ -1673,6 +1692,112 @@ function BarsUI:BuildDockSettingsUI(parent)
 end
 
 -- ============================================================================
+-- VISIBILITY TAB
+-- ============================================================================
+
+function BarsUI:BuildVisibilityUI(parent)
+    local y = 10
+    
+    local BarsDock = TUICD.BarsDock
+    
+    -- Helper to get/set dock settings
+    local function GetSetting(key)
+        local settings = BarsData:GetDockSettings()
+        return settings[key]
+    end
+    
+    local function SetSetting(key, value)
+        BarsData:SetDockSetting(key, value)
+        -- Update dock visibility
+        if BarsDock and BarsDock.UpdateVisibility then
+            BarsDock:UpdateVisibility()
+        end
+    end
+    
+    -- Section header helper
+    local function CreateHeader(text)
+        local header = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        header:SetPoint("TOPLEFT", 0, -y)
+        header:SetText("|cffaaaaaa— " .. text .. " —|r")
+        header:Show()
+        y = y + 18
+        return header
+    end
+    
+    -- Checkbox helper
+    local function CreateVisCheckbox(text, key)
+        local check = CreateFrame("CheckButton", nil, parent, "InterfaceOptionsCheckButtonTemplate")
+        check:SetPoint("TOPLEFT", 20, -y)
+        check.Text:SetText(text)
+        check:SetChecked(GetSetting(key))
+        check:SetScript("OnClick", function(self)
+            SetSetting(key, self:GetChecked())
+        end)
+        check:Show()
+        y = y + 24
+        return check
+    end
+    
+    -- Title
+    local title = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    title:SetPoint("TOPLEFT", 0, -y)
+    title:SetText("|cffffd100Visibility Conditions|r")
+    title:Show()
+    y = y + 25
+    
+    -- Master toggle
+    local enableCheck = CreateFrame("CheckButton", nil, parent, "InterfaceOptionsCheckButtonTemplate")
+    enableCheck:SetPoint("TOPLEFT", 0, -y)
+    enableCheck.Text:SetText("Enable Visibility Rules")
+    enableCheck:SetChecked(GetSetting("visibilityEnabled"))
+    enableCheck:SetScript("OnClick", function(self)
+        SetSetting("visibilityEnabled", self:GetChecked())
+    end)
+    enableCheck:Show()
+    y = y + 24
+    
+    -- Hint text
+    local hint = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    hint:SetPoint("TOPLEFT", 20, -y)
+    hint:SetText("|cff888888When enabled, bars only show in checked situations:|r")
+    hint:Show()
+    y = y + 18
+    
+    -- Combat section
+    CreateHeader("Combat State")
+    CreateVisCheckbox("Show In Combat", "showInCombat")
+    CreateVisCheckbox("Show Out of Combat", "showOutOfCombat")
+    
+    y = y + 5
+    
+    -- Group section
+    CreateHeader("Group Type")
+    CreateVisCheckbox("Show Solo", "showSolo")
+    CreateVisCheckbox("Show in Party", "showInParty")
+    CreateVisCheckbox("Show in Raid", "showInRaid")
+    
+    y = y + 5
+    
+    -- Instance section
+    CreateHeader("Instance Type")
+    CreateVisCheckbox("Show in Arena", "showInArena")
+    CreateVisCheckbox("Show in Battleground", "showInBattleground")
+    CreateVisCheckbox("Show in Dungeon", "showInDungeon")
+    CreateVisCheckbox("Show in Delve", "showInDelve")
+    
+    y = y + 5
+    
+    -- Target / Mount section
+    CreateHeader("Target / Mount")
+    CreateVisCheckbox("Has Target", "showHasTarget")
+    CreateVisCheckbox("No Target", "showNoTarget")
+    CreateVisCheckbox("Mounted", "showMounted")
+    CreateVisCheckbox("Not Mounted", "showNotMounted")
+    
+    parent:SetHeight(y + 20)
+end
+
+-- ============================================================================
 -- MAIN PANEL CREATION
 -- ============================================================================
 
@@ -1866,6 +1991,7 @@ function BarsUI:CreatePanel()
     local tabDefs = {
         { key = "spell", label = "Spell Config" },
         { key = "dock",  label = "Dock" },
+        { key = "visibility", label = "Visibility" },
     }
     local tabX = 0
     for _, def in ipairs(tabDefs) do
@@ -1903,11 +2029,17 @@ function BarsUI:CreatePanel()
     configFrame:SetPoint("TOPLEFT", 6, -32)
     configFrame:SetPoint("BOTTOMRIGHT", -26, 6)
 
-    configScrollChild = CreateFrame("Frame")
+    configScrollChild = CreateFrame("Frame", nil, configFrame)
     configScrollChild:SetSize(CONTROL_WIDTH, 1)
 
-    dockScrollChild = CreateFrame("Frame")
+    dockScrollChild = CreateFrame("Frame", nil, configFrame)
     dockScrollChild:SetSize(CONTROL_WIDTH, 1)
+    dockScrollChild:Hide()
+
+    local visibilityScrollChild = CreateFrame("Frame", nil, configFrame)
+    visibilityScrollChild:SetSize(CONTROL_WIDTH, 1)
+    visibilityScrollChild:Hide()
+    BarsUI._visibilityScrollChild = visibilityScrollChild
 
     configFrame:SetScrollChild(configScrollChild)
 

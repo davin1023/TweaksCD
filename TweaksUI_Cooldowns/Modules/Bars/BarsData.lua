@@ -139,6 +139,21 @@ local DOCK_DEFAULTS = {
     justify = "CENTER",         -- "START", "CENTER", "END" (arrival order placement)
     sortMode = "arrival",       -- "arrival" (FIFO center-out) or "list" (spell list order)
     overrideBarSettings = false, -- When true, dock overrides individual bar visual settings
+    -- Visibility settings
+    visibilityEnabled = false,  -- Master toggle (false = always show)
+    showInCombat = true,
+    showOutOfCombat = true,
+    showSolo = true,
+    showInParty = true,
+    showInRaid = true,
+    showInDungeon = true,
+    showInDelve = true,
+    showInArena = true,
+    showInBattleground = true,
+    showHasTarget = true,
+    showNoTarget = true,
+    showMounted = true,
+    showNotMounted = true,
     barOverrides = {
         -- Bar dimensions
         width = 200,

@@ -896,17 +896,7 @@ UpdateIconChargeState = function(iconFrame)
         pcall(function() valueIsSecret = issecretvalue(rawCount) end)
     end
     
-    -- DEBUG: Print charge state info (remove after verified working)
-    if TUICD and TUICD.debugMode then
-        local name = C_Spell.GetSpellName and C_Spell.GetSpellName(spellID) or tostring(spellID)
-        if not valueIsSecret then
-            dprint(string.format("ChargeState: %s raw=%s secret=%s state=%s",
-                tostring(name), tostring(rawCount), tostring(valueIsSecret), tostring(iconFrame._state)))
-        else
-            dprint(string.format("ChargeState: %s raw=<SECRET> secret=true state=%s",
-                tostring(name), tostring(iconFrame._state)))
-        end
-    end
+    -- ChargeState debug removed - functionality verified working
     
     -- ================================================================
     -- 1. BADGE TEXT: Pass raw value straight to FontString

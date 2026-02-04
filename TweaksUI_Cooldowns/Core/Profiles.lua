@@ -388,6 +388,8 @@ local function GatherCurrentSettings(skipSync)
         multiCustomHighlights = multiCustomHighlights,
         -- Docks settings (Dynamic Docks feature)
         docks = DeepCopy(TweaksUI_Cooldowns_CharDB.docks or {}),
+        -- Buff Bars module (stores settings, spells, dock, positions)
+        buffBars = DeepCopy(TweaksUI_Cooldowns_CharDB.buffBars or {}),
     }
 end
 
@@ -628,6 +630,15 @@ function Profiles:ApplySettings(profileData, skipReloadCheck)
                 end
             end
         end
+        needsReload = true
+    end
+    
+    -- Apply Buff Bars settings (spells, dock settings, positions)
+    if profileData.buffBars then
+        if TUICD.PrintDebug then
+            TUICD:PrintDebug("Profile buffBars data found, applying...")
+        end
+        TweaksUI_Cooldowns_CharDB.buffBars = DeepCopy(profileData.buffBars)
         needsReload = true
     end
     

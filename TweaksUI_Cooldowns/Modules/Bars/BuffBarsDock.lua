@@ -415,15 +415,22 @@ function BuffBarsDock:LoadPosition()
     local dockSettings = BuffBarsData:GetDockSettings()
     local direction = dockSettings.direction or "DOWN"
     local orientation = (direction == "DOWN" or direction == "UP") and "VERTICAL" or "HORIZONTAL"
-    local anchor = GetJustifyAnchor(dockSettings.justify or "CENTER", orientation)
+    local currentAnchor = GetJustifyAnchor(dockSettings.justify or "CENTER", orientation)
     
     dockFrame:ClearAllPoints()
     if pos then
-        -- Use saved position with current justify anchor
-        dockFrame:SetPoint(pos.point or anchor, UIParent, pos.relPoint or "CENTER",
-            pos.x or 0, pos.y or 0)
+        local savedAnchor = pos.point
+        -- If saved anchor matches current justify, use saved position directly
+        if savedAnchor == currentAnchor then
+            dockFrame:SetPoint(savedAnchor, UIParent, pos.relPoint or "CENTER", pos.x or 0, pos.y or 0)
+        else
+            -- Anchor mismatch - use saved offset with current anchor
+            -- This will shift the dock position, but it's better than using wrong anchor
+            -- User should re-drag to correct position, which will save correct anchor
+            dockFrame:SetPoint(currentAnchor, UIParent, pos.relPoint or "CENTER", pos.x or 0, pos.y or 0)
+        end
     else
-        dockFrame:SetPoint(anchor, UIParent, "CENTER", 0, 50)
+        dockFrame:SetPoint(currentAnchor, UIParent, "CENTER", 0, 50)
     end
 end
 
@@ -688,7 +695,12 @@ function BuffBarsDock:DoLayout()
         end
     end
 
-    dockFrame:Show()
+    -- Only show if visibility conditions are met
+    if self:ShouldBeVisible() then
+        dockFrame:Show()
+    else
+        dockFrame:Hide()
+    end
 end
 
 -- ============================================================================
@@ -771,6 +783,8 @@ function BuffBarsDock:Enable()
             end
         end
     end
+    -- Register visibility events
+    self:RegisterVisibilityEvents()
     self:DoLayout()
 end
 
@@ -795,7 +809,146 @@ function BuffBarsDock:Disable()
     if dockFrame then
         dockFrame:Hide()
     end
+    -- Unregister visibility events
+    self:UnregisterVisibilityEvents()
     wipe(arrivalOrder)
+end
+
+-- ============================================================================
+-- VISIBILITY SYSTEM
+-- ============================================================================
+
+local visibilityEventFrame = nil
+
+-- Get current player state for visibility checks
+local function GetPlayerState()
+    local state = {
+        inCombat = InCombatLockdown() or UnitAffectingCombat("player"),
+        inGroup = IsInGroup(),
+        inRaid = IsInRaid(),
+        inDungeon = false,
+        inDelve = false,
+        inArena = false,
+        inBattleground = false,
+        isSolo = not IsInGroup(),
+        hasTarget = UnitExists("target"),
+        isMounted = TUICD.UnitAPI and TUICD.UnitAPI:IsMountedOrTravelForm() or IsMounted(),
+    }
+    
+    -- Check instance type
+    local _, instanceType = IsInInstance()
+    if instanceType == "party" then
+        state.inDungeon = true
+    elseif instanceType == "raid" then
+        -- raids are covered by inRaid
+    elseif instanceType == "arena" then
+        state.inArena = true
+    elseif instanceType == "pvp" then
+        state.inBattleground = true
+    elseif instanceType == "scenario" then
+        -- Delves are scenario type - check for delve map
+        local mapID = C_Map.GetBestMapForUnit("player")
+        if mapID then
+            local mapInfo = C_Map.GetMapInfo(mapID)
+            if mapInfo and mapInfo.mapType == Enum.UIMapType.Delve then
+                state.inDelve = true
+            end
+        end
+    end
+    
+    return state
+end
+
+-- Check if dock should be visible based on visibility conditions
+function BuffBarsDock:ShouldBeVisible()
+    -- Force all visible mode bypasses all visibility conditions
+    if TUICD.forceAllVisible then
+        return true
+    end
+    
+    -- Always show in Edit Mode / Layout Mode for positioning
+    if EditModeManagerFrame and EditModeManagerFrame:IsShown() then
+        return true
+    end
+    if self._isLayoutMode then
+        return true
+    end
+    
+    local dockSettings = BuffBarsData:GetDockSettings()
+    local enabled = dockSettings.visibilityEnabled
+    if not enabled then
+        return true  -- Visibility system disabled = always show
+    end
+    
+    local state = GetPlayerState()
+    
+    -- OR logic: if ANY checked condition is true, show
+    if state.inCombat and dockSettings.showInCombat then return true end
+    if not state.inCombat and dockSettings.showOutOfCombat then return true end
+    if state.isSolo and dockSettings.showSolo then return true end
+    if state.inGroup and not state.inRaid and dockSettings.showInParty then return true end
+    if state.inRaid and dockSettings.showInRaid then return true end
+    if state.inDungeon and dockSettings.showInDungeon then return true end
+    if state.inDelve and dockSettings.showInDelve then return true end
+    if state.inArena and dockSettings.showInArena then return true end
+    if state.inBattleground and dockSettings.showInBattleground then return true end
+    if state.hasTarget and dockSettings.showHasTarget then return true end
+    if not state.hasTarget and dockSettings.showNoTarget then return true end
+    if state.isMounted and dockSettings.showMounted then return true end
+    if not state.isMounted and dockSettings.showNotMounted then return true end
+    
+    -- No conditions matched
+    return false
+end
+
+-- Update dock visibility based on current conditions
+function BuffBarsDock:UpdateVisibility()
+    if not dockFrame then return end
+    
+    local shouldShow = self:ShouldBeVisible()
+    
+    if shouldShow then
+        -- Check if we have visible bars before showing
+        local visible = GetVisibleBars()
+        if #visible > 0 or self._isLayoutMode then
+            dockFrame:Show()
+        end
+    else
+        dockFrame:Hide()
+    end
+end
+
+-- Register for visibility-related events
+function BuffBarsDock:RegisterVisibilityEvents()
+    if not visibilityEventFrame then
+        visibilityEventFrame = CreateFrame("Frame")
+        visibilityEventFrame:SetScript("OnEvent", function(_, event, ...)
+            -- Throttle updates slightly
+            C_Timer.After(0.05, function()
+                BuffBarsDock:UpdateVisibility()
+            end)
+        end)
+    end
+    
+    visibilityEventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
+    visibilityEventFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
+    visibilityEventFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
+    visibilityEventFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
+    visibilityEventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+    visibilityEventFrame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
+    
+    -- Mount events
+    if C_MountJournal then
+        visibilityEventFrame:RegisterEvent("MOUNT_EQUIPMENT_APPLY_RESULT")
+    end
+    visibilityEventFrame:RegisterUnitEvent("UNIT_AURA", "player")
+end
+
+-- Unregister visibility events
+function BuffBarsDock:UnregisterVisibilityEvents()
+    if visibilityEventFrame then
+        visibilityEventFrame:UnregisterAllEvents()
+    end
 end
 
 return BuffBarsDock

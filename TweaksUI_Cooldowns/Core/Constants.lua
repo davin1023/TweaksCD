@@ -7,7 +7,7 @@
 local ADDON_NAME, TUICD = ...
 
 -- Version info
-TUICD.VERSION = "3.0.40"
+TUICD.VERSION = "3.0.44-debug"
 TUICD.ADDON_NAME = ADDON_NAME
 
 -- Build info - Midnight-only (12.0.0+)
@@ -44,6 +44,8 @@ TUICD.MODULE_LOAD_ORDER = {
 
 -- Events
 TUICD.EVENTS = {
+    -- Core initialization event (fired after all modules are initialized)
+    INITIALIZED = "TUICD_INITIALIZED",
     MODULE_ENABLED = "TUICD_ModuleEnabled",
     MODULE_DISABLED = "TUICD_ModuleDisabled",
     SETTINGS_CHANGED = "TUICD_SettingsChanged",
