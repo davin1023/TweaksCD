@@ -862,6 +862,11 @@ function BarsDock:ShouldBeVisible()
     if self._isLayoutMode then
         return true
     end
+
+    -- Config preview: force dock visible while a bar is being previewed
+    if BarsFrames and BarsFrames.GetPreviewBarKey and BarsFrames:GetPreviewBarKey() then
+        return true
+    end
     
     local dockSettings = BarsData:GetDockSettings()
     local enabled = dockSettings.visibilityEnabled
@@ -899,7 +904,8 @@ function BarsDock:UpdateVisibility()
     if shouldShow then
         -- Check if we have visible bars before showing
         local visible = GetVisibleBars()
-        if #visible > 0 or self._isLayoutMode then
+        local hasPreview = BarsFrames and BarsFrames.GetPreviewBarKey and BarsFrames:GetPreviewBarKey()
+        if #visible > 0 or self._isLayoutMode or hasPreview then
             dockFrame:Show()
         end
     else

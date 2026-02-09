@@ -19,6 +19,9 @@ local MultiTracker = TUICD.MultiTracker
 local MultiTrackerFrames = {}
 TUICD.MultiTrackerFrames = MultiTrackerFrames
 
+-- Forward declaration for on-ready effect function (defined later in file)
+local HideOnReadyGlows
+
 -- ============================================================================
 -- CONSTANTS
 -- ============================================================================
@@ -64,9 +67,9 @@ local activeProcs = {}
 -- ============================================================================
 
 local GLOW_STYLE = {
-    BLIZZARD = "blizzard",   -- Yellow ants (ActionButton_ShowOverlayGlow)
     PIXEL    = "pixel",      -- Colored border pulse
     SHINE    = "shine",      -- Bright flash fade
+    GLOW     = "glow",       -- SpellActivation-style radiant glow with ants
 }
 
 -- ============================================================================
@@ -308,6 +311,8 @@ local function CreateTrackerIcon(trackerKey, entry, parent)
     -- Create button frame
     local frame = CreateFrame("Button", "TweaksUI_MultiTracker_" .. trackerKey .. "_" .. entryKey, parent)
     frame:SetSize(36, 36)
+    frame:SetFrameStrata("MEDIUM")
+    frame:SetFrameLevel(100)
     
     -- Create icon texture
     local icon = frame:CreateTexture(nil, "BACKGROUND")
@@ -606,8 +611,81 @@ end
 -- ============================================================================
 
 -- ============================================================================
--- PROC GLOW: Show / Hide (Phase 3)
+-- PROC GLOW: Show / Hide (Phase 3+)
 -- ============================================================================
+
+-- Helper: Create or update a SpellActivationAlert-style glow around a frame
+local function CreateOrUpdateSpellGlow(iconFrame, r, g, b, glowScale)
+    if not iconFrame._spellGlow then
+        -- Create the glow frame anchored around the icon
+        local glow = CreateFrame("Frame", nil, iconFrame)
+        glow:SetFrameLevel(iconFrame:GetFrameLevel() + 5)
+        
+        -- Inner glow texture (additive blend for brightness)
+        local inner = glow:CreateTexture(nil, "ARTWORK")
+        inner:SetTexture("Interface\\SpellActivationOverlay\\IconAlert")
+        inner:SetTexCoord(0.00781250, 0.50781250, 0.27734375, 0.52734375)
+        inner:SetBlendMode("ADD")
+        inner:SetDrawLayer("ARTWORK", 1)
+        glow._inner = inner
+        
+        -- Outer glow texture
+        local outer = glow:CreateTexture(nil, "ARTWORK")
+        outer:SetTexture("Interface\\SpellActivationOverlay\\IconAlert")
+        outer:SetTexCoord(0.00781250, 0.50781250, 0.53515625, 0.78515625)
+        outer:SetBlendMode("ADD")
+        outer:SetDrawLayer("ARTWORK", 0)
+        glow._outer = outer
+        
+        -- Ants texture (the spinning sparkles)
+        local ants = glow:CreateTexture(nil, "OVERLAY")
+        ants:SetTexture("Interface\\SpellActivationOverlay\\IconAlertAnts")
+        ants:SetBlendMode("ADD")
+        ants:SetDrawLayer("OVERLAY", 5)
+        glow._ants = ants
+        
+        -- Ants rotation animation
+        local antsAG = ants:CreateAnimationGroup()
+        antsAG:SetLooping("REPEAT")
+        local rot = antsAG:CreateAnimation("Rotation")
+        rot:SetDegrees(-360)
+        rot:SetDuration(12)
+        glow._antsAG = antsAG
+        
+        -- Pulse animation for the inner/outer glow
+        local pulseAG = glow:CreateAnimationGroup()
+        pulseAG:SetLooping("BOUNCE")
+        local alpha = pulseAG:CreateAnimation("Alpha")
+        alpha:SetFromAlpha(1)
+        alpha:SetToAlpha(0.5)
+        alpha:SetDuration(0.8)
+        alpha:SetSmoothing("IN_OUT")
+        glow._pulseAG = pulseAG
+        glow._pulseAlpha = alpha
+        
+        iconFrame._spellGlow = glow
+    end
+    
+    local glow = iconFrame._spellGlow
+    local scale = glowScale or 1.0
+    local w, h = iconFrame:GetSize()
+    local pad = (w * 0.4) * scale
+    
+    glow:ClearAllPoints()
+    glow:SetPoint("TOPLEFT", iconFrame, "TOPLEFT", -pad, pad)
+    glow:SetPoint("BOTTOMRIGHT", iconFrame, "BOTTOMRIGHT", pad, -pad)
+    
+    glow._inner:SetAllPoints(glow)
+    glow._outer:SetAllPoints(glow)
+    glow._ants:SetAllPoints(glow)
+    
+    -- Apply color tint
+    glow._inner:SetVertexColor(r, g, b, 1)
+    glow._outer:SetVertexColor(r, g, b, 0.6)
+    glow._ants:SetVertexColor(r, g, b, 0.7)
+    
+    return glow
+end
 
 local function ShowProcGlow(iconFrame)
     if not iconFrame then return end
@@ -617,56 +695,77 @@ local function ShowProcGlow(iconFrame)
     local showProcGlow = MultiTracker:GetSetting(trackerKey, "showProcGlow")
     if showProcGlow == false then return end
     
-    local glowStyle = MultiTracker:GetSetting(trackerKey, "procGlowStyle") or GLOW_STYLE.BLIZZARD
+    local glowStyle = MultiTracker:GetSetting(trackerKey, "procGlowStyle") or GLOW_STYLE.PIXEL
+    local r = MultiTracker:GetSetting(trackerKey, "procGlowColorR") or 1.0
+    local g = MultiTracker:GetSetting(trackerKey, "procGlowColorG") or 0.82
+    local b = MultiTracker:GetSetting(trackerKey, "procGlowColorB") or 0.0
+    local speed = MultiTracker:GetSetting(trackerKey, "procGlowSpeed") or 0.6
+    local intensity = MultiTracker:GetSetting(trackerKey, "procGlowIntensity") or 0.8
+    local thickness = MultiTracker:GetSetting(trackerKey, "procGlowThickness") or 2
+    local glowScale = MultiTracker:GetSetting(trackerKey, "procGlowScale") or 1.0
     
-    -- TODO: Per-icon overrides would go here in Phase 5
+    -- Hide all other glow types first
+    local function HideOtherGlows(exceptType)
+        if exceptType ~= "pixel" and iconFrame._pixelGlow then 
+            if iconFrame._pixelGlow._pulseAG then iconFrame._pixelGlow._pulseAG:Stop() end
+            iconFrame._pixelGlow:Hide() 
+        end
+        if exceptType ~= "shine" and iconFrame._shineGlow then 
+            if iconFrame._shineGlow._pulseAG then iconFrame._shineGlow._pulseAG:Stop() end
+            iconFrame._shineGlow:Hide() 
+        end
+        if exceptType ~= "glow" and iconFrame._spellGlow then 
+            if iconFrame._spellGlow._pulseAG then iconFrame._spellGlow._pulseAG:Stop() end
+            if iconFrame._spellGlow._antsAG then iconFrame._spellGlow._antsAG:Stop() end
+            iconFrame._spellGlow:Hide() 
+        end
+    end
     
     if glowStyle == GLOW_STYLE.PIXEL then
-        -- Pixel glow: colored border pulse
-        local r = MultiTracker:GetSetting(trackerKey, "procGlowColorR") or 1.0
-        local g = MultiTracker:GetSetting(trackerKey, "procGlowColorG") or 0.82
-        local b = MultiTracker:GetSetting(trackerKey, "procGlowColorB") or 0.0
+        -- Pixel glow: colored border pulse with configurable thickness
+        HideOtherGlows("pixel")
         
-        -- Create pixel glow border if it doesn't exist
         if not iconFrame._pixelGlow then
-            local glow = CreateFrame("Frame", nil, iconFrame, "BackdropTemplate")
-            glow:SetPoint("TOPLEFT", -2, 2)
-            glow:SetPoint("BOTTOMRIGHT", 2, -2)
-            glow:SetBackdrop({
-                edgeFile = "Interface\\Buttons\\WHITE8x8",
-                edgeSize = 2,
-            })
-            glow:SetFrameLevel(iconFrame:GetFrameLevel() + 5)
-            iconFrame._pixelGlow = glow
+            local glowFrame = CreateFrame("Frame", nil, iconFrame, "BackdropTemplate")
+            glowFrame:SetFrameLevel(iconFrame:GetFrameLevel() + 5)
+            iconFrame._pixelGlow = glowFrame
             
             -- Pulse animation
-            local ag = glow:CreateAnimationGroup()
+            local ag = glowFrame:CreateAnimationGroup()
             ag:SetLooping("BOUNCE")
             local alpha = ag:CreateAnimation("Alpha")
-            alpha:SetFromAlpha(1)
-            alpha:SetToAlpha(0.3)
-            alpha:SetDuration(0.6)
             alpha:SetSmoothing("IN_OUT")
-            glow._pulseAG = ag
+            glowFrame._pulseAG = ag
+            glowFrame._pulseAlpha = alpha
         end
         
-        iconFrame._pixelGlow:SetBackdropBorderColor(r, g, b, 1)
+        -- Update thickness dynamically
+        local t = math.max(1, math.floor(thickness))
+        iconFrame._pixelGlow:ClearAllPoints()
+        iconFrame._pixelGlow:SetPoint("TOPLEFT", -t, t)
+        iconFrame._pixelGlow:SetPoint("BOTTOMRIGHT", t, -t)
+        iconFrame._pixelGlow:SetBackdrop({
+            edgeFile = "Interface\\Buttons\\WHITE8x8",
+            edgeSize = t,
+        })
+        iconFrame._pixelGlow:SetBackdropBorderColor(r, g, b, intensity)
+        
+        -- Update animation speed
+        iconFrame._pixelGlow._pulseAlpha:SetFromAlpha(intensity)
+        iconFrame._pixelGlow._pulseAlpha:SetToAlpha(math.max(0.05, intensity * 0.2))
+        iconFrame._pixelGlow._pulseAlpha:SetDuration(speed)
+        
         iconFrame._pixelGlow:Show()
+        iconFrame._pixelGlow._pulseAG:Stop()
         iconFrame._pixelGlow._pulseAG:Play()
         
-        -- Hide Blizzard glow if it was showing
-        pcall(function()
-            if ActionButton_HideOverlayGlow then
-                ActionButton_HideOverlayGlow(iconFrame)
-            end
-        end)
-        
     elseif glowStyle == GLOW_STYLE.SHINE then
-        -- Shine glow: bright flash that fades
+        -- Shine glow: colored flash overlay with configurable brightness
+        HideOtherGlows("shine")
+        
         if not iconFrame._shineGlow then
             local shine = iconFrame:CreateTexture(nil, "OVERLAY")
             shine:SetAllPoints()
-            shine:SetColorTexture(1, 1, 1, 0.6)
             shine:SetBlendMode("ADD")
             shine:SetDrawLayer("OVERLAY", 6)
             iconFrame._shineGlow = shine
@@ -674,34 +773,36 @@ local function ShowProcGlow(iconFrame)
             local ag = shine:CreateAnimationGroup()
             ag:SetLooping("BOUNCE")
             local alpha = ag:CreateAnimation("Alpha")
-            alpha:SetFromAlpha(0.6)
-            alpha:SetToAlpha(0.1)
-            alpha:SetDuration(0.8)
             alpha:SetSmoothing("IN_OUT")
             shine._pulseAG = ag
+            shine._pulseAlpha = alpha
         end
         
+        -- Use the glow color (not hardcoded white)
+        iconFrame._shineGlow:SetColorTexture(r, g, b, intensity)
+        
+        -- Update animation speed and intensity
+        iconFrame._shineGlow._pulseAlpha:SetFromAlpha(intensity)
+        iconFrame._shineGlow._pulseAlpha:SetToAlpha(math.max(0.02, intensity * 0.1))
+        iconFrame._shineGlow._pulseAlpha:SetDuration(speed)
+        
         iconFrame._shineGlow:Show()
+        iconFrame._shineGlow._pulseAG:Stop()
         iconFrame._shineGlow._pulseAG:Play()
         
-        -- Hide other glow types
-        pcall(function()
-            if ActionButton_HideOverlayGlow then
-                ActionButton_HideOverlayGlow(iconFrame)
-            end
-        end)
-        if iconFrame._pixelGlow then iconFrame._pixelGlow:Hide() end
-        
     else
-        -- Default: Blizzard yellow ants glow
-        pcall(function()
-            if ActionButton_ShowOverlayGlow then
-                ActionButton_ShowOverlayGlow(iconFrame)
-            end
-        end)
-        -- Hide custom glows
-        if iconFrame._pixelGlow then iconFrame._pixelGlow:Hide() end
-        if iconFrame._shineGlow then iconFrame._shineGlow:Hide() end
+        -- "glow": SpellActivation-style glow with ants and radiant edges (also the default fallback)
+        HideOtherGlows("glow")
+        
+        local glow = CreateOrUpdateSpellGlow(iconFrame, r, g, b, glowScale)
+        
+        -- Update pulse speed
+        glow._pulseAlpha:SetDuration(speed)
+        
+        glow:Show()
+        glow._antsAG:Play()
+        glow._pulseAG:Stop()
+        glow._pulseAG:Play()
     end
     
     iconFrame._glowShowing = true
@@ -711,12 +812,6 @@ local function HideProcGlow(iconFrame)
     if not iconFrame or not iconFrame._glowShowing then return end
     
     -- Hide all glow types
-    pcall(function()
-        if ActionButton_HideOverlayGlow then
-            ActionButton_HideOverlayGlow(iconFrame)
-        end
-    end)
-    
     if iconFrame._pixelGlow then
         if iconFrame._pixelGlow._pulseAG then
             iconFrame._pixelGlow._pulseAG:Stop()
@@ -731,8 +826,407 @@ local function HideProcGlow(iconFrame)
         iconFrame._shineGlow:Hide()
     end
     
+    if iconFrame._spellGlow then
+        if iconFrame._spellGlow._pulseAG then
+            iconFrame._spellGlow._pulseAG:Stop()
+        end
+        if iconFrame._spellGlow._antsAG then
+            iconFrame._spellGlow._antsAG:Stop()
+        end
+        iconFrame._spellGlow:Hide()
+    end
+    
     iconFrame._glowShowing = false
 end
+
+-- ============================================================================
+-- ON READY EFFECTS (timed glow + pulse when cooldown finishes or nearly ready)
+-- ============================================================================
+
+-- Stop and hide all on-ready glow overlays on a frame
+HideOnReadyGlows = function(iconFrame)
+    if iconFrame._orTimer then iconFrame._orTimer:Cancel(); iconFrame._orTimer = nil end
+    if iconFrame._orEarlyTimer then iconFrame._orEarlyTimer:Cancel(); iconFrame._orEarlyTimer = nil end
+    if iconFrame._orPixelGlow then
+        if iconFrame._orPixelGlow._pulseAG then iconFrame._orPixelGlow._pulseAG:Stop() end
+        iconFrame._orPixelGlow:Hide()
+    end
+    if iconFrame._orShineGlow then
+        if iconFrame._orShineGlow._pulseAG then iconFrame._orShineGlow._pulseAG:Stop() end
+        iconFrame._orShineGlow:Hide()
+    end
+    if iconFrame._orSpellGlow then
+        if iconFrame._orSpellGlow._pulseAG then iconFrame._orSpellGlow._pulseAG:Stop() end
+        if iconFrame._orSpellGlow._antsAG then iconFrame._orSpellGlow._antsAG:Stop() end
+        iconFrame._orSpellGlow:Hide()
+    end
+end
+
+-- Play the on-ready glow effect on an icon frame
+local function PlayOnReadyGlow(iconFrame)
+    if not iconFrame then return end
+    local trackerKey = iconFrame.trackerKey
+    
+    local style = MultiTracker:GetSetting(trackerKey, "onReadyGlowStyle") or "pixel"
+    local r = MultiTracker:GetSetting(trackerKey, "onReadyGlowColorR") or 1.0
+    local g = MultiTracker:GetSetting(trackerKey, "onReadyGlowColorG") or 0.82
+    local b = MultiTracker:GetSetting(trackerKey, "onReadyGlowColorB") or 0.0
+    local speed = MultiTracker:GetSetting(trackerKey, "onReadyGlowSpeed") or 0.6
+    local intensity = MultiTracker:GetSetting(trackerKey, "onReadyGlowIntensity") or 0.8
+    local thickness = MultiTracker:GetSetting(trackerKey, "onReadyGlowThickness") or 2
+    local glowScale = MultiTracker:GetSetting(trackerKey, "onReadyGlowScale") or 1.0
+    local duration = MultiTracker:GetSetting(trackerKey, "onReadyGlowDuration") or 3.0
+    
+    -- Hide existing on-ready glows first
+    HideOnReadyGlows(iconFrame)
+    
+    if style == "pixel" then
+        if not iconFrame._orPixelGlow then
+            local gf = CreateFrame("Frame", nil, iconFrame, "BackdropTemplate")
+            gf:SetFrameLevel(iconFrame:GetFrameLevel() + 5)
+            local ag = gf:CreateAnimationGroup()
+            ag:SetLooping("BOUNCE")
+            local alpha = ag:CreateAnimation("Alpha")
+            alpha:SetSmoothing("IN_OUT")
+            gf._pulseAG = ag
+            gf._pulseAlpha = alpha
+            iconFrame._orPixelGlow = gf
+        end
+        local gf = iconFrame._orPixelGlow
+        local t = math.max(1, math.floor(thickness))
+        gf:ClearAllPoints()
+        gf:SetPoint("TOPLEFT", -t, t)
+        gf:SetPoint("BOTTOMRIGHT", t, -t)
+        gf:SetBackdrop({ edgeFile = "Interface\\Buttons\\WHITE8x8", edgeSize = t })
+        gf:SetBackdropBorderColor(r, g, b, intensity)
+        gf._pulseAlpha:SetFromAlpha(intensity)
+        gf._pulseAlpha:SetToAlpha(math.max(0.05, intensity * 0.2))
+        gf._pulseAlpha:SetDuration(speed)
+        gf:Show()
+        gf._pulseAG:Play()
+        
+    elseif style == "shine" then
+        if not iconFrame._orShineGlow then
+            local sh = iconFrame:CreateTexture(nil, "OVERLAY")
+            sh:SetAllPoints()
+            sh:SetBlendMode("ADD")
+            sh:SetDrawLayer("OVERLAY", 6)
+            local ag = sh:CreateAnimationGroup()
+            ag:SetLooping("BOUNCE")
+            local alpha = ag:CreateAnimation("Alpha")
+            alpha:SetSmoothing("IN_OUT")
+            sh._pulseAG = ag
+            sh._pulseAlpha = alpha
+            iconFrame._orShineGlow = sh
+        end
+        local sh = iconFrame._orShineGlow
+        sh:SetColorTexture(r, g, b, intensity)
+        sh._pulseAlpha:SetFromAlpha(intensity)
+        sh._pulseAlpha:SetToAlpha(math.max(0.02, intensity * 0.1))
+        sh._pulseAlpha:SetDuration(speed)
+        sh:Show()
+        sh._pulseAG:Play()
+        
+    else -- "glow" SpellActivation style
+        if not iconFrame._orSpellGlow then
+            local glow = CreateFrame("Frame", nil, iconFrame)
+            glow:SetFrameLevel(iconFrame:GetFrameLevel() + 5)
+            local inner = glow:CreateTexture(nil, "ARTWORK")
+            inner:SetTexture("Interface\\SpellActivationOverlay\\IconAlert")
+            inner:SetTexCoord(0.00781250, 0.50781250, 0.27734375, 0.52734375)
+            inner:SetBlendMode("ADD")
+            inner:SetDrawLayer("ARTWORK", 1)
+            glow._inner = inner
+            local outer = glow:CreateTexture(nil, "ARTWORK")
+            outer:SetTexture("Interface\\SpellActivationOverlay\\IconAlert")
+            outer:SetTexCoord(0.00781250, 0.50781250, 0.53515625, 0.78515625)
+            outer:SetBlendMode("ADD")
+            outer:SetDrawLayer("ARTWORK", 0)
+            glow._outer = outer
+            local ants = glow:CreateTexture(nil, "OVERLAY")
+            ants:SetTexture("Interface\\SpellActivationOverlay\\IconAlertAnts")
+            ants:SetBlendMode("ADD")
+            ants:SetDrawLayer("OVERLAY", 5)
+            glow._ants = ants
+            local antsAG = ants:CreateAnimationGroup()
+            antsAG:SetLooping("REPEAT")
+            local rot = antsAG:CreateAnimation("Rotation")
+            rot:SetDegrees(-360)
+            rot:SetDuration(12)
+            glow._antsAG = antsAG
+            local pulseAG = glow:CreateAnimationGroup()
+            pulseAG:SetLooping("BOUNCE")
+            local alpha = pulseAG:CreateAnimation("Alpha")
+            alpha:SetFromAlpha(1)
+            alpha:SetToAlpha(0.5)
+            alpha:SetSmoothing("IN_OUT")
+            glow._pulseAG = pulseAG
+            glow._pulseAlpha = alpha
+            iconFrame._orSpellGlow = glow
+        end
+        local glow = iconFrame._orSpellGlow
+        local scale = glowScale or 1.0
+        local w, h = iconFrame:GetSize()
+        local pad = (w * 0.4) * scale
+        glow:ClearAllPoints()
+        glow:SetPoint("TOPLEFT", iconFrame, "TOPLEFT", -pad, pad)
+        glow:SetPoint("BOTTOMRIGHT", iconFrame, "BOTTOMRIGHT", pad, -pad)
+        glow._inner:SetAllPoints(glow)
+        glow._outer:SetAllPoints(glow)
+        glow._ants:SetAllPoints(glow)
+        glow._inner:SetVertexColor(r, g, b, 1)
+        glow._outer:SetVertexColor(r, g, b, 0.6)
+        glow._ants:SetVertexColor(r, g, b, 0.7)
+        glow._pulseAlpha:SetDuration(speed)
+        glow:Show()
+        glow._antsAG:Play()
+        glow._pulseAG:Play()
+    end
+    
+    -- Auto-hide after duration
+    iconFrame._orTimer = C_Timer.NewTimer(duration, function()
+        iconFrame._orTimer = nil
+        HideOnReadyGlows(iconFrame)
+    end)
+end
+
+-- Refresh any active on-ready glows for a tracker with current settings
+-- Called when on-ready settings change so effects update live
+local function RefreshActiveOnReadyGlows(trackerKey)
+    local icons = trackerIcons[trackerKey]
+    if not icons then return end
+    for _, iconFrame in pairs(icons) do
+        -- Check if any on-ready glow is currently visible
+        local hasActiveGlow = false
+        if iconFrame._orPixelGlow and iconFrame._orPixelGlow:IsShown() then hasActiveGlow = true end
+        if iconFrame._orShineGlow and iconFrame._orShineGlow:IsShown() then hasActiveGlow = true end
+        if iconFrame._orSpellGlow and iconFrame._orSpellGlow:IsShown() then hasActiveGlow = true end
+        
+        if hasActiveGlow then
+            -- Remember remaining timer duration if any
+            local remainingTime = nil
+            if iconFrame._orTimer then
+                -- Can't read remaining time from C_Timer, so just replay with full duration
+                iconFrame._orTimer:Cancel()
+                iconFrame._orTimer = nil
+            end
+            -- Replay glow with current settings (reads fresh from DB)
+            PlayOnReadyGlow(iconFrame)
+        end
+    end
+end
+
+-- Play the on-ready pulse effect on an icon frame
+local function PlayOnReadyPulse(iconFrame)
+    if not iconFrame then return end
+    local trackerKey = iconFrame.trackerKey
+    
+    local pulseScale = MultiTracker:GetSetting(trackerKey, "onReadyPulseScale") or 1.3
+    local pulseDuration = MultiTracker:GetSetting(trackerKey, "onReadyPulseDuration") or 0.4
+    local pulseCount = MultiTracker:GetSetting(trackerKey, "onReadyPulseCount") or 3
+    if pulseCount < 1 then pulseCount = 1 end
+    
+    if not iconFrame._orPulseAG then
+        local ag = iconFrame:CreateAnimationGroup()
+        local scaleUp = ag:CreateAnimation("Scale")
+        scaleUp:SetOrigin("CENTER", 0, 0)
+        scaleUp:SetOrder(1)
+        local scaleDown = ag:CreateAnimation("Scale")
+        scaleDown:SetOrigin("CENTER", 0, 0)
+        scaleDown:SetOrder(2)
+        ag._scaleUp = scaleUp
+        ag._scaleDown = scaleDown
+        ag._loopCount = 0
+        ag._targetLoops = 1
+        ag:SetScript("OnLoop", function(self)
+            self._loopCount = self._loopCount + 1
+            if self._loopCount >= self._targetLoops then
+                self:Stop()
+            end
+        end)
+        iconFrame._orPulseAG = ag
+    end
+    
+    local ag = iconFrame._orPulseAG
+    local singlePulseDur = pulseDuration / pulseCount
+    local halfDur = singlePulseDur * 0.5
+    ag._scaleUp:SetScaleFrom(1, 1)
+    ag._scaleUp:SetScaleTo(pulseScale, pulseScale)
+    ag._scaleUp:SetDuration(math.max(halfDur, 0.05))
+    ag._scaleUp:SetSmoothing("OUT")
+    ag._scaleDown:SetScaleFrom(pulseScale, pulseScale)
+    ag._scaleDown:SetScaleTo(1, 1)
+    ag._scaleDown:SetDuration(math.max(halfDur, 0.05))
+    ag._scaleDown:SetSmoothing("IN")
+    ag._loopCount = 0
+    ag._targetLoops = pulseCount
+    ag:SetLooping(pulseCount > 1 and "REPEAT" or "NONE")
+    if ag:IsPlaying() then ag:Stop() end
+    ag:Play()
+end
+
+-- Cancel all pending on-ready timers on an icon frame
+local function CancelOnReadyTimers(iconFrame)
+    if iconFrame._orGlowTimer then iconFrame._orGlowTimer:Cancel(); iconFrame._orGlowTimer = nil end
+    if iconFrame._orPulseTimer then iconFrame._orPulseTimer:Cancel(); iconFrame._orPulseTimer = nil end
+end
+
+-- Schedule or fire on-ready glow effect based on timing setting
+-- timing: -5 to +5 (-=before ready, 0=on ready, +=after ready)
+-- remaining: seconds left on cooldown (only used for negative timing at cooldown start)
+local function ScheduleGlowEffect(iconFrame, timing, remaining)
+    if iconFrame._orGlowTimer then iconFrame._orGlowTimer:Cancel(); iconFrame._orGlowTimer = nil end
+    
+    if timing < 0 and remaining then
+        -- Negative: fire X seconds before cooldown ends
+        local delay = remaining + timing  -- e.g. 10 remaining + (-3) = fire in 7 sec
+        if delay <= 0 then
+            PlayOnReadyGlow(iconFrame)
+        else
+            iconFrame._orGlowTimer = C_Timer.NewTimer(delay, function()
+                iconFrame._orGlowTimer = nil
+                PlayOnReadyGlow(iconFrame)
+            end)
+        end
+    elseif timing == 0 then
+        -- Zero: fire immediately (called at transition)
+        PlayOnReadyGlow(iconFrame)
+    else
+        -- Positive: fire X seconds after cooldown ends
+        iconFrame._orGlowTimer = C_Timer.NewTimer(timing, function()
+            iconFrame._orGlowTimer = nil
+            PlayOnReadyGlow(iconFrame)
+        end)
+    end
+end
+
+-- Schedule or fire on-ready pulse effect based on timing setting
+local function SchedulePulseEffect(iconFrame, timing, remaining)
+    if iconFrame._orPulseTimer then iconFrame._orPulseTimer:Cancel(); iconFrame._orPulseTimer = nil end
+    
+    if timing < 0 and remaining then
+        local delay = remaining + timing
+        if delay <= 0 then
+            PlayOnReadyPulse(iconFrame)
+        else
+            iconFrame._orPulseTimer = C_Timer.NewTimer(delay, function()
+                iconFrame._orPulseTimer = nil
+                PlayOnReadyPulse(iconFrame)
+            end)
+        end
+    elseif timing == 0 then
+        PlayOnReadyPulse(iconFrame)
+    else
+        iconFrame._orPulseTimer = C_Timer.NewTimer(timing, function()
+            iconFrame._orPulseTimer = nil
+            PlayOnReadyPulse(iconFrame)
+        end)
+    end
+end
+
+-- Called when a real cooldown STARTS — schedule effects with negative timing
+-- Called when a real cooldown starts on an icon (duration > GCD)
+local function OnCooldownStarted(iconFrame, remaining)
+    if not iconFrame then return end
+    local trackerKey = iconFrame.trackerKey
+    
+    -- Cancel any pending timers from previous cooldown
+    CancelOnReadyTimers(iconFrame)
+    HideOnReadyGlows(iconFrame)
+    
+    -- Schedule effects with negative timing (fire before cooldown ends)
+    if MultiTracker:GetSetting(trackerKey, "onReadyGlowEnabled") then
+        local timing = MultiTracker:GetSetting(trackerKey, "onReadyGlowTiming") or 0
+        if timing < 0 then
+            ScheduleGlowEffect(iconFrame, timing, remaining)
+        end
+    end
+    if MultiTracker:GetSetting(trackerKey, "onReadyPulseEnabled") then
+        local timing = MultiTracker:GetSetting(trackerKey, "onReadyPulseTiming") or 0
+        if timing < 0 then
+            SchedulePulseEffect(iconFrame, timing, remaining)
+        end
+    end
+end
+
+-- Called when a real cooldown ends on an icon (transition: on CD → off CD)
+local function OnCooldownEnded(iconFrame)
+    if not iconFrame then return end
+    local trackerKey = iconFrame.trackerKey
+    
+    -- Fire effects with zero or positive timing (on ready or after ready)
+    if MultiTracker:GetSetting(trackerKey, "onReadyGlowEnabled") then
+        local timing = MultiTracker:GetSetting(trackerKey, "onReadyGlowTiming") or 0
+        if timing >= 0 then
+            ScheduleGlowEffect(iconFrame, timing, nil)
+        end
+    end
+    if MultiTracker:GetSetting(trackerKey, "onReadyPulseEnabled") then
+        local timing = MultiTracker:GetSetting(trackerKey, "onReadyPulseTiming") or 0
+        if timing >= 0 then
+            SchedulePulseEffect(iconFrame, timing, nil)
+        end
+    end
+end
+
+-- GCD threshold for on-ready detection (milliseconds, matching dock system)
+local OR_GCD_THRESHOLD = 3000
+
+-- Check if icon is on a real cooldown (not GCD) using GetCooldownTimes
+-- Same approach as dock reappearance system
+local function IsOnRealCooldown(iconFrame)
+    local isOnCD = false
+    pcall(function()
+        local cd = iconFrame.cooldown or iconFrame.Cooldown
+        if cd and cd.GetCooldownTimes then
+            local start, duration = cd:GetCooldownTimes()
+            if start and duration and type(duration) == "number" and duration > OR_GCD_THRESHOLD then
+                local startSec = start / 1000
+                local durationSec = duration / 1000
+                local remaining = (startSec + durationSec) - GetTime()
+                if remaining > 0.1 then
+                    isOnCD = true
+                end
+            end
+        end
+    end)
+    return isOnCD
+end
+
+-- Get remaining cooldown time in seconds (for scheduling early triggers)
+local function GetRealCooldownRemaining(iconFrame)
+    local remaining = 0
+    pcall(function()
+        local cd = iconFrame.cooldown or iconFrame.Cooldown
+        if cd and cd.GetCooldownTimes then
+            local start, duration = cd:GetCooldownTimes()
+            if start and duration and type(duration) == "number" and duration > OR_GCD_THRESHOLD then
+                local startSec = start / 1000
+                local durationSec = duration / 1000
+                remaining = (startSec + durationSec) - GetTime()
+            end
+        end
+    end)
+    return remaining
+end
+
+-- Detect on-ready transitions for an icon frame (called from UpdateIconCooldown)
+local function CheckOnReadyTransition(iconFrame)
+    local isOnCD = IsOnRealCooldown(iconFrame)
+    local wasOnCD = iconFrame._orWasOnRealCD
+    
+    if isOnCD and not wasOnCD then
+        -- Transition: off CD → on CD (cooldown started)
+        local remaining = GetRealCooldownRemaining(iconFrame)
+        OnCooldownStarted(iconFrame, remaining)
+    elseif wasOnCD and not isOnCD then
+        -- Transition: on CD → off CD (cooldown ended)
+        OnCooldownEnded(iconFrame)
+    end
+    
+    iconFrame._orWasOnRealCD = isOnCD
+end
+
 
 -- ============================================================================
 -- PROC GLOW: State Management (Phase 3)
@@ -1192,6 +1686,9 @@ local function UpdateIconCooldown(iconFrame)
     -- Update usability and range states (overlays)
     UpdateIconUsabilityState(iconFrame)
     UpdateIconRangeState(iconFrame)
+    
+    -- Check for on-ready effect transitions (uses GetCooldownTimes like dock system)
+    CheckOnReadyTransition(iconFrame)
 end
 
 -- ============================================================================
@@ -2131,8 +2628,37 @@ function MultiTrackerFrames:OnSettingsChanged(trackerKey, setting, value)
         growHorizontal = true, growVertical = true, reverseOrder = true, aspectRatio = true
     }
     
+    -- On-Ready glow settings — refresh any active glows live, no rebuild needed
+    local onReadyGlowSettings = {
+        onReadyGlowEnabled = true, onReadyGlowStyle = true,
+        onReadyGlowColorR = true, onReadyGlowColorG = true, onReadyGlowColorB = true,
+        onReadyGlowSpeed = true, onReadyGlowIntensity = true, onReadyGlowThickness = true,
+        onReadyGlowScale = true, onReadyGlowDuration = true, onReadyGlowTiming = true,
+    }
+    
+    -- Settings that take effect on next trigger/event — NO rebuild needed
+    local noRebuildSettings = {
+        -- Proc glow (reads fresh each trigger)
+        procGlowEnabled = true, procGlowStyle = true,
+        procGlowColorR = true, procGlowColorG = true, procGlowColorB = true,
+        procGlowSpeed = true, procGlowIntensity = true, procGlowThickness = true,
+        procGlowScale = true,
+        -- On-Ready pulse (reads fresh each trigger)
+        onReadyPulseEnabled = true, onReadyPulseScale = true,
+        onReadyPulseDuration = true, onReadyPulseCount = true, onReadyPulseTiming = true,
+        -- Position (handled by drag, not rebuild)
+        point = true, x = true, y = true,
+    }
+    
     if layoutSettings[setting] then
         LayoutTrackerIcons(trackerKey)
+    elseif onReadyGlowSettings[setting] then
+        -- Refresh any active on-ready glows live with new settings
+        RefreshActiveOnReadyGlows(trackerKey)
+        return
+    elseif noRebuildSettings[setting] then
+        -- These settings are read fresh each time they're needed; no rebuild required
+        return
     elseif setting == "enabled" then
         self:RebuildTracker(trackerKey)
     else

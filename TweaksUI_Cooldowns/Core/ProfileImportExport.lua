@@ -1145,9 +1145,13 @@ function PIE:DumpPositionData()
     print("|cff00ff00=== End Position Data Dump ===|r")
 end
 
--- Slash command for debugging
+-- Slash command for debugging (debug only)
 SLASH_TUIDUMP1 = "/tuidump"
 SlashCmdList["TUIDUMP"] = function(msg)
+    if not TUICD.debugMode then
+        TUICD:Print("Debug mode required. Use |cffFFFFFF/tuicd debug|r to enable.")
+        return
+    end
     if msg == "positions" or msg == "pos" then
         TUICD.ProfileImportExport:DumpPositionData()
     else

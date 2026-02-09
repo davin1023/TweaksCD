@@ -1099,6 +1099,7 @@ local function UpdateHighlightFrame(slotIndex)
             frame.icon:SetDesaturated(true)
             frame.count:Hide()
             frame.cooldown:Clear()
+            frame._lastAuraInstanceID = nil
             if frame.glowFrame then frame.glowFrame:Hide() end
             frame:SetAlpha(0.5)
             frame:Show()
@@ -1146,6 +1147,7 @@ local function UpdateHighlightFrame(slotIndex)
         
         frame.count:Hide()
         frame.cooldown:Clear()
+        frame._lastAuraInstanceID = nil
         if frame.glowFrame then frame.glowFrame:Hide() end
         frame:Show()
         return
@@ -1234,103 +1236,67 @@ local function UpdateHighlightFrame(slotIndex)
     
     -- =========================================================================
     -- COOLDOWN - Mirror directly from source icon's Cooldown frame
-    -- This is the key - Blizzard's cooldown frame is already showing correctly
+    -- Primary: Copy Duration Object from source cooldown frame (works in combat)
+    -- Fallback: Use C_UnitAuras.GetUnitAuraDuration (may fail when auras secret)
+    -- NOTE: Do NOT call SetAlpha(1) - CooldownFrameTemplate manages its own
+    -- alpha in Midnight (Beta 6: uses alpha secret aspect for show/hide)
     -- =========================================================================
     if sourceIcon and frame.cooldown then
-        -- Update the slot index on source cooldown so global hooks target the right frame
         local sourceCooldown = sourceIcon.Cooldown or sourceIcon.cooldown
         if sourceCooldown then
             sourceCooldown._TUI_BuffHL_SlotIndex = slotIndex
             
-            -- Create our custom countdown text overlay if needed
-            if not frame.countdownText then
-                frame.countdownText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-                frame.countdownText:SetPoint("CENTER", frame, "CENTER", 0, 0)
-                frame.countdownText:SetTextColor(1, 1, 1, 1)
-                frame.countdownText:SetShadowOffset(1, -1)
-                frame.countdownText:SetShadowColor(0, 0, 0, 1)
-            end
-            
-            -- Use Duration Object API (official Midnight approach for aura cooldowns)
-            -- See: C_UnitAuras.GetUnitAuraDuration and Cooldown:SetCooldownFromDurationObject
-            local auraID = sourceIcon.auraInstanceID
-            local durationObj = nil
-            
-            -- Try to get a Duration Object for this aura
-            if auraID and C_UnitAuras and C_UnitAuras.GetUnitAuraDuration then
-                local success, result = pcall(function()
-                    return C_UnitAuras.GetUnitAuraDuration("player", auraID)
-                end)
-                if success and result then
-                    durationObj = result
-                end
-            end
-            
-            if durationObj then
-                -- Method 1: Use SetCooldownFromDurationObject (preferred - gives spiral animation)
-                if frame.cooldown.SetCooldownFromDurationObject then
-                    local success = pcall(function()
-                        frame.cooldown:SetCooldownFromDurationObject(durationObj, true)
-                    end)
-                    if success then
-                        frame.cooldown:SetAlpha(1)
-                        frame.countdownText:Hide()
-                    end
-                else
-                    -- Method 2: Get remaining duration and show text
-                    local remaining = nil
+            -- SetCooldownFromDurationObject creates a SELF-ANIMATING spiral.
+            -- We only need to set it once when a new buff appears — re-setting
+            -- every 0.25s tick causes flicker when GetCooldownDuration returns
+            -- nil or zero mid-update (clearIfZero wipes the animation).
+            -- Track by auraInstanceID so we only set once per buff application.
+            local currentAuraID = sourceIcon.auraInstanceID
+            if currentAuraID and currentAuraID ~= frame._lastAuraInstanceID then
+                local cooldownSet = false
+                
+                -- Method 1 (Primary): Copy duration directly from source cooldown frame
+                -- Works in combat by reading from Blizzard's already-set cooldown
+                if sourceCooldown.GetCooldownDuration and frame.cooldown.SetCooldownFromDurationObject then
                     pcall(function()
-                        if durationObj.GetRemainingDuration then
-                            remaining = durationObj:GetRemainingDuration()
+                        local durationObj = sourceCooldown:GetCooldownDuration()
+                        if durationObj then
+                            frame.cooldown:SetCooldownFromDurationObject(durationObj)
+                            cooldownSet = true
                         end
                     end)
-                    
-                    if remaining and remaining > 0 then
-                        local text
-                        if remaining >= 60 then
-                            text = string.format("%dm", math.floor(remaining / 60))
-                        elseif remaining >= 1 then
-                            text = string.format("%d", math.floor(remaining))
-                        else
-                            text = "0"
-                        end
-                        frame.countdownText:SetText(text)
-                        frame.countdownText:Show()
-                        frame.cooldown:SetAlpha(0)
-                    else
-                        frame.countdownText:SetText("")
-                        frame.countdownText:Hide()
+                end
+                
+                -- Method 2 (Fallback): Use C_UnitAuras.GetUnitAuraDuration API
+                -- Works out of combat; may error when aura access is secret
+                if not cooldownSet then
+                    if currentAuraID and C_UnitAuras and C_UnitAuras.GetUnitAuraDuration 
+                       and frame.cooldown.SetCooldownFromDurationObject then
+                        pcall(function()
+                            local durationObj = C_UnitAuras.GetUnitAuraDuration("player", currentAuraID)
+                            if durationObj then
+                                frame.cooldown:SetCooldownFromDurationObject(durationObj)
+                                cooldownSet = true
+                            end
+                        end)
                     end
                 end
-            else
-                -- Fallback: copy text from source cooldown FontString
-                pcall(function()
-                    local sourceText = sourceCooldown.Text or sourceCooldown.text
-                    if not sourceText then
-                        for i = 1, sourceCooldown:GetNumRegions() do
-                            local region = select(i, sourceCooldown:GetRegions())
-                            if region and region:GetObjectType() == "FontString" then
-                                sourceText = region
-                                break
-                            end
-                        end
-                    end
-                    if sourceText then
-                        local textVal = sourceText:GetText()
-                        if textVal and textVal ~= "" then
-                            frame.countdownText:SetText(textVal)
-                            frame.countdownText:Show()
-                            frame.cooldown:SetAlpha(0)
-                        else
-                            frame.countdownText:SetText("")
-                            frame.countdownText:Hide()
-                        end
-                    end
-                end)
+                
+                -- Only update tracking if we successfully set the cooldown
+                if cooldownSet then
+                    frame._lastAuraInstanceID = currentAuraID
+                end
+                -- If both methods failed this tick, don't update tracking —
+                -- next tick will try again for this same auraInstanceID
             end
+            -- If currentAuraID matches _lastAuraInstanceID, the spiral is
+            -- already animating correctly — do nothing.
+            -- If currentAuraID is nil, buff has no aura tracking — also do nothing,
+            -- the outer elseif handles clearing when sourceIcon is gone entirely.
         end
     elseif frame.cooldown then
         frame.cooldown:Clear()
+        frame._lastAuraInstanceID = nil
     end
     
     -- Copy glow state from source icon (proc/spell activation glow)

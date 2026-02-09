@@ -54,9 +54,11 @@ end
 local function HighlightButton(name)
     for key, btn in pairs(buttons) do
         if key == name then
-            btn:GetFontString():SetTextColor(1, 0.82, 0)  -- Gold
+            btn._lockedColor = { 1, 1, 1 }  -- White (selected)
+            btn:GetFontString():SetTextColor(1, 1, 1)
         else
-            btn:GetFontString():SetTextColor(0.8, 0.8, 0.8)  -- Light grey
+            btn._lockedColor = { 1, 0.82, 0 }  -- Gold (default)
+            btn:GetFontString():SetTextColor(1, 0.82, 0)
         end
     end
 end
@@ -143,31 +145,24 @@ local function CreateHubPanel()
     -- Button layout
     local yOffset = -44
 
+    -- Helper: lock a button's text color so UIPanelButtonTemplate can't override it
+    local function LockButtonTextColor(btn, r, g, b)
+        btn:GetFontString():SetTextColor(r, g, b)
+        btn:HookScript("OnMouseDown", function(self) self:GetFontString():SetTextColor(r, g, b) end)
+        btn:HookScript("OnMouseUp", function(self) self:GetFontString():SetTextColor(r, g, b) end)
+        btn:HookScript("OnEnter", function(self) self:GetFontString():SetTextColor(r, g, b) end)
+        btn:HookScript("OnLeave", function(self) self:GetFontString():SetTextColor(r, g, b) end)
+        btn._lockedColor = { r, g, b }
+    end
+
     -- Cooldowns
     local cdBtn = CreateFrame("Button", nil, hubPanel, "UIPanelButtonTemplate")
     cdBtn:SetPoint("TOP", 0, yOffset)
     cdBtn:SetSize(BUTTON_WIDTH, BUTTON_HEIGHT)
     cdBtn:SetText("Cooldowns")
-    cdBtn:GetFontString():SetTextColor(1, 0.82, 0)  -- Gold to match main hub
+    LockButtonTextColor(cdBtn, 1, 0.82, 0)
     cdBtn:SetScript("OnClick", OpenCooldowns)
     buttons.cooldowns = cdBtn
-    yOffset = yOffset - BUTTON_HEIGHT - BUTTON_SPACING
-
-    -- Timeline (now enabled!)
-    local tlBtn = CreateFrame("Button", nil, hubPanel, "UIPanelButtonTemplate")
-    tlBtn:SetPoint("TOP", 0, yOffset)
-    tlBtn:SetSize(BUTTON_WIDTH, BUTTON_HEIGHT)
-    tlBtn:SetText("Timeline")
-    tlBtn:GetFontString():SetTextColor(0.8, 0.8, 0.8)  -- Light grey (inactive)
-    tlBtn:SetScript("OnClick", OpenTimeline)
-    tlBtn:SetScript("OnEnter", function(self)
-        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-        GameTooltip:SetText("Timeline", 1, 0.82, 0)
-        GameTooltip:AddLine("Horizontal cooldown timeline display.", 1, 1, 1, true)
-        GameTooltip:Show()
-    end)
-    tlBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
-    buttons.timeline = tlBtn
     yOffset = yOffset - BUTTON_HEIGHT - BUTTON_SPACING
 
     -- Buffs
@@ -175,9 +170,30 @@ local function CreateHubPanel()
     buffBtn:SetPoint("TOP", 0, yOffset)
     buffBtn:SetSize(BUTTON_WIDTH, BUTTON_HEIGHT)
     buffBtn:SetText("Buffs")
-    buffBtn:GetFontString():SetTextColor(1, 0.82, 0)  -- Gold to match main hub
+    LockButtonTextColor(buffBtn, 1, 0.82, 0)
     buffBtn:SetScript("OnClick", OpenBuffs)
     buttons.buffs = buffBtn
+    yOffset = yOffset - BUTTON_HEIGHT - BUTTON_SPACING
+
+    -- Timeline
+    local tlBtn = CreateFrame("Button", nil, hubPanel, "UIPanelButtonTemplate")
+    tlBtn:SetPoint("TOP", 0, yOffset)
+    tlBtn:SetSize(BUTTON_WIDTH, BUTTON_HEIGHT)
+    tlBtn:SetText("Timeline")
+    LockButtonTextColor(tlBtn, 1, 0.82, 0)
+    tlBtn:SetScript("OnClick", OpenTimeline)
+    tlBtn:SetScript("OnEnter", function(self)
+        self:GetFontString():SetTextColor(self._lockedColor[1], self._lockedColor[2], self._lockedColor[3])
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Timeline", 1, 0.82, 0)
+        GameTooltip:AddLine("Horizontal cooldown timeline display.", 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    tlBtn:SetScript("OnLeave", function(self)
+        self:GetFontString():SetTextColor(self._lockedColor[1], self._lockedColor[2], self._lockedColor[3])
+        GameTooltip:Hide()
+    end)
+    buttons.timeline = tlBtn
 
     -- On hide: close any active sub-panel
     hubPanel:SetScript("OnHide", function()

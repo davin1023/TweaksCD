@@ -73,7 +73,6 @@ local panel = nil
 local listScrollChild = nil
 local configScrollChild = nil
 local visibilityScrollChild = nil
-local onReadyScrollChild = nil
 local configFrame = nil  -- The scroll frame (needed for tab switching)
 local spellButtons = {}
 local controls = {}
@@ -111,8 +110,6 @@ local TIMELINE_DEFAULTS = {
     maxDuration = 30,
     direction = "rightToLeft",  -- "rightToLeft" or "leftToRight"
     showOverflowStack = true,
-    showHashMarks = true,
-    hashMarkColor = { r = 0.6, g = 0.6, b = 0.6, a = 0.5 },
     
     -- Cooldown display
     showCooldownSweep = true,
@@ -122,24 +119,6 @@ local TIMELINE_DEFAULTS = {
     
     -- Animation
     updateInterval = 0.033,
-    
-    -- On Ready effects
-    onReadyGlowEnabled = false,
-    onReadyGlowStyle = "pixel",
-    onReadyGlowColorR = 1.0,
-    onReadyGlowColorG = 0.82,
-    onReadyGlowColorB = 0.0,
-    onReadyGlowSpeed = 0.6,
-    onReadyGlowIntensity = 0.8,
-    onReadyGlowThickness = 2,
-    onReadyGlowScale = 1.0,
-    onReadyGlowDuration = 3.0,
-    onReadyGlowTiming = 0,
-    onReadyPulseEnabled = false,
-    onReadyPulseScale = 1.3,
-    onReadyPulseDuration = 0.4,
-    onReadyPulseCount = 3,
-    onReadyPulseTiming = 0,
     
     -- Position (saved when frame is moved)
     position = nil,
@@ -297,7 +276,7 @@ local function CreateCheckbox(parent, text, tooltip)
     return check
 end
 
-local function CreateSlider(parent, label, min, max, step, width, decimals)
+local function CreateSlider(parent, label, min, max, step, width)
     local container = CreateFrame("Frame", nil, parent)
     container:SetSize(width or CONTROL_WIDTH, 40)
     
@@ -322,24 +301,15 @@ local function CreateSlider(parent, label, min, max, step, width, decimals)
     container.slider = slider
     container.valueText = valueText
     
-    local dec = decimals or 0
-    local function FormatValue(val)
-        if dec > 0 then
-            return string.format("%." .. dec .. "f", val)
-        else
-            return tostring(math.floor(val + 0.5))
-        end
-    end
-    
     function container:SetValue(val)
         slider:SetValue(val)
-        valueText:SetText(FormatValue(val))
+        valueText:SetText(tostring(math.floor(val + 0.5)))
     end
     
     function container:SetOnChange(callback)
         slider:SetScript("OnValueChanged", function(self, value)
-            if dec == 0 then value = math.floor(value + 0.5) end
-            valueText:SetText(FormatValue(value))
+            value = math.floor(value + 0.5)
+            valueText:SetText(tostring(value))
             if callback then callback(value) end
         end)
     end
@@ -347,9 +317,7 @@ local function CreateSlider(parent, label, min, max, step, width, decimals)
     return container
 end
 
-local dropdownCounter = 0
 local function CreateDropdown(parent, label, width, options)
-    dropdownCounter = dropdownCounter + 1
     local container = CreateFrame("Frame", nil, parent)
     container:SetSize(width or CONTROL_WIDTH, 45)
     
@@ -357,7 +325,7 @@ local function CreateDropdown(parent, label, width, options)
     text:SetPoint("TOPLEFT", 0, 0)
     text:SetText(label)
     
-    local dropdown = CreateFrame("Frame", "TUICD_TimelineDropdown" .. dropdownCounter, container, "UIDropDownMenuTemplate")
+    local dropdown = CreateFrame("Frame", nil, container, "UIDropDownMenuTemplate")
     dropdown:SetPoint("TOPLEFT", -16, -12)
     UIDropDownMenu_SetWidth(dropdown, (width or CONTROL_WIDTH) - 40)
     
@@ -637,22 +605,6 @@ local function BuildSettingsPanel()
     controls.direction:SetOnChange(function(val) SetSetting("direction", val) end)
     controls.direction:Show()
     y = y + 50
-    
-    controls.showHashMarks = CreateCheckbox(configScrollChild, "Show Time Markers", "Display hash marks at 5 and 10 second intervals")
-    controls.showHashMarks:SetPoint("TOPLEFT", 0, -y)
-    controls.showHashMarks:SetScript("OnClick", function(self)
-        SetSetting("showHashMarks", self:GetChecked())
-    end)
-    controls.showHashMarks:Show()
-    y = y + 26
-    
-    controls.hashMarkColor = CreateColorPicker(configScrollChild, "Marker Color", CONTROL_WIDTH)
-    controls.hashMarkColor:SetPoint("TOPLEFT", 0, -y)
-    controls.hashMarkColor:SetOnChange(function(color)
-        SetSetting("hashMarkColor", { r = color.r, g = color.g, b = color.b, a = color.a })
-    end)
-    controls.hashMarkColor:Show()
-    y = y + 30
     
     -- === Bar Appearance Section ===
     local barSection = CreateSectionLabel(configScrollChild, "Bar & Background")
@@ -1012,240 +964,6 @@ local function BuildVisibilityTab()
 end
 
 -- ============================================================================
--- ON READY TAB
--- ============================================================================
-
-local GLOW_STYLE_OPTIONS = {
-    { label = "Pixel Border", value = "pixel" },
-    { label = "Shine Flash", value = "shine" },
-    { label = "Spell Glow", value = "glow" },
-}
-
-local function BuildOnReadyTab()
-    if not onReadyScrollChild then return end
-    
-    -- Clear existing children
-    for _, child in ipairs({onReadyScrollChild:GetChildren()}) do
-        child:Hide()
-    end
-    
-    local indent = 15
-    local y = -10
-    
-    -- ── On Ready Glow ──
-    local glowHeader = CreateSectionLabel(onReadyScrollChild, "On Ready Glow")
-    glowHeader:SetPoint("TOPLEFT", indent, y)
-    glowHeader:Show()
-    y = y - 22
-    
-    local glowHint = onReadyScrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    glowHint:SetPoint("TOPLEFT", indent, y)
-    glowHint:SetWidth(CONTROL_WIDTH)
-    glowHint:SetText("|cff888888Flash an effect when a cooldown finishes (or is about to).|r")
-    glowHint:SetJustifyH("LEFT")
-    y = y - 18
-    
-    controls.onReadyGlowEnabled = CreateCheckbox(onReadyScrollChild, "Enable On Ready Glow", "Play a glow effect when an ability comes off cooldown")
-    controls.onReadyGlowEnabled:SetPoint("TOPLEFT", indent, y)
-    controls.onReadyGlowEnabled:SetScript("OnClick", function(self)
-        SetSetting("onReadyGlowEnabled", self:GetChecked())
-    end)
-    controls.onReadyGlowEnabled:Show()
-    y = y - 28
-    
-    controls.onReadyGlowStyle = CreateDropdown(onReadyScrollChild, "Glow Style", CONTROL_WIDTH, GLOW_STYLE_OPTIONS)
-    controls.onReadyGlowStyle:SetPoint("TOPLEFT", indent, y)
-    controls.onReadyGlowStyle:SetOnChange(function(v)
-        SetSetting("onReadyGlowStyle", v)
-        -- Update grey state for thickness/scale
-        if controls._updateGlowGreyState then controls._updateGlowGreyState() end
-    end)
-    controls.onReadyGlowStyle:Show()
-    y = y - 48
-    
-    -- Glow color (inline swatch, separate R/G/B settings)
-    local glowColorLabel = onReadyScrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    glowColorLabel:SetPoint("TOPLEFT", indent, y)
-    glowColorLabel:SetText("Glow Color:")
-    
-    local glowColorSwatch = CreateFrame("Button", nil, onReadyScrollChild)
-    glowColorSwatch:SetPoint("LEFT", glowColorLabel, "RIGHT", 10, 0)
-    glowColorSwatch:SetSize(24, 24)
-    local glowBorder = glowColorSwatch:CreateTexture(nil, "BACKGROUND")
-    glowBorder:SetPoint("TOPLEFT", -2, 2)
-    glowBorder:SetPoint("BOTTOMRIGHT", 2, -2)
-    glowBorder:SetColorTexture(0.5, 0.5, 0.5, 1)
-    local glowTex = glowColorSwatch:CreateTexture(nil, "ARTWORK")
-    glowTex:SetAllPoints()
-    glowColorSwatch.tex = glowTex
-    controls._glowColorSwatch = glowColorSwatch
-    
-    local function UpdateGlowSwatchColor()
-        local r = GetSetting("onReadyGlowColorR") or 1.0
-        local g = GetSetting("onReadyGlowColorG") or 0.82
-        local b = GetSetting("onReadyGlowColorB") or 0.0
-        glowTex:SetColorTexture(r, g, b, 1)
-    end
-    UpdateGlowSwatchColor()
-    
-    glowColorSwatch:SetScript("OnClick", function()
-        local r = GetSetting("onReadyGlowColorR") or 1.0
-        local g = GetSetting("onReadyGlowColorG") or 0.82
-        local b = GetSetting("onReadyGlowColorB") or 0.0
-        ColorPickerFrame:SetupColorPickerAndShow({
-            r = r, g = g, b = b,
-            swatchFunc = function()
-                local nr, ng, nb = ColorPickerFrame:GetColorRGB()
-                SetSetting("onReadyGlowColorR", nr)
-                SetSetting("onReadyGlowColorG", ng)
-                SetSetting("onReadyGlowColorB", nb)
-                UpdateGlowSwatchColor()
-            end,
-            cancelFunc = function(prev)
-                SetSetting("onReadyGlowColorR", prev.r)
-                SetSetting("onReadyGlowColorG", prev.g)
-                SetSetting("onReadyGlowColorB", prev.b)
-                UpdateGlowSwatchColor()
-            end,
-        })
-    end)
-    y = y - 30
-    
-    controls.onReadyGlowIntensity = CreateSlider(onReadyScrollChild, "Glow Intensity", 0.1, 1.0, 0.05, CONTROL_WIDTH, 2)
-    controls.onReadyGlowIntensity:SetPoint("TOPLEFT", indent, y)
-    controls.onReadyGlowIntensity:SetOnChange(function(v) SetSetting("onReadyGlowIntensity", v) end)
-    controls.onReadyGlowIntensity:Show()
-    y = y - 42
-    
-    controls.onReadyGlowSpeed = CreateSlider(onReadyScrollChild, "Pulse Speed", 0.1, 2.0, 0.1, CONTROL_WIDTH, 1)
-    controls.onReadyGlowSpeed:SetPoint("TOPLEFT", indent, y)
-    controls.onReadyGlowSpeed:SetOnChange(function(v) SetSetting("onReadyGlowSpeed", v) end)
-    controls.onReadyGlowSpeed:Show()
-    y = y - 42
-    
-    controls.onReadyGlowDuration = CreateSlider(onReadyScrollChild, "Duration", 0.5, 10.0, 0.5, CONTROL_WIDTH, 1)
-    controls.onReadyGlowDuration:SetPoint("TOPLEFT", indent, y)
-    controls.onReadyGlowDuration:SetOnChange(function(v) SetSetting("onReadyGlowDuration", v) end)
-    controls.onReadyGlowDuration:Show()
-    y = y - 42
-    
-    controls.onReadyGlowThickness = CreateSlider(onReadyScrollChild, "Border Thickness", 1, 6, 1, CONTROL_WIDTH)
-    controls.onReadyGlowThickness:SetPoint("TOPLEFT", indent, y)
-    controls.onReadyGlowThickness:SetOnChange(function(v) SetSetting("onReadyGlowThickness", v) end)
-    controls.onReadyGlowThickness:Show()
-    y = y - 42
-    
-    controls.onReadyGlowScale = CreateSlider(onReadyScrollChild, "Glow Scale", 0.5, 2.0, 0.1, CONTROL_WIDTH, 1)
-    controls.onReadyGlowScale:SetPoint("TOPLEFT", indent, y)
-    controls.onReadyGlowScale:SetOnChange(function(v) SetSetting("onReadyGlowScale", v) end)
-    controls.onReadyGlowScale:Show()
-    y = y - 42
-    
-    -- Grey state: thickness only for pixel, scale only for glow
-    controls._updateGlowGreyState = function()
-        local style = GetSetting("onReadyGlowStyle") or "pixel"
-        local function ApplyGrey(ctrl, active)
-            if not ctrl then return end
-            if ctrl.SetAlpha then ctrl:SetAlpha(active and 1 or 0.4) end
-            if ctrl.slider then ctrl.slider:EnableMouse(active) end
-        end
-        ApplyGrey(controls.onReadyGlowThickness, style == "pixel")
-        ApplyGrey(controls.onReadyGlowScale, style == "glow")
-    end
-    controls._updateGlowGreyState()
-    
-    controls.onReadyGlowTiming = CreateSlider(onReadyScrollChild, "Glow Timing", -5, 5, 0.5, CONTROL_WIDTH, 1)
-    controls.onReadyGlowTiming:SetPoint("TOPLEFT", indent, y)
-    controls.onReadyGlowTiming:SetOnChange(function(v) SetSetting("onReadyGlowTiming", v) end)
-    controls.onReadyGlowTiming:Show()
-    y = y - 42
-    
-    local glowTimingHint = onReadyScrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    glowTimingHint:SetPoint("TOPLEFT", indent, y)
-    glowTimingHint:SetWidth(CONTROL_WIDTH)
-    glowTimingHint:SetText("|cff888888Negative = fire before ready, 0 = on ready, positive = after|r")
-    glowTimingHint:SetJustifyH("LEFT")
-    y = y - 22
-    
-    -- ── On Ready Pulse ──
-    local pulseHeader = CreateSectionLabel(onReadyScrollChild, "On Ready Pulse")
-    pulseHeader:SetPoint("TOPLEFT", indent, y)
-    pulseHeader:Show()
-    y = y - 22
-    
-    controls.onReadyPulseEnabled = CreateCheckbox(onReadyScrollChild, "Enable On Ready Pulse", "Scale-bounce the icon when it comes off cooldown")
-    controls.onReadyPulseEnabled:SetPoint("TOPLEFT", indent, y)
-    controls.onReadyPulseEnabled:SetScript("OnClick", function(self)
-        SetSetting("onReadyPulseEnabled", self:GetChecked())
-    end)
-    controls.onReadyPulseEnabled:Show()
-    y = y - 28
-    
-    controls.onReadyPulseScale = CreateSlider(onReadyScrollChild, "Pulse Scale", 1.0, 2.0, 0.05, CONTROL_WIDTH, 2)
-    controls.onReadyPulseScale:SetPoint("TOPLEFT", indent, y)
-    controls.onReadyPulseScale:SetOnChange(function(v) SetSetting("onReadyPulseScale", v) end)
-    controls.onReadyPulseScale:Show()
-    y = y - 42
-    
-    controls.onReadyPulseDuration = CreateSlider(onReadyScrollChild, "Pulse Duration", 0.2, 2.0, 0.1, CONTROL_WIDTH, 1)
-    controls.onReadyPulseDuration:SetPoint("TOPLEFT", indent, y)
-    controls.onReadyPulseDuration:SetOnChange(function(v) SetSetting("onReadyPulseDuration", v) end)
-    controls.onReadyPulseDuration:Show()
-    y = y - 42
-    
-    controls.onReadyPulseCount = CreateSlider(onReadyScrollChild, "Pulse Count", 1, 10, 1, CONTROL_WIDTH)
-    controls.onReadyPulseCount:SetPoint("TOPLEFT", indent, y)
-    controls.onReadyPulseCount:SetOnChange(function(v) SetSetting("onReadyPulseCount", v) end)
-    controls.onReadyPulseCount:Show()
-    y = y - 42
-    
-    controls.onReadyPulseTiming = CreateSlider(onReadyScrollChild, "Pulse Timing", -5, 5, 0.5, CONTROL_WIDTH, 1)
-    controls.onReadyPulseTiming:SetPoint("TOPLEFT", indent, y)
-    controls.onReadyPulseTiming:SetOnChange(function(v) SetSetting("onReadyPulseTiming", v) end)
-    controls.onReadyPulseTiming:Show()
-    y = y - 42
-    
-    local pulseTimingHint = onReadyScrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    pulseTimingHint:SetPoint("TOPLEFT", indent, y)
-    pulseTimingHint:SetWidth(CONTROL_WIDTH)
-    pulseTimingHint:SetText("|cff888888Negative = fire before ready, 0 = on ready, positive = after|r")
-    pulseTimingHint:SetJustifyH("LEFT")
-    y = y - 22
-    
-    onReadyScrollChild:SetHeight(math.abs(y) + 20)
-end
-
-local function RefreshOnReadyControls()
-    if not controls.onReadyGlowEnabled then return end
-    
-    controls.onReadyGlowEnabled:SetChecked(GetSetting("onReadyGlowEnabled"))
-    controls.onReadyGlowStyle:SetValue(GetSetting("onReadyGlowStyle") or "pixel")
-    controls.onReadyGlowIntensity:SetValue(GetSetting("onReadyGlowIntensity") or 0.8)
-    controls.onReadyGlowSpeed:SetValue(GetSetting("onReadyGlowSpeed") or 0.6)
-    controls.onReadyGlowDuration:SetValue(GetSetting("onReadyGlowDuration") or 3.0)
-    controls.onReadyGlowThickness:SetValue(GetSetting("onReadyGlowThickness") or 2)
-    controls.onReadyGlowScale:SetValue(GetSetting("onReadyGlowScale") or 1.0)
-    controls.onReadyGlowTiming:SetValue(GetSetting("onReadyGlowTiming") or 0)
-    
-    -- Refresh glow color swatch
-    if controls._glowColorSwatch and controls._glowColorSwatch.tex then
-        local r = GetSetting("onReadyGlowColorR") or 1.0
-        local g = GetSetting("onReadyGlowColorG") or 0.82
-        local b = GetSetting("onReadyGlowColorB") or 0.0
-        controls._glowColorSwatch.tex:SetColorTexture(r, g, b, 1)
-    end
-    
-    -- Refresh grey state
-    if controls._updateGlowGreyState then controls._updateGlowGreyState() end
-    
-    controls.onReadyPulseEnabled:SetChecked(GetSetting("onReadyPulseEnabled"))
-    controls.onReadyPulseScale:SetValue(GetSetting("onReadyPulseScale") or 1.3)
-    controls.onReadyPulseDuration:SetValue(GetSetting("onReadyPulseDuration") or 0.4)
-    controls.onReadyPulseCount:SetValue(GetSetting("onReadyPulseCount") or 3)
-    controls.onReadyPulseTiming:SetValue(GetSetting("onReadyPulseTiming") or 0)
-end
-
--- ============================================================================
 -- TAB SWITCHING
 -- ============================================================================
 
@@ -1257,11 +975,6 @@ local function RefreshControls()
     controls.barWidth:SetValue(GetSetting("barWidth"))
     controls.direction:SetValue(GetSetting("direction") or "rightToLeft")
     controls.barHeight:SetValue(GetSetting("barHeight"))
-    
-    -- Hash marks
-    controls.showHashMarks:SetChecked(GetSetting("showHashMarks") ~= false)
-    local hmColor = GetSetting("hashMarkColor") or { r = 0.6, g = 0.6, b = 0.6, a = 0.5 }
-    controls.hashMarkColor:SetColor(hmColor)
     
     -- Color pickers
     local barColor = GetSetting("barColor") or { r = 0.4, g = 0.4, b = 0.4, a = 0.9 }
@@ -1296,7 +1009,7 @@ local function SelectTab(tabKey)
         end
     end
     
-    -- Hide all children from all scroll containers first
+    -- Hide all children from both scroll containers first
     if configScrollChild then
         for _, child in ipairs({configScrollChild:GetChildren()}) do
             child:Hide()
@@ -1307,29 +1020,16 @@ local function SelectTab(tabKey)
             child:Hide()
         end
     end
-    if onReadyScrollChild then
-        for _, child in ipairs({onReadyScrollChild:GetChildren()}) do
-            child:Hide()
-        end
-    end
     
     if tabKey == "visibility" then
+        -- Hide settings scroll child, show visibility scroll child
         if configScrollChild then configScrollChild:Hide() end
-        if onReadyScrollChild then onReadyScrollChild:Hide() end
         if visibilityScrollChild then visibilityScrollChild:Show() end
         configFrame:SetScrollChild(visibilityScrollChild)
         BuildVisibilityTab()
-    elseif tabKey == "onready" then
-        if configScrollChild then configScrollChild:Hide() end
-        if visibilityScrollChild then visibilityScrollChild:Hide() end
-        if onReadyScrollChild then onReadyScrollChild:Show() end
-        configFrame:SetScrollChild(onReadyScrollChild)
-        BuildOnReadyTab()
-        RefreshOnReadyControls()
     else
-        -- Settings tab
+        -- Hide visibility scroll child, show settings scroll child
         if visibilityScrollChild then visibilityScrollChild:Hide() end
-        if onReadyScrollChild then onReadyScrollChild:Hide() end
         if configScrollChild then configScrollChild:Show() end
         configFrame:SetScrollChild(configScrollChild)
         -- Re-show settings content and refresh
@@ -1505,7 +1205,6 @@ local function CreatePanel()
     
     local tabDefs = {
         { key = "settings", label = "Settings" },
-        { key = "onready", label = "On Ready" },
         { key = "visibility", label = "Visibility" },
     }
     
@@ -1551,11 +1250,6 @@ local function CreatePanel()
     visibilityScrollChild = CreateFrame("Frame", nil, configScrollFrame)
     visibilityScrollChild:SetSize(CONFIG_WIDTH - 50, 800)
     visibilityScrollChild:Hide()  -- Hide initially
-    
-    -- Create on-ready scroll child
-    onReadyScrollChild = CreateFrame("Frame", nil, configScrollFrame)
-    onReadyScrollChild:SetSize(CONFIG_WIDTH - 50, 800)
-    onReadyScrollChild:Hide()  -- Hide initially
     
     -- Build the settings UI
     BuildSettingsPanel()

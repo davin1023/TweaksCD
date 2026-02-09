@@ -17,7 +17,7 @@ TUICD.MultiTrackerUI = MultiTrackerUI
 -- CONSTANTS
 -- ============================================================================
 
-local PANEL_WIDTH = 520
+local PANEL_WIDTH = 680
 local PANEL_HEIGHT = 700  -- Increased to fit second row of buttons
 
 local darkBackdrop = {
@@ -953,17 +953,35 @@ local function BuildAppearanceTab(parent)
         function(v) SetSetting("showProcGlow", v) end,
         RefreshTrackerDisplay)
     
+    -- Forward-declare grey state updater for proc glow
+    local procThicknessSlider, procScaleSlider
+    local function UpdateProcGlowGreyState()
+        local style = GetSetting("procGlowStyle") or "pixel"
+        local function ApplyGrey(ctrl, active)
+            if not ctrl then return end
+            if ctrl.SetAlpha then ctrl:SetAlpha(active and 1 or 0.4) end
+            if ctrl.EnableMouse then ctrl:EnableMouse(active) end
+            if ctrl.slider then ctrl.slider:EnableMouse(active) end
+            if ctrl.editBox then ctrl.editBox:EnableMouse(active) end
+        end
+        ApplyGrey(procThicknessSlider, style == "pixel")
+        ApplyGrey(procScaleSlider, style == "glow")
+    end
+    
     local glowStyleOptions = {
-        { label = "Blizzard Glow", value = "blizzard" },
         { label = "Pixel Border", value = "pixel" },
         { label = "Shine Flash", value = "shine" },
+        { label = "Spell Glow", value = "glow" },
     }
     y = CreateDropdownControl(parent, y, "Glow Style", glowStyleOptions,
-        function() return GetSetting("procGlowStyle") or "blizzard" end,
-        function(v) SetSetting("procGlowStyle", v) end,
+        function() return GetSetting("procGlowStyle") or "pixel" end,
+        function(v)
+            SetSetting("procGlowStyle", v)
+            UpdateProcGlowGreyState()
+        end,
         RefreshTrackerDisplay)
     
-    -- Proc glow color picker (primarily for pixel/shine styles)
+    -- Glow color picker (applies to ALL styles now)
     local procColorLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     procColorLabel:SetPoint("TOPLEFT", 35, y)
     procColorLabel:SetText("Glow Color:")
@@ -1001,22 +1019,47 @@ local function BuildAppearanceTab(parent)
                 SetSetting("procGlowColorG", ng)
                 SetSetting("procGlowColorB", nb)
                 UpdateProcSwatchColor()
-                RefreshTrackerDisplay()
             end,
             cancelFunc = function(prev)
                 SetSetting("procGlowColorR", prev.r)
                 SetSetting("procGlowColorG", prev.g)
                 SetSetting("procGlowColorB", prev.b)
                 UpdateProcSwatchColor()
-                RefreshTrackerDisplay()
             end,
         })
     end)
     
     local procColorHint = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     procColorHint:SetPoint("LEFT", procColorSwatch, "RIGHT", 10, 0)
-    procColorHint:SetText("|cff888888(for Pixel / Shine styles)|r")
+    procColorHint:SetText("|cff888888(tints all glow styles)|r")
     y = y - 30
+    
+    -- Glow Intensity slider
+    y = CreateSlider(parent, y, "Glow Intensity", 0.3, 1.0, 0.05,
+        function() return GetSetting("procGlowIntensity") or 0.8 end,
+        function(v) SetSetting("procGlowIntensity", v) end,
+        RefreshTrackerDisplay)
+    
+    -- Pulse Speed slider
+    y = CreateSlider(parent, y, "Pulse Speed", 0.2, 2.0, 0.1,
+        function() return GetSetting("procGlowSpeed") or 0.6 end,
+        function(v) SetSetting("procGlowSpeed", v) end,
+        RefreshTrackerDisplay)
+    
+    -- Border Thickness slider (greyed out when not Pixel style)
+    y, procThicknessSlider = CreateSlider(parent, y, "Border Thickness", 1, 6, 1,
+        function() return GetSetting("procGlowThickness") or 2 end,
+        function(v) SetSetting("procGlowThickness", v) end,
+        RefreshTrackerDisplay)
+    
+    -- Glow Scale slider (greyed out when not Spell Glow style)
+    y, procScaleSlider = CreateSlider(parent, y, "Glow Scale", 0.5, 2.0, 0.1,
+        function() return GetSetting("procGlowScale") or 1.0 end,
+        function(v) SetSetting("procGlowScale", v) end,
+        RefreshTrackerDisplay)
+    
+    -- Apply initial grey state
+    UpdateProcGlowGreyState()
     
     y = y - 10
     y = CreateHeader(parent, y, "Interaction")
@@ -1197,11 +1240,173 @@ local function BuildPerIconTab(parent)
     end
 end
 
+-- ========================================
+-- TAB: ON READY
+-- ========================================
+local function BuildOnReadyTab(parent)
+    local y = -10
+    
+    y = CreateHeader(parent, y, "On Ready Glow")
+    
+    local glowHint = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    glowHint:SetPoint("TOPLEFT", 10, y)
+    glowHint:SetWidth(PANEL_WIDTH - 80)
+    glowHint:SetText("|cff888888Flash an effect when a cooldown finishes (or is about to finish).|r")
+    glowHint:SetJustifyH("LEFT")
+    y = y - 18
+    
+    y = CreateCheckbox(parent, y, "Enable On Ready Glow",
+        function() return GetSetting("onReadyGlowEnabled") end,
+        function(v) SetSetting("onReadyGlowEnabled", v) end)
+    
+    local glowStyleOptions = {
+        { label = "Pixel Border", value = "pixel" },
+        { label = "Shine Flash", value = "shine" },
+        { label = "Spell Glow", value = "glow" },
+    }
+    -- Forward-declare grey state updater (defined after sliders are created)
+    local orThicknessSlider, orScaleSlider
+    local function UpdateOnReadyGlowGreyState()
+        local style = GetSetting("onReadyGlowStyle") or "pixel"
+        local function ApplyGrey(ctrl, active)
+            if not ctrl then return end
+            if ctrl.SetAlpha then ctrl:SetAlpha(active and 1 or 0.4) end
+            if ctrl.EnableMouse then ctrl:EnableMouse(active) end
+            if ctrl.slider then ctrl.slider:EnableMouse(active) end
+            if ctrl.editBox then ctrl.editBox:EnableMouse(active) end
+        end
+        ApplyGrey(orThicknessSlider, style == "pixel")
+        ApplyGrey(orScaleSlider, style == "glow")
+    end
+    
+    y = CreateDropdownControl(parent, y, "Glow Style", glowStyleOptions,
+        function() return GetSetting("onReadyGlowStyle") or "pixel" end,
+        function(v)
+            SetSetting("onReadyGlowStyle", v)
+            UpdateOnReadyGlowGreyState()
+        end)
+    
+    -- Glow color picker
+    local glowColorLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    glowColorLabel:SetPoint("TOPLEFT", 35, y)
+    glowColorLabel:SetText("Glow Color:")
+    
+    local glowColorSwatch = CreateFrame("Button", nil, parent)
+    glowColorSwatch:SetPoint("LEFT", glowColorLabel, "RIGHT", 10, 0)
+    glowColorSwatch:SetSize(24, 24)
+    
+    local glowBorder = glowColorSwatch:CreateTexture(nil, "BACKGROUND")
+    glowBorder:SetPoint("TOPLEFT", -2, 2)
+    glowBorder:SetPoint("BOTTOMRIGHT", 2, -2)
+    glowBorder:SetColorTexture(0.5, 0.5, 0.5, 1)
+    
+    local glowTex = glowColorSwatch:CreateTexture(nil, "ARTWORK")
+    glowTex:SetAllPoints()
+    glowColorSwatch.tex = glowTex
+    
+    local function UpdateGlowSwatchColor()
+        local r = GetSetting("onReadyGlowColorR") or 1.0
+        local g = GetSetting("onReadyGlowColorG") or 0.82
+        local b = GetSetting("onReadyGlowColorB") or 0.0
+        glowTex:SetColorTexture(r, g, b, 1)
+    end
+    UpdateGlowSwatchColor()
+    
+    glowColorSwatch:SetScript("OnClick", function()
+        local r = GetSetting("onReadyGlowColorR") or 1.0
+        local g = GetSetting("onReadyGlowColorG") or 0.82
+        local b = GetSetting("onReadyGlowColorB") or 0.0
+        ColorPickerFrame:SetupColorPickerAndShow({
+            r = r, g = g, b = b,
+            swatchFunc = function()
+                local nr, ng, nb = ColorPickerFrame:GetColorRGB()
+                SetSetting("onReadyGlowColorR", nr)
+                SetSetting("onReadyGlowColorG", ng)
+                SetSetting("onReadyGlowColorB", nb)
+                UpdateGlowSwatchColor()
+            end,
+            cancelFunc = function(prev)
+                SetSetting("onReadyGlowColorR", prev.r)
+                SetSetting("onReadyGlowColorG", prev.g)
+                SetSetting("onReadyGlowColorB", prev.b)
+                UpdateGlowSwatchColor()
+            end,
+        })
+    end)
+    y = y - 30
+    
+    y = CreateSlider(parent, y, "Glow Intensity", 0.1, 1.0, 0.05,
+        function() return GetSetting("onReadyGlowIntensity") or 0.8 end,
+        function(v) SetSetting("onReadyGlowIntensity", v) end)
+    
+    y = CreateSlider(parent, y, "Pulse Speed", 0.1, 2.0, 0.1,
+        function() return GetSetting("onReadyGlowSpeed") or 0.6 end,
+        function(v) SetSetting("onReadyGlowSpeed", v) end)
+    
+    y = CreateSlider(parent, y, "Duration", 0.5, 10.0, 0.5,
+        function() return GetSetting("onReadyGlowDuration") or 3.0 end,
+        function(v) SetSetting("onReadyGlowDuration", v) end)
+    
+    y, orThicknessSlider = CreateSlider(parent, y, "Border Thickness", 1, 6, 1,
+        function() return GetSetting("onReadyGlowThickness") or 2 end,
+        function(v) SetSetting("onReadyGlowThickness", v) end)
+    
+    y, orScaleSlider = CreateSlider(parent, y, "Glow Scale", 0.5, 2.0, 0.1,
+        function() return GetSetting("onReadyGlowScale") or 1.0 end,
+        function(v) SetSetting("onReadyGlowScale", v) end)
+    
+    -- Apply initial grey state for thickness/scale
+    UpdateOnReadyGlowGreyState()
+    
+    y = CreateSlider(parent, y, "Glow Timing", -5, 5, 0.5,
+        function() return GetSetting("onReadyGlowTiming") or 0 end,
+        function(v) SetSetting("onReadyGlowTiming", v) end)
+    
+    local glowTimingHint = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    glowTimingHint:SetPoint("TOPLEFT", 35, y)
+    glowTimingHint:SetWidth(PANEL_WIDTH - 100)
+    glowTimingHint:SetText("|cff888888Negative = fire before ready, 0 = on ready, positive = after ready|r")
+    glowTimingHint:SetJustifyH("LEFT")
+    y = y - 18
+    
+    y = y - 10
+    y = CreateHeader(parent, y, "On Ready Pulse")
+    
+    y = CreateCheckbox(parent, y, "Enable On Ready Pulse",
+        function() return GetSetting("onReadyPulseEnabled") end,
+        function(v) SetSetting("onReadyPulseEnabled", v) end)
+    
+    y = CreateSlider(parent, y, "Pulse Scale", 1.0, 2.0, 0.05,
+        function() return GetSetting("onReadyPulseScale") or 1.3 end,
+        function(v) SetSetting("onReadyPulseScale", v) end)
+    
+    y = CreateSlider(parent, y, "Pulse Duration", 0.2, 2.0, 0.1,
+        function() return GetSetting("onReadyPulseDuration") or 0.4 end,
+        function(v) SetSetting("onReadyPulseDuration", v) end)
+    
+    y = CreateSlider(parent, y, "Pulse Count", 1, 10, 1,
+        function() return GetSetting("onReadyPulseCount") or 3 end,
+        function(v) SetSetting("onReadyPulseCount", v) end)
+    
+    y = CreateSlider(parent, y, "Pulse Timing", -5, 5, 0.5,
+        function() return GetSetting("onReadyPulseTiming") or 0 end,
+        function(v) SetSetting("onReadyPulseTiming", v) end)
+    
+    local pulseTimingHint = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    pulseTimingHint:SetPoint("TOPLEFT", 35, y)
+    pulseTimingHint:SetWidth(PANEL_WIDTH - 100)
+    pulseTimingHint:SetText("|cff888888Negative = fire before ready, 0 = on ready, positive = after ready|r")
+    pulseTimingHint:SetJustifyH("LEFT")
+    y = y - 18
+    
+    parent:SetHeight(math.abs(y) + 20)
+end
+
 -- ============================================================================
 -- MAIN PANEL CREATION
 -- ============================================================================
 
-local PANEL_VERSION = "3.0.39"  -- Increment this to force panel rebuild
+local PANEL_VERSION = "3.2.0"  -- Increment this to force panel rebuild
 
 function MultiTrackerUI:CreatePanel()
     -- Check if panel needs rebuild due to version change
@@ -1452,8 +1657,9 @@ function MultiTrackerUI:CreatePanel()
         { name = "Layout", key = "layout" },
         { name = "Appearance", key = "appearance" },
         { name = "Text", key = "text" },
+        { name = "On Ready", key = "onready" },
         { name = "Visibility", key = "visibility" },
-        { name = "Per-Icon", key = "pericon" },
+        { name = "Individual Icons", key = "pericon" },
     }
     
     tabContainer = CreateFrame("Frame", nil, mainPanel)
@@ -1470,6 +1676,7 @@ function MultiTrackerUI:CreatePanel()
         layout = BuildLayoutTab,
         appearance = BuildAppearanceTab,
         text = BuildTextTab,
+        onready = BuildOnReadyTab,
         visibility = BuildVisibilityTab,
         pericon = BuildPerIconTab,
     }
@@ -1549,6 +1756,7 @@ function MultiTrackerUI:RefreshContent()
         layout = BuildLayoutTab,
         appearance = BuildAppearanceTab,
         text = BuildTextTab,
+        onready = BuildOnReadyTab,
         visibility = BuildVisibilityTab,
         pericon = BuildPerIconTab,
     }

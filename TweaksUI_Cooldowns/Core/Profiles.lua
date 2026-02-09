@@ -1254,15 +1254,23 @@ function Profiles:DebugDirtyState()
     print("|cff00ff00=== End Debug ===|r")
 end
 
--- Slash command for debugging profile dirty state
+-- Slash command for debugging profile dirty state (debug only)
 SLASH_TUIDIRTY1 = "/tuidirty"
 SlashCmdList["TUIDIRTY"] = function()
+    if not TUICD.debugMode then
+        TUICD:Print("Debug mode required. Use |cffFFFFFF/tuicd debug|r to enable.")
+        return
+    end
     TUICD.Profiles:DebugDirtyState()
 end
 
--- Debug command to show docks in a saved profile
+-- Debug command to show docks in a saved profile (debug only)
 SLASH_TUIPROFILEDOCKS1 = "/tuiprofiledocks"
 SlashCmdList["TUIPROFILEDOCKS"] = function(profileName)
+    if not TUICD.debugMode then
+        TUICD:Print("Debug mode required. Use |cffFFFFFF/tuicd debug|r to enable.")
+        return
+    end
     if not profileName or profileName == "" then
         print("|cff00ff00TUI Profile Docks:|r Usage: /tuiprofiledocks <profilename>")
         print("Available profiles:")

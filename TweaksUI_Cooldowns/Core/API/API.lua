@@ -166,9 +166,13 @@ function API:PrintStatus()
     TUICD:Print("Heal Prediction Calculator: |cff00ff00Available|r")
 end
 
--- Slash command to check API status
+-- Slash command to check API status (debug only)
 SLASH_TUIAPI1 = "/tuiapi"
 SlashCmdList["TUIAPI"] = function()
+    if not TUICD.debugMode then
+        TUICD:Print("Debug mode required. Use |cffFFFFFF/tuicd debug|r to enable.")
+        return
+    end
     API:PrintStatus()
 end
 

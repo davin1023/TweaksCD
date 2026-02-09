@@ -404,6 +404,8 @@ function TimelineData:GetActiveCooldowns()
 end
 
 -- Get all spells currently ready (not on cooldown)
+-- Re-checks spells that cooldownStates thinks are on CD, to catch natural
+-- CD expirations that may not yet have triggered SPELL_UPDATE_COOLDOWN
 function TimelineData:GetReadySpells()
     local ready = {}
     
@@ -411,9 +413,29 @@ function TimelineData:GetReadySpells()
     local TimelineUI = TUICD.TimelineUI
     
     for spellID, state in pairs(cooldownStates) do
-        if not state.isOnCD then
-            local spellData = trackedSpells[spellID]
-            if spellData then
+        local spellData = trackedSpells[spellID]
+        if spellData then
+            local isReady = false
+            
+            if not state.isOnCD then
+                -- Already known to be ready
+                isReady = true
+            else
+                -- Cache says on CD - re-check actual state (may have naturally expired)
+                local isOnCD, remaining, duration = self:GetCooldownState(spellID)
+                if not isOnCD then
+                    -- CD expired! Update cached state
+                    cooldownStates[spellID] = {
+                        isOnCD = false,
+                        remaining = 0,
+                        duration = duration,
+                        lastUpdate = GetTime()
+                    }
+                    isReady = true
+                end
+            end
+            
+            if isReady then
                 -- Check if spell is enabled in UI settings
                 local isEnabled = true
                 if TimelineUI and TimelineUI.IsSpellEnabled then

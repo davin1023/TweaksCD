@@ -58,26 +58,7 @@ local DEFAULT_SETTINGS = {
     iconSize = 24,
     maxDuration = 120,
     direction = "rightToLeft",
-    showHashMarks = true,
-    hashMarkColor = { r = 0.6, g = 0.6, b = 0.6, a = 0.5 },
     readyZoneWidth = 60,
-    -- On Ready effects
-    onReadyGlowEnabled = false,
-    onReadyGlowStyle = "pixel",
-    onReadyGlowColorR = 1.0,
-    onReadyGlowColorG = 0.82,
-    onReadyGlowColorB = 0.0,
-    onReadyGlowSpeed = 0.6,
-    onReadyGlowIntensity = 0.8,
-    onReadyGlowThickness = 2,
-    onReadyGlowScale = 1.0,
-    onReadyGlowDuration = 3.0,
-    onReadyGlowTiming = 0,
-    onReadyPulseEnabled = false,
-    onReadyPulseScale = 1.3,
-    onReadyPulseDuration = 0.4,
-    onReadyPulseCount = 3,
-    onReadyPulseTiming = 0,
 }
 
 local settings = {}

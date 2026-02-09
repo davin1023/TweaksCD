@@ -384,9 +384,13 @@ end)
 -- SLASH COMMAND FOR MANUAL SCRAPING
 -- ============================================================================
 
--- Add a manual scrape command
+-- Add a manual scrape command (debug only)
 SLASH_TUICDMSCRAPE1 = "/tuicdscrape"
 SlashCmdList["TUICDMSCRAPE"] = function(msg)
+    if not TUICD.debugMode then
+        TUICD:Print("Debug mode required. Use |cffFFFFFF/tuicd debug|r to enable.")
+        return
+    end
     if msg == "help" or msg == "?" then
         TUICD:Print("CDM Scraper commands:")
         TUICD:Print("  /tuicdscrape - Scrape CDM and add new spells to Custom Tracker")

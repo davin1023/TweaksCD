@@ -652,4 +652,10 @@ function TUIFrame.DebugDump()
 end
 
 SLASH_TUIFRAMEDEBUG1 = "/tuiframedebug"
-SlashCmdList["TUIFRAMEDEBUG"] = TUIFrame.DebugDump
+SlashCmdList["TUIFRAMEDEBUG"] = function()
+    if not TUICD.debugMode then
+        TUICD:Print("Debug mode required. Use |cffFFFFFF/tuicd debug|r to enable.")
+        return
+    end
+    TUIFrame.DebugDump()
+end

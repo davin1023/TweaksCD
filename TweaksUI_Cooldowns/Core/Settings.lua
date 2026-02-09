@@ -12,7 +12,7 @@ local Settings = TUICD.Settings
 -- CONSTANTS
 -- ============================================================
 local HUB_WIDTH = 200
-local HUB_HEIGHT = 425  -- Increased for Timer Bars button
+local HUB_HEIGHT = 455  -- Increased for minimap button checkbox
 local BUTTON_WIDTH = 170
 local BUTTON_HEIGHT = 28
 local BUTTON_SPACING = 6
@@ -91,6 +91,19 @@ end
 local function HideAllPanels()
     for _, p in ipairs(allPanels) do
         p:Hide()
+    end
+end
+
+-- Close all module sub-hubs (Cooldowns, BarsHub, PersonalResources, etc.)
+local function CloseAllModuleHubs()
+    if TUICD.Cooldowns and TUICD.Cooldowns.HideAllPanels then
+        TUICD.Cooldowns:HideAllPanels()
+    end
+    if TUICD.BarsHub and TUICD.BarsHub:IsShown() then
+        TUICD.BarsHub:Hide()
+    end
+    if TUICD.PersonalResources and TUICD.PersonalResources.HideAllPanels then
+        TUICD.PersonalResources:HideAllPanels()
     end
 end
 
@@ -293,6 +306,25 @@ function Settings:CreatePanel()
     cdmBtn:SetScript("OnLeave", function()
         GameTooltip:Hide()
     end)
+    yOffset = yOffset - BUTTON_HEIGHT - BUTTON_SPACING
+    
+    -- Show Minimap Button checkbox
+    local minimapCheck = CreateFrame("CheckButton", nil, hubPanel, "InterfaceOptionsCheckButtonTemplate")
+    minimapCheck:SetPoint("TOPLEFT", 12, yOffset)
+    minimapCheck.Text:SetText("Show Minimap Button")
+    minimapCheck.Text:SetTextColor(1, 0.82, 0)
+    
+    -- Initialize from saved state
+    local showMinimap = TUICD.Database and TUICD.Database:GetGlobal("showMinimapButton")
+    if showMinimap == nil then showMinimap = true end
+    minimapCheck:SetChecked(showMinimap)
+    
+    minimapCheck:SetScript("OnClick", function(self)
+        local checked = self:GetChecked()
+        if TUICD.MinimapButton then
+            TUICD.MinimapButton:SetShown(checked)
+        end
+    end)
     
     -- Close panels when hub is hidden
     hubPanel:SetScript("OnHide", function()
@@ -318,6 +350,13 @@ end
 -- OPEN COOLDOWNS PANEL
 -- ============================================================
 function Settings:OpenCooldownsPanel()
+    -- Close other module hubs first
+    if TUICD.BarsHub and TUICD.BarsHub:IsShown() then
+        TUICD.BarsHub:Hide()
+    end
+    if TUICD.PersonalResources and TUICD.PersonalResources.HideAllPanels then
+        TUICD.PersonalResources:HideAllPanels()
+    end
     -- Use the Cooldowns module's built-in settings panel
     if TUICD.Cooldowns and TUICD.Cooldowns.ToggleSettingsPanel then
         TUICD.Cooldowns:ToggleSettingsPanel(hubPanel)
@@ -330,6 +369,13 @@ end
 -- OPEN PERSONAL RESOURCES PANEL
 -- ============================================================
 function Settings:OpenPersonalResourcesPanel()
+    -- Close other module hubs first
+    if TUICD.Cooldowns and TUICD.Cooldowns.HideAllPanels then
+        TUICD.Cooldowns:HideAllPanels()
+    end
+    if TUICD.BarsHub and TUICD.BarsHub:IsShown() then
+        TUICD.BarsHub:Hide()
+    end
     -- Use the PersonalResources module's built-in settings panel
     if TUICD.PersonalResources and TUICD.PersonalResources.ToggleSettingsPanel then
         TUICD.PersonalResources:ToggleSettingsPanel(hubPanel)
@@ -342,16 +388,12 @@ end
 -- OPEN BARS PANEL (opens BarsHub sub-hub)
 -- ============================================================
 function Settings:OpenBarsPanel()
-    -- Close other module panels first
-    if TUICD.Cooldowns and TUICD.Cooldowns.settingsPanel then
-        if TUICD.Cooldowns.settingsPanel:IsShown() then
-            TUICD.Cooldowns.settingsPanel:Hide()
-        end
+    -- Close other module hubs first
+    if TUICD.Cooldowns and TUICD.Cooldowns.HideAllPanels then
+        TUICD.Cooldowns:HideAllPanels()
     end
-    if TUICD.PersonalResources and TUICD.PersonalResources.settingsPanel then
-        if TUICD.PersonalResources.settingsPanel:IsShown() then
-            TUICD.PersonalResources.settingsPanel:Hide()
-        end
+    if TUICD.PersonalResources and TUICD.PersonalResources.HideAllPanels then
+        TUICD.PersonalResources:HideAllPanels()
     end
 
     if TUICD.BarsHub then

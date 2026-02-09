@@ -283,6 +283,7 @@ local function GetDB(trackerKey)
     
     -- Radial swipe settings (state-independent)
     if not db.radialSwipe then db.radialSwipe = {} end
+    if not db.radialSwipe.enabled then db.radialSwipe.enabled = {} end
     if not db.radialSwipe.displayState then db.radialSwipe.displayState = {} end
     if not db.radialSwipe.texturePath then db.radialSwipe.texturePath = {} end
     if not db.radialSwipe.color then db.radialSwipe.color = {} end
@@ -557,6 +558,7 @@ local PER_ICON_NESTED = {
     "inactive.customAspectW",
     "inactive.customAspectH",
     "inactive.show",
+    "radialSwipe.enabled",
     "radialSwipe.displayState",
     "radialSwipe.texturePath",
     "radialSwipe.color",
@@ -858,8 +860,290 @@ function CooldownHighlights:invokeProtectedContainerShow(viewer)
     end
 end
 
+-- ============================================================================
+-- REAPPEARANCE EFFECTS (Flash & Pulse)
+-- ============================================================================
+
+-- Get dock settings for a docked icon's reappearance effects
+local function GetReappearDockSettings(trackerKey, slotIndex)
+    if not TUICD.Docks then return nil end
+    local dockIndex = TUICD.Docks:IsIconDocked(trackerKey, slotIndex)
+    if not dockIndex then return nil end
+    return TUICD.Docks:GetDockSettings(dockIndex)
+end
+
+-- ============================================================================
+-- REAPPEARANCE GLOW EFFECTS (matches Multi-Tracker glow styles)
+-- ============================================================================
+
+-- Stop and hide all reappearance glow types on a frame
+local function HideReappearGlows(frame)
+    if frame._TUI_reappearTimer then frame._TUI_reappearTimer:Cancel(); frame._TUI_reappearTimer = nil end
+    if frame._TUI_pixelGlow then
+        if frame._TUI_pixelGlow._pulseAG then frame._TUI_pixelGlow._pulseAG:Stop() end
+        frame._TUI_pixelGlow:Hide()
+    end
+    if frame._TUI_shineGlow then
+        if frame._TUI_shineGlow._pulseAG then frame._TUI_shineGlow._pulseAG:Stop() end
+        frame._TUI_shineGlow:Hide()
+    end
+    if frame._TUI_spellGlow then
+        if frame._TUI_spellGlow._pulseAG then frame._TUI_spellGlow._pulseAG:Stop() end
+        if frame._TUI_spellGlow._antsAG then frame._TUI_spellGlow._antsAG:Stop() end
+        frame._TUI_spellGlow:Hide()
+    end
+end
+
+-- Play a flash/glow effect on a frame (pixel, shine, or spell glow style)
+local function PlayFlashEffect(frame, settings)
+    if not frame then return end
+    
+    local style = settings.flashType or "pixel"
+    local r = (settings.flashColor and settings.flashColor.r) or 1
+    local g = (settings.flashColor and settings.flashColor.g) or 0.82
+    local b = (settings.flashColor and settings.flashColor.b) or 0
+    local duration = settings.flashDuration or 0.6
+    local speed = settings.flashSpeed or 0.6
+    local intensity = settings.flashIntensity or 0.8
+    local thickness = settings.flashThickness or 2
+    local glowScale = settings.flashScale or 1.0
+    
+    -- Hide any existing glow first
+    HideReappearGlows(frame)
+    
+    if style == "pixel" then
+        -- Pixel glow: colored border pulse with configurable thickness
+        if not frame._TUI_pixelGlow then
+            local glowFrame = CreateFrame("Frame", nil, frame, "BackdropTemplate")
+            glowFrame:SetFrameLevel(frame:GetFrameLevel() + 5)
+            
+            local ag = glowFrame:CreateAnimationGroup()
+            ag:SetLooping("BOUNCE")
+            local alpha = ag:CreateAnimation("Alpha")
+            alpha:SetSmoothing("IN_OUT")
+            glowFrame._pulseAG = ag
+            glowFrame._pulseAlpha = alpha
+            
+            frame._TUI_pixelGlow = glowFrame
+        end
+        
+        local gf = frame._TUI_pixelGlow
+        local t = math.max(1, math.floor(thickness))
+        gf:ClearAllPoints()
+        gf:SetPoint("TOPLEFT", -t, t)
+        gf:SetPoint("BOTTOMRIGHT", t, -t)
+        gf:SetBackdrop({
+            edgeFile = "Interface\\Buttons\\WHITE8x8",
+            edgeSize = t,
+        })
+        gf:SetBackdropBorderColor(r, g, b, intensity)
+        
+        gf._pulseAlpha:SetFromAlpha(intensity)
+        gf._pulseAlpha:SetToAlpha(math.max(0.05, intensity * 0.2))
+        gf._pulseAlpha:SetDuration(speed)
+        
+        gf:Show()
+        gf._pulseAG:Play()
+        
+    elseif style == "shine" then
+        -- Shine glow: colored flash overlay with configurable brightness
+        if not frame._TUI_shineGlow then
+            local shine = frame:CreateTexture(nil, "OVERLAY")
+            shine:SetAllPoints()
+            shine:SetBlendMode("ADD")
+            shine:SetDrawLayer("OVERLAY", 6)
+            
+            local ag = shine:CreateAnimationGroup()
+            ag:SetLooping("BOUNCE")
+            local alpha = ag:CreateAnimation("Alpha")
+            alpha:SetSmoothing("IN_OUT")
+            shine._pulseAG = ag
+            shine._pulseAlpha = alpha
+            
+            frame._TUI_shineGlow = shine
+        end
+        
+        local sh = frame._TUI_shineGlow
+        sh:SetColorTexture(r, g, b, intensity)
+        
+        sh._pulseAlpha:SetFromAlpha(intensity)
+        sh._pulseAlpha:SetToAlpha(math.max(0.02, intensity * 0.1))
+        sh._pulseAlpha:SetDuration(speed)
+        
+        sh:Show()
+        sh._pulseAG:Play()
+        
+    else
+        -- "glow": SpellActivation-style glow with ants and radiant edges
+        if not frame._TUI_spellGlow then
+            local glow = CreateFrame("Frame", nil, frame)
+            glow:SetFrameLevel(frame:GetFrameLevel() + 5)
+            
+            local inner = glow:CreateTexture(nil, "ARTWORK")
+            inner:SetTexture("Interface\\SpellActivationOverlay\\IconAlert")
+            inner:SetTexCoord(0.00781250, 0.50781250, 0.27734375, 0.52734375)
+            inner:SetBlendMode("ADD")
+            inner:SetDrawLayer("ARTWORK", 1)
+            glow._inner = inner
+            
+            local outer = glow:CreateTexture(nil, "ARTWORK")
+            outer:SetTexture("Interface\\SpellActivationOverlay\\IconAlert")
+            outer:SetTexCoord(0.00781250, 0.50781250, 0.53515625, 0.78515625)
+            outer:SetBlendMode("ADD")
+            outer:SetDrawLayer("ARTWORK", 0)
+            glow._outer = outer
+            
+            local ants = glow:CreateTexture(nil, "OVERLAY")
+            ants:SetTexture("Interface\\SpellActivationOverlay\\IconAlertAnts")
+            ants:SetBlendMode("ADD")
+            ants:SetDrawLayer("OVERLAY", 5)
+            glow._ants = ants
+            
+            local antsAG = ants:CreateAnimationGroup()
+            antsAG:SetLooping("REPEAT")
+            local rot = antsAG:CreateAnimation("Rotation")
+            rot:SetDegrees(-360)
+            rot:SetDuration(12)
+            glow._antsAG = antsAG
+            
+            local pulseAG = glow:CreateAnimationGroup()
+            pulseAG:SetLooping("BOUNCE")
+            local alpha = pulseAG:CreateAnimation("Alpha")
+            alpha:SetFromAlpha(1)
+            alpha:SetToAlpha(0.5)
+            alpha:SetSmoothing("IN_OUT")
+            glow._pulseAG = pulseAG
+            glow._pulseAlpha = alpha
+            
+            frame._TUI_spellGlow = glow
+        end
+        
+        local glow = frame._TUI_spellGlow
+        local scale = glowScale or 1.0
+        local w, h = frame:GetSize()
+        local pad = (w * 0.4) * scale
+        
+        glow:ClearAllPoints()
+        glow:SetPoint("TOPLEFT", frame, "TOPLEFT", -pad, pad)
+        glow:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", pad, -pad)
+        
+        glow._inner:SetAllPoints(glow)
+        glow._outer:SetAllPoints(glow)
+        glow._ants:SetAllPoints(glow)
+        
+        glow._inner:SetVertexColor(r, g, b, 1)
+        glow._outer:SetVertexColor(r, g, b, 0.6)
+        glow._ants:SetVertexColor(r, g, b, 0.7)
+        
+        glow._pulseAlpha:SetDuration(speed)
+        
+        glow:Show()
+        glow._antsAG:Play()
+        glow._pulseAG:Play()
+    end
+    
+    -- Auto-hide after duration
+    frame._TUI_reappearTimer = C_Timer.NewTimer(duration, function()
+        frame._TUI_reappearTimer = nil
+        HideReappearGlows(frame)
+    end)
+end
+
+-- Play a pulse (scale up then back) effect on a frame
+local function PlayPulseEffect(frame, pulseScale, pulseDuration, pulseCount)
+    if not frame then return end
+    pulseCount = pulseCount or 3
+    if pulseCount < 1 then pulseCount = 1 end
+    
+    -- Create animation group on demand
+    if not frame._TUI_pulseAnimGroup then
+        local ag = frame:CreateAnimationGroup()
+        
+        local scaleUp = ag:CreateAnimation("Scale")
+        scaleUp:SetOrigin("CENTER", 0, 0)
+        scaleUp:SetOrder(1)
+        
+        local scaleDown = ag:CreateAnimation("Scale")
+        scaleDown:SetOrigin("CENTER", 0, 0)
+        scaleDown:SetOrder(2)
+        
+        ag._scaleUp = scaleUp
+        ag._scaleDown = scaleDown
+        ag._loopCount = 0
+        ag._targetLoops = 1
+        
+        ag:SetScript("OnLoop", function(self)
+            self._loopCount = self._loopCount + 1
+            if self._loopCount >= self._targetLoops then
+                self:Stop()
+            end
+        end)
+        
+        frame._TUI_pulseAnimGroup = ag
+    end
+    
+    local ag = frame._TUI_pulseAnimGroup
+    
+    -- Each pulse gets an equal share of total duration
+    local singlePulseDur = pulseDuration / pulseCount
+    local halfDur = singlePulseDur * 0.5
+    
+    ag._scaleUp:SetScaleFrom(1, 1)
+    ag._scaleUp:SetScaleTo(pulseScale, pulseScale)
+    ag._scaleUp:SetDuration(math.max(halfDur, 0.05))
+    ag._scaleUp:SetSmoothing("OUT")
+    
+    ag._scaleDown:SetScaleFrom(pulseScale, pulseScale)
+    ag._scaleDown:SetScaleTo(1, 1)
+    ag._scaleDown:SetDuration(math.max(halfDur, 0.05))
+    ag._scaleDown:SetSmoothing("IN")
+    
+    -- Set up looping
+    ag._loopCount = 0
+    ag._targetLoops = pulseCount
+    if pulseCount > 1 then
+        ag:SetLooping("REPEAT")
+    else
+        ag:SetLooping("NONE")
+    end
+    
+    if ag:IsPlaying() then ag:Stop() end
+    ag:Play()
+end
+
+-- Fire reappearance effects based on trigger type ("onEarlyShow" or "onReady")
+local function FireReappearanceEffects(frame, triggerEvent, trackerKey, slotIndex)
+    local dockSettings = GetReappearDockSettings(trackerKey, slotIndex)
+    if not dockSettings then return end
+    
+    -- Flash/Glow
+    if dockSettings.flashEnabled then
+        local flashTrigger = dockSettings.flashTrigger or "onReady"
+        if flashTrigger == triggerEvent or flashTrigger == "both" then
+            PlayFlashEffect(frame, dockSettings)
+        end
+    end
+    
+    -- Pulse
+    if dockSettings.pulseEnabled then
+        local pulseTrigger = dockSettings.pulseTrigger or "onReady"
+        if pulseTrigger == triggerEvent or pulseTrigger == "both" then
+            PlayPulseEffect(
+                frame,
+                dockSettings.pulseScale or 1.3,
+                dockSettings.pulseDuration or 0.4,
+                dockSettings.pulseCount or 3
+            )
+        end
+    end
+end
+
 -- Cooldowns longer than 3000ms (3 sec) are "real" cooldowns, not GCD (~1500ms)
 local GCD_THRESHOLD = 3000
+
+-- Track scheduled early show timers per icon to avoid duplicates
+-- Key: "trackerKey:slotIndex", Value: true (timer is pending)
+local earlyShowTimersPending = {}
 
 -- Detect visual state by checking if source icon has a REAL cooldown (not GCD)
 -- We check actual cooldown duration to avoid GCD false positives
@@ -1079,8 +1363,15 @@ local function CreateHighlightFrame(trackerKey, slotIndex)
     -- Hook SetCooldown to reapply settings after Blizzard updates
     hooksecurefunc(frame.cooldown, "SetCooldown", function(self)
         pcall(function()
-            self:SetDrawSwipe(not self._TUI_hideSweep)
-            self:SetDrawEdge(not self._TUI_hideSweep)
+            -- During early show, suppress the swipe so icon appears ready
+            local parent = self:GetParent()
+            if parent and parent._TUI_earlyShowActive then
+                self:SetDrawSwipe(false)
+                self:SetDrawEdge(false)
+            else
+                self:SetDrawSwipe(not self._TUI_hideSweep)
+                self:SetDrawEdge(not self._TUI_hideSweep)
+            end
             self:SetHideCountdownNumbers(self.hideCountdownText)
         end)
     end)
@@ -1088,8 +1379,14 @@ local function CreateHighlightFrame(trackerKey, slotIndex)
     if frame.cooldown.SetCooldownFromDurationObject then
         hooksecurefunc(frame.cooldown, "SetCooldownFromDurationObject", function(self)
             pcall(function()
-                self:SetDrawSwipe(not self._TUI_hideSweep)
-                self:SetDrawEdge(not self._TUI_hideSweep)
+                local parent = self:GetParent()
+                if parent and parent._TUI_earlyShowActive then
+                    self:SetDrawSwipe(false)
+                    self:SetDrawEdge(false)
+                else
+                    self:SetDrawSwipe(not self._TUI_hideSweep)
+                    self:SetDrawEdge(not self._TUI_hideSweep)
+                end
                 self:SetHideCountdownNumbers(self.hideCountdownText)
             end)
         end)
@@ -1428,6 +1725,9 @@ end
 function CooldownHighlights:ApplyVisibilityConditions(trackerKey, slotIndex, isOnCooldown)
     local frame = highlightFrames[trackerKey][slotIndex]
     if not frame then return end
+    local wasEarlyShowActive = frame._TUI_earlyShowActive  -- Save for transition detection
+    local wasOnCooldown = frame._TUI_wasOnCooldown          -- Save for ready detection
+    frame._TUI_earlyShowActive = false  -- Reset early show flag each update
     local showInactive = CooldownHighlights:GetState(trackerKey, "inactive.show." .. slotIndex)
     local showActive = CooldownHighlights:GetState(trackerKey, "active.show." .. slotIndex)
     
@@ -1445,8 +1745,122 @@ function CooldownHighlights:ApplyVisibilityConditions(trackerKey, slotIndex, isO
         if isOnCooldown then
             -- CONFIRMED on a real cooldown (> GCD) - check if user wants inactive state shown
             if not showInactive then
-                shouldShowCustomHighlight = false
-                userHiddenState = true  -- User explicitly doesn't want to see this state
+                -- Check for Early Show: if this icon is docked and approaching ready,
+                -- override the hidden state to show it early
+                local earlyShowOverride = false
+                local dockAssignment = TUICD.Docks and TUICD.Docks:IsIconDocked(trackerKey, slotIndex)
+                if dockAssignment then
+                    local dockSettings = TUICD.Docks:GetDockSettings(dockAssignment)
+                    local earlyShowSec = dockSettings and dockSettings.earlyShowSeconds or 0
+                    if earlyShowSec > 0 then
+                        -- Get remaining cooldown time from SOURCE cooldown frame
+                        -- (Blizzard's frame has non-secret values, our highlight frame may have secrets)
+                        local remainingSec = nil
+                        local slotInfo = GetSlotInfo(trackerKey, slotIndex)
+                        local sourceIcon = slotInfo and slotInfo.icon
+                        local sourceCooldown = sourceIcon and (sourceIcon.Cooldown or sourceIcon.cooldown)
+                        
+                        -- Try source cooldown frame first (Blizzard's, non-secret)
+                        if sourceCooldown and sourceCooldown.GetCooldownTimes then
+                            pcall(function()
+                                local start, duration = sourceCooldown:GetCooldownTimes()
+                                if start and duration and type(start) == "number" and type(duration) == "number"
+                                   and start > 0 and duration > GCD_THRESHOLD then
+                                    local remainingMs = (start + duration) - (GetTime() * 1000)
+                                    remainingSec = remainingMs / 1000
+                                end
+                            end)
+                        end
+                        
+                        -- Fallback to highlight frame cooldown
+                        if not remainingSec and frame.cooldown and frame.cooldown.GetCooldownTimes then
+                            pcall(function()
+                                local start, duration = frame.cooldown:GetCooldownTimes()
+                                if start and duration and type(start) == "number" and type(duration) == "number" 
+                                   and start > 0 and duration > GCD_THRESHOLD then
+                                    local remainingMs = (start + duration) - (GetTime() * 1000)
+                                    remainingSec = remainingMs / 1000
+                                end
+                            end)
+                        end
+                        
+                        -- Fallback for charge-based spells: GetCooldownTimes may not
+                        -- reflect charge recharge when set via Duration Objects.
+                        -- Use C_Spell.GetSpellCharges directly (works even in combat).
+                        if not remainingSec then
+                            local earlySpellID = nil
+                            if sourceIcon then
+                                earlySpellID = sourceIcon.spellID or sourceIcon.SpellID or sourceIcon.spellId
+                                if not earlySpellID and sourceIcon.GetSpellID then
+                                    pcall(function() earlySpellID = sourceIcon:GetSpellID() end)
+                                end
+                                if not earlySpellID and sourceIcon.trackType == "spell" and sourceIcon.trackID then
+                                    earlySpellID = sourceIcon.trackID
+                                end
+                            end
+                            if not earlySpellID then
+                                earlySpellID = GetCachedSpellID(trackerKey, slotIndex)
+                            end
+                            if earlySpellID and C_Spell and C_Spell.GetSpellCharges then
+                                pcall(function()
+                                    local chargeInfo = C_Spell.GetSpellCharges(earlySpellID)
+                                    if chargeInfo and chargeInfo.currentCharges ~= nil and chargeInfo.maxCharges
+                                       and chargeInfo.currentCharges < chargeInfo.maxCharges
+                                       and chargeInfo.cooldownStartTime and chargeInfo.cooldownDuration
+                                       and type(chargeInfo.cooldownStartTime) == "number"
+                                       and type(chargeInfo.cooldownDuration) == "number"
+                                       and chargeInfo.cooldownDuration > 0 then
+                                        local remaining = (chargeInfo.cooldownStartTime + chargeInfo.cooldownDuration) - GetTime()
+                                        if remaining > 0.1 then
+                                            remainingSec = remaining
+                                        end
+                                    end
+                                end)
+                            end
+                        end
+                        
+                        if remainingSec and remainingSec > 0 then
+                            if remainingSec <= earlyShowSec then
+                                -- Within the early show window - show the icon
+                                earlyShowOverride = true
+                                frame._TUI_earlyShowActive = true
+                                -- Fire reappearance effects on first activation
+                                if not wasEarlyShowActive then
+                                    FireReappearanceEffects(frame, "onEarlyShow", trackerKey, slotIndex)
+                                end
+                            else
+                                -- Not yet in window - schedule a timer for the transition
+                                local timerKey = trackerKey .. ":" .. slotIndex
+                                if not earlyShowTimersPending[timerKey] then
+                                    local delay = remainingSec - earlyShowSec
+                                    if delay > 0 then
+                                        earlyShowTimersPending[timerKey] = true
+                                        C_Timer.After(delay, function()
+                                            earlyShowTimersPending[timerKey] = nil
+                                            -- Reset cached state to bypass early-return optimization
+                                            -- in UpdateHighlightFrame (state hasn't changed, but
+                                            -- visibility threshold has been crossed)
+                                            if frame._TUI_currentCooldownState ~= nil then
+                                                frame._TUI_currentCooldownState = nil
+                                            end
+                                            CooldownHighlights:UpdateHighlightFrame(trackerKey, slotIndex)
+                                        end)
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+                
+                if not earlyShowOverride then
+                    shouldShowCustomHighlight = false
+                    userHiddenState = true  -- User explicitly doesn't want to see this state
+                else
+                    -- Early show activated - need to re-layout the dock to include this icon
+                    if dockAssignment and TUICD.Docks then
+                        TUICD.Docks:LayoutDock(dockAssignment)
+                    end
+                end
             end
         else
             -- Either ready OR couldn't confirm cooldown - treat as ready
@@ -1459,27 +1873,34 @@ function CooldownHighlights:ApplyVisibilityConditions(trackerKey, slotIndex, isO
     end
     frame.shouldShowCustomHighlight = shouldShowCustomHighlight
     if isOnCooldown then
-        local showCountdownText = GetShouldShowCountdownText(trackerKey, slotIndex)
-        
-        -- Check if this is a GCD cooldown using GetCooldownTimes (returns milliseconds)
-        local isGCD = false
-        if frame.cooldown and frame.cooldown.GetCooldownTimes then
-            pcall(function()
-                local start, duration = frame.cooldown:GetCooldownTimes()
-                if start and duration and duration > 0 and duration <= GCD_THRESHOLD then
-                    isGCD = true
-                end
-            end)
-        end
-        
-        if isGCD then
-            -- This is a GCD, hide the countdown text
+        -- During early show, suppress all cooldown visuals (swipe, text) 
+        -- so the icon appears ready
+        if frame._TUI_earlyShowActive then
             frame.cooldown.hideCountdownText = true
             frame.cooldown:SetHideCountdownNumbers(true)
         else
-            -- Real cooldown, use the showCountdownText setting
-            frame.cooldown.hideCountdownText = not showCountdownText
-            frame.cooldown:SetHideCountdownNumbers(not showCountdownText)
+            local showCountdownText = GetShouldShowCountdownText(trackerKey, slotIndex)
+        
+            -- Check if this is a GCD cooldown using GetCooldownTimes (returns milliseconds)
+            local isGCD = false
+            if frame.cooldown and frame.cooldown.GetCooldownTimes then
+                pcall(function()
+                    local start, duration = frame.cooldown:GetCooldownTimes()
+                    if start and duration and duration > 0 and duration <= GCD_THRESHOLD then
+                        isGCD = true
+                    end
+                end)
+            end
+        
+            if isGCD then
+                -- This is a GCD, hide the countdown text
+                frame.cooldown.hideCountdownText = true
+                frame.cooldown:SetHideCountdownNumbers(true)
+            else
+                -- Real cooldown, use the showCountdownText setting
+                frame.cooldown.hideCountdownText = not showCountdownText
+                frame.cooldown:SetHideCountdownNumbers(not showCountdownText)
+            end
         end
     else
         -- Not on cooldown, hide countdown text
@@ -1497,6 +1918,29 @@ function CooldownHighlights:ApplyVisibilityConditions(trackerKey, slotIndex, isO
         frame:SetAlpha(actualOpacity)
         frame.icon:SetDesaturated(not actualSaturated)
         frame.icon:Show()
+        
+        -- When early show is active, suppress the Blizzard cooldown swipe/edge
+        -- so the icon appears "ready" even though cooldown is still ticking
+        if frame._TUI_earlyShowActive and frame.cooldown then
+            pcall(function()
+                frame.cooldown:SetDrawSwipe(false)
+                frame.cooldown:SetDrawEdge(false)
+            end)
+        elseif frame.cooldown then
+            -- Normal display - restore Blizzard swipe based on user's hideSweep setting
+            -- Default to showing sweep (hideSweep nil = show, matching Blizzard default)
+            local hideSweep = frame.cooldown._TUI_hideSweep
+            local showSwipe = (hideSweep == nil) and true or (not hideSweep)
+            pcall(function()
+                frame.cooldown:SetDrawSwipe(showSwipe)
+                frame.cooldown:SetDrawEdge(showSwipe)
+            end)
+        end
+        
+        -- Update radial swipe visibility when icon is shown
+        -- (without this, a previously-visible radial swipe stays visible
+        -- even when the user's display state is set to "never")
+        CooldownHighlights:UpdateRadialSwipeVisbility(trackerKey, slotIndex, isOnCooldown, frame)
     else
         -- Only check radial swipe if user hasn't explicitly hidden this state
         -- If user unchecked the visibility checkbox, don't show anything (including radial swipe)
@@ -1547,10 +1991,18 @@ function CooldownHighlights:ApplyVisibilityConditions(trackerKey, slotIndex, isO
     end
     
     -- Notify dock if this icon is docked
-    local dockAssignment = CooldownHighlights:GetState(trackerKey, "dockAssignment." .. slotIndex)
-    if dockAssignment and TUICD.Docks then
+    local dockAssignment = TUICD.Docks and TUICD.Docks:IsIconDocked(trackerKey, slotIndex)
+    if dockAssignment then
         TUICD.Docks:NotifyIconUpdate(trackerKey, slotIndex)
     end
+    
+    -- Fire "onReady" reappearance effects when transitioning off cooldown
+    if wasOnCooldown and not isOnCooldown and shouldShowCustomHighlight then
+        FireReappearanceEffects(frame, "onReady", trackerKey, slotIndex)
+    end
+    
+    -- Save cooldown state for next transition detection
+    frame._TUI_wasOnCooldown = isOnCooldown
 end
 
 function CooldownHighlights:UpdateHighlightFrame(trackerKey, slotIndex)
@@ -1569,8 +2021,23 @@ function CooldownHighlights:UpdateHighlightFrame(trackerKey, slotIndex)
     local stateChanged = (frame._TUI_currentCooldownState ~= isOnCooldown)
     
     -- Early return if no state change (performance optimization)
+    -- Exception: docked icons with Early Show need continuous re-evaluation
+    -- because cooldown acceleration can skip past the threshold
     if not stateChanged and frame._TUI_currentCooldownState ~= nil then
-        return  -- No transition, skip update
+        -- Check if this icon has early show enabled - if so, don't skip
+        local hasEarlyShow = false
+        if isOnCooldown and TUICD.Docks then
+            local dockIdx = TUICD.Docks:IsIconDocked(trackerKey, slotIndex)
+            if dockIdx then
+                local dSettings = TUICD.Docks:GetDockSettings(dockIdx)
+                if dSettings and (dSettings.earlyShowSeconds or 0) > 0 then
+                    hasEarlyShow = true
+                end
+            end
+        end
+        if not hasEarlyShow then
+            return  -- No transition, skip update
+        end
     end
     
     -- State changed or first run - update frame
@@ -1580,8 +2047,12 @@ function CooldownHighlights:UpdateHighlightFrame(trackerKey, slotIndex)
     -- Check if we're transitioning TO cooldown state (start radial swipe animation)
     if stateChanged and isOnCooldown then
         -- Reset cooldown complete flag and start recursive animation
+        -- (only if display state would actually show the swipe during cooldown)
         frame.cooldown._TUI_cooldownComplete = false
-        RadialSwipe:OnUpdate(frame)  -- Starts self-recursive animation loop
+        local radialDisplayState = CooldownHighlights:GetState(trackerKey, "radialSwipe.displayState." .. slotIndex) or "always"
+        if radialDisplayState == "always" or radialDisplayState == "cooldown" then
+            RadialSwipe:OnUpdate(frame)  -- Starts self-recursive animation loop
+        end
         
         -- Apply cooldown text settings if they've changed since last cooldown
         if frame._TUI_cooldownSettingsDirty and frame._TUI_cooldownTextSettings then
@@ -1950,7 +2421,7 @@ local function CreateLayoutWrapper(trackerKey, slotIndex)
         
         onPositionChanged = function(self, point, relFrame, relPoint, x, y)
             -- Skip if docked - dock controls position
-            if CooldownHighlights:GetState(trackerKey, "dockAssignment." .. slotIndex) then return end
+            if TUICD.Docks and TUICD.Docks:IsIconDocked(trackerKey, slotIndex) then return end
             frame:ClearAllPoints()
             frame:SetPoint(point, UIParent, point, x, y)
             CooldownHighlights:UpdateState(trackerKey, { slotIndex = slotIndex }, {
@@ -1966,7 +2437,7 @@ local function CreateLayoutWrapper(trackerKey, slotIndex)
         
         SetPosition = function(self, point, relFrame, relPoint, x, y)
             -- Skip if docked - dock controls position
-            if CooldownHighlights:GetState(trackerKey, "dockAssignment." .. slotIndex) then return end
+            if TUICD.Docks and TUICD.Docks:IsIconDocked(trackerKey, slotIndex) then return end
             frame:ClearAllPoints()
             frame:SetPoint(point, relFrame or UIParent, relPoint or point, x or 0, y or 0)
             if self.onPositionChanged then
@@ -2194,9 +2665,16 @@ function CooldownHighlights:StopHideEnforcement(trackerKey)
 end
 
 function CooldownHighlights:UpdateRadialSwipeVisbility(trackerKey, slotIndex, isOnCooldown, frame)
-    -- Update radial swipe visibility based on display state setting
+    -- Update radial swipe visibility based on enabled flag and display state setting
     local showRadialSwipe = false
     if frame.radialSwipe then
+        -- Master enable/disable check - if disabled, always hide
+        local radialEnabled = CooldownHighlights:GetState(trackerKey, "radialSwipe.enabled." .. slotIndex)
+        if radialEnabled == false then
+            frame.radialSwipe:Hide()
+            return false
+        end
+        
         local radialDisplayState = CooldownHighlights:GetState(trackerKey, "radialSwipe.displayState." .. slotIndex) or "always"
         
         if radialDisplayState == "always" then

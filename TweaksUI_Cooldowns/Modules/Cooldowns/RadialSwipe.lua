@@ -466,12 +466,23 @@ function RadialSwipe:OnUpdate(parentFrame)
 		parentFrame.radialSwipe.realCooldownDuration = nil
 	else
 		-- Continue animating - update display and recurse with throttling
-		parentFrame.radialSwipe:SetProgressValue(progress, 0, 360)
-		parentFrame.radialSwipe:Show()
-		-- Recursive call with 50ms throttle (20 Hz update rate)
-		C_Timer.After(0.05, function()
-			RadialSwipe:OnUpdate(parentFrame)
-		end)
+		-- But first check if display state allows showing during cooldown
+		local radialDisplayState = TUICD.CooldownHighlights:GetState(parentFrame.trackerKey, "radialSwipe.displayState." .. parentFrame.slotIndex) or "always"
+		if radialDisplayState == "never" or radialDisplayState == "available" then
+			-- "never" = don't show at all; "available" = only when ready, not during cooldown
+			parentFrame.radialSwipe:Hide()
+			-- Still recurse to handle cooldown completion properly
+			C_Timer.After(0.05, function()
+				RadialSwipe:OnUpdate(parentFrame)
+			end)
+		else
+			parentFrame.radialSwipe:SetProgressValue(progress, 0, 360)
+			parentFrame.radialSwipe:Show()
+			-- Recursive call with 50ms throttle (20 Hz update rate)
+			C_Timer.After(0.05, function()
+				RadialSwipe:OnUpdate(parentFrame)
+			end)
+		end
 	end
 end
 

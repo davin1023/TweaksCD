@@ -127,12 +127,33 @@ local TRACKER_DEFAULTS = {
     chargeCountColorG = 1.0,
     chargeCountColorB = 1.0,
     desaturateAtZeroCharges = true,
-    -- Proc Glow (Phase 3)
+    -- Proc Glow (Phase 3+)
     showProcGlow = true,
-    procGlowStyle = "blizzard",     -- "blizzard", "pixel", "shine"
+    procGlowStyle = "pixel",        -- "pixel", "shine", "glow"
     procGlowColorR = 1.0,
     procGlowColorG = 0.82,
     procGlowColorB = 0.0,
+    procGlowThickness = 2,          -- Border thickness for pixel style (1-6)
+    procGlowSpeed = 0.6,            -- Pulse animation speed in seconds (0.2-2.0)
+    procGlowIntensity = 0.8,        -- Max brightness/opacity (0.3-1.0)
+    procGlowScale = 1.0,            -- Scale multiplier for glow style (0.5-2.0)
+    -- On Ready Effects
+    onReadyGlowEnabled = false,
+    onReadyGlowStyle = "pixel",     -- "pixel", "shine", "glow"
+    onReadyGlowColorR = 1.0,
+    onReadyGlowColorG = 0.82,
+    onReadyGlowColorB = 0.0,
+    onReadyGlowThickness = 2,
+    onReadyGlowSpeed = 0.6,
+    onReadyGlowIntensity = 0.8,
+    onReadyGlowScale = 1.0,
+    onReadyGlowDuration = 3.0,
+    onReadyGlowTiming = 0,          -- -5 to 5: negative = before ready, 0 = on ready, positive = after ready
+    onReadyPulseEnabled = false,
+    onReadyPulseScale = 1.3,
+    onReadyPulseDuration = 0.4,
+    onReadyPulseCount = 3,
+    onReadyPulseTiming = 0,          -- -5 to 5: negative = before ready, 0 = on ready, positive = after ready
     -- Visibility
     visibilityEnabled = false,
     showInCombat = true,

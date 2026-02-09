@@ -240,9 +240,13 @@ function RestrictionAPI:PrintStatus()
     TUICD:Print("Unit Identity Secret: " .. (self:IsUnitIdentitySecret() and "|cffff0000YES|r" or "|cff00ff00No|r"))
 end
 
--- Slash command
+-- Slash command (debug only)
 SLASH_TUIRESTRICT1 = "/tuirestrict"
 SlashCmdList["TUIRESTRICT"] = function()
+    if not TUICD.debugMode then
+        TUICD:Print("Debug mode required. Use |cffFFFFFF/tuicd debug|r to enable.")
+        return
+    end
     RestrictionAPI:PrintStatus()
 end
 

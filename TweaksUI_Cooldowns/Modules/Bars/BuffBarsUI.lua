@@ -33,7 +33,7 @@ local tabButtons      = {}
 -- ============================================================================
 
 local PANEL_WIDTH     = 540
-local PANEL_HEIGHT    = 650
+local PANEL_HEIGHT    = 665
 local LIST_WIDTH      = 170
 local CONFIG_WIDTH    = 340
 local BUTTON_HEIGHT   = 28
@@ -571,6 +571,7 @@ local function RefreshSpellList()
 
         btn:SetScript("OnClick", function()
             selectedBarKey = entry.barKey
+            BuffBarsFrames:SetPreviewBar(selectedBarKey)
             RefreshSpellList()
             BuffBarsUI:RefreshConfigPanel()
         end)
@@ -1028,6 +1029,7 @@ function BuffBarsUI:RefreshConfigPanel()
     removeBtn:SetText("|cffff4444Remove Buff|r")
     removeBtn:Show()
     removeBtn:SetScript("OnClick", function()
+        BuffBarsFrames:ClearPreviewBar()
         BuffBarsData:RemoveSlot(selectedBarKey)
         BuffBarsFrames:DestroyBar(selectedBarKey)
         selectedBarKey = nil
@@ -1893,10 +1895,16 @@ function BuffBarsUI:Show()
     RefreshSpellList()
     self:RefreshConfigPanel()
     mainPanel:Show()
+
+    -- Restore preview for selected bar
+    if selectedBarKey then
+        BuffBarsFrames:SetPreviewBar(selectedBarKey)
+    end
 end
 
 function BuffBarsUI:Hide()
     if mainPanel then
+        BuffBarsFrames:ClearPreviewBar()
         CloseActivePopup()
         mainPanel:Hide()
     end

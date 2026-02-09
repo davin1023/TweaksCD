@@ -152,6 +152,23 @@ local DOCK_DEFAULTS = {
     showMounted = true,
     showNotMounted = true,
     fadeAlpha = 0.3,
+    -- Early Show: reveal hidden-on-cooldown icons X seconds before ready (0 = disabled)
+    earlyShowSeconds = 0,
+    -- Reappearance Effects
+    flashEnabled = false,
+    flashType = "pixel",         -- "pixel", "shine", "glow" (matches multi-tracker styles)
+    flashTrigger = "onReady",    -- "onEarlyShow", "onReady", "both"
+    flashDuration = 0.6,         -- seconds before auto-hide
+    flashColor = { r = 1, g = 0.82, b = 0, a = 1 },  -- gold default
+    flashThickness = 2,          -- pixel border thickness
+    flashScale = 1.0,            -- spell glow scale
+    flashSpeed = 0.6,            -- pulse speed (lower = faster)
+    flashIntensity = 0.8,        -- glow brightness
+    pulseEnabled = false,
+    pulseTrigger = "onReady",    -- "onEarlyShow", "onReady", "both"
+    pulseScale = 1.3,
+    pulseDuration = 0.4,         -- seconds
+    pulseCount = 3,              -- number of pulses within duration
     point = "CENTER",
     x = 0,
     y = -100,
@@ -1359,6 +1376,25 @@ function Docks:SetDockSetting(dockIndex, key, value)
         showMounted = true, showNotMounted = true,
     }
     if visibilityKeys[key] then
+        QueueLayout(dockIndex)
+    end
+    
+    -- Early Show changes require re-evaluating all docked icons' cooldown state
+    if key == "earlyShowSeconds" then
+        local icons = dockedIcons[dockIndex] or {}
+        for iconKey, iconInfo in pairs(icons) do
+            local trackerType, slotIndex = ParseIconKey(iconKey)
+            if trackerType and slotIndex and trackerType ~= "buffs" then
+                -- Early show only applies to cooldown-based icons, not buffs
+                -- Reset cached state to bypass early-return optimization
+                if iconInfo.frame and iconInfo.frame._TUI_currentCooldownState ~= nil then
+                    iconInfo.frame._TUI_currentCooldownState = nil
+                end
+                if TUICD.CooldownHighlights then
+                    TUICD.CooldownHighlights:UpdateHighlightFrame(trackerType, slotIndex)
+                end
+            end
+        end
         QueueLayout(dockIndex)
     end
     

@@ -272,6 +272,7 @@ function Utils:CreateSliderWithInput(parent, options)
         value = math.max(min, math.min(max, value))
         
         valueBox:SetText(FormatValue(value))
+        container._realValue = value
         
         if callback then
             callback(value)
@@ -286,23 +287,27 @@ function Utils:CreateSliderWithInput(parent, options)
         local value = tonumber(text)
         
         if value then
-            -- Clamp to range
-            value = math.max(min, math.min(max, value))
-            
             -- Snap to step
             value = math.floor(value / step + 0.5) * step
             
+            -- Clamp slider visual to its range, but allow the actual value to exceed
+            local sliderValue = math.max(min, math.min(max, value))
+            
             isUpdating = true
-            slider:SetValue(value)
+            slider:SetValue(sliderValue)
             self:SetText(FormatValue(value))
             isUpdating = false
+            
+            -- Store the real value (may exceed slider range)
+            container._realValue = value
             
             if callback then
                 callback(value)
             end
         else
-            -- Invalid input, revert to slider value
-            self:SetText(FormatValue(slider:GetValue()))
+            -- Invalid input, revert to current value
+            local curVal = container._realValue or slider:GetValue()
+            self:SetText(FormatValue(curVal))
         end
         
         self:ClearFocus()
@@ -320,13 +325,18 @@ function Utils:CreateSliderWithInput(parent, options)
         local value = tonumber(text)
         
         if value then
-            value = math.max(min, math.min(max, value))
+            -- Snap to step
             value = math.floor(value / step + 0.5) * step
             
-            if math.abs(value - slider:GetValue()) > 0.001 then
+            local curVal = container._realValue or slider:GetValue()
+            if math.abs(value - curVal) > 0.001 then
+                -- Clamp slider visual to its range, but allow actual value to exceed
+                local sliderValue = math.max(min, math.min(max, value))
                 isUpdating = true
-                slider:SetValue(value)
+                slider:SetValue(sliderValue)
                 isUpdating = false
+                
+                container._realValue = value
                 
                 if callback then
                     callback(value)
@@ -335,7 +345,8 @@ function Utils:CreateSliderWithInput(parent, options)
             
             self:SetText(FormatValue(value))
         else
-            self:SetText(FormatValue(slider:GetValue()))
+            local curVal = container._realValue or slider:GetValue()
+            self:SetText(FormatValue(curVal))
         end
     end)
     
@@ -343,16 +354,21 @@ function Utils:CreateSliderWithInput(parent, options)
     container.slider = slider
     container.valueBox = valueBox
     
+    -- Store initial real value
+    container._realValue = initialValue
+    
     -- Helper to update value programmatically
     function container:SetValue(value)
         isUpdating = true
-        slider:SetValue(value)
+        local sliderValue = math.max(min, math.min(max, value))
+        slider:SetValue(sliderValue)
         valueBox:SetText(FormatValue(value))
+        container._realValue = value
         isUpdating = false
     end
     
     function container:GetValue()
-        return slider:GetValue()
+        return container._realValue or slider:GetValue()
     end
     
     function container:SetEnabled(enabled)

@@ -14,59 +14,59 @@ local PatchNotes = TUICD.PatchNotes
 -- Update this when releasing new versions
 
 local PATCH_NOTES = [[
-|cffffcc00Version 3.0|r - Multi-Tracker & Personal Resources
+|cffffcc00Version 3.1.5|r - On Ready Effects, Timeline & More
 
 
-|cffff8000NEW:|r |cff00ff00Radial Swipe|r
+|cffff8000NEW:|r |cff00ff00On Ready Effects|r
 
-Alternative cooldown animation that draws around the icon edge
-instead of the standard darkening sweep.
-
-Available in the Per-Icon tab for any Multi-Tracker icon.
-Set the Display State to show during cooldown, then
-customize texture, color, scale, and rotation.
-
-
-|cffff8000NEW:|r |cff00ff00Multi-Tracker System|r
-
-Create up to |cff00ff0010 custom trackers|r with full control!
+Cooldown icons can now glow and pulse when they come
+off cooldown, giving you instant visual feedback that
+an ability is available again.
 
 |cff87CEEBWhere to Find It:|r
-  Cooldowns > Custom Trackers
+  Cooldown Trackers > Per-Icon tab > On Ready section
+  Timer Bars > Cooldowns/Buffs > On Ready tab
+  Timeline > On Ready tab
 
-|cff87CEEBGetting Started:|r
-  We automatically create copies of your Essential and
-  Utility trackers as Multi-Trackers. These can be enabled
-  or disabled independently.
-
-|cff87CEEBHow to Create Your Own:|r
-  1. Open settings with |cffffff00/tuicd|r
-  2. Go to Cooldowns > Custom Trackers
-  3. Click the |cffffff00+|r button to create a new tracker
-  4. Add spells/items using the Entries tab
-  5. Position with |cffffff00/tuicd layout|r
-
-|cff87CEEBBenefits over Essential/Utility:|r
-  - Choose exactly which abilities to track
-  - Custom grid layouts (rows, columns, spacing)
-  - Per-icon settings (size, opacity, hide source)
-  - Works across all specs with the same spells
-
-|cff87CEEBCurrent Limitations:|r
-  - No stack/charge counts displayed yet
-  - Cannot track passive buff auras
+|cff87CEEBFeatures:|r
+  - Glow effect when a spell becomes ready
+  - Three glow styles: Pixel Border, Shine Flash, Spell Glow
+  - Customizable glow color, speed, intensity, thickness
+  - Configurable glow duration and timing offset
+  - Pulse animation with adjustable scale and count
+  - Independent timing controls for glow and pulse
+  - Available across all tracker types and Timeline
 
 
+|cffff8000NEW:|r |cff00ff00Timeline Direction|r
 
-|cffff8000NEW:|r |cff00ff00Personal Resources|r
+The Timeline module now supports right-to-left mode.
+Icons can slide from the right edge toward a ready zone
+on the left, or from the left edge toward a ready zone
+on the right.
 
-Track your class resources (combo points, holy power, etc.)
-with customizable display options!
+|cff87CEEBWhere to Find It:|r
+  Settings Hub > Timer Bars > Timeline > Layout tab
 
-|cff87CEEBHow to Enable:|r
-  1. Open settings with |cffffff00/tuicd|r
-  2. Click |cffffff00Personal Resources|r in the hub
-  3. Check |cffffff00Enable Module|r at the top
+|cff87CEEBFeatures:|r
+  - Right to Left: ready zone on left, icons slide left
+  - Left to Right: ready zone on right, icons slide right
+  - Tick marks and labels adjust to match direction
+
+
+|cffff8000UPDATED:|r |cff00ff00Personal Resources - Extended Ranges|r
+
+All Personal Resources sliders now support double the
+previous maximum values, making it easy to create larger
+health bars, power bars, and class power displays.
+
+|cff87CEEBDetails:|r
+  - Bar widths up to 800-1000 (was 400-500)
+  - Bar heights up to 60-100 (was 30-50)
+  - Font sizes up to 32-48 (was 16-24)
+  - Scales up to 4x (was 2x)
+  - All offset, spacing, and aura ranges doubled
+  - Manual entry allows any value beyond slider range
 
 
 |cff888888Type /tuicd patchnotes to see this again|r

@@ -396,6 +396,299 @@ local function CreateDockContent(parent)
     yOffset = yOffset - 30
     
     -- ========================================================================
+    -- REAPPEARANCE SETTINGS SECTION
+    -- ========================================================================
+    local reappearHeader = CreateSectionHeader(content, "Reappearance Settings")
+    reappearHeader:SetPoint("TOPLEFT", leftMargin, yOffset)
+    content.reappearHeader = reappearHeader
+    yOffset = yOffset - 25
+    
+    -- Early Show slider + edit box
+    local earlyShowContainer = CreateFrame("Frame", nil, content)
+    earlyShowContainer:SetSize(380, 30)
+    earlyShowContainer:SetPoint("TOPLEFT", leftMargin, yOffset)
+    
+    local esLabel = earlyShowContainer:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    esLabel:SetPoint("LEFT", 0, 0)
+    esLabel:SetText("Early Show")
+    esLabel:SetWidth(70)
+    esLabel:SetJustifyH("LEFT")
+    
+    local esSlider = CreateFrame("Slider", nil, earlyShowContainer, "OptionsSliderTemplate")
+    esSlider:SetPoint("LEFT", 75, 0)
+    esSlider:SetSize(160, 17)
+    esSlider:SetMinMaxValues(0, 120)
+    esSlider:SetValueStep(1)
+    esSlider:SetObeyStepOnDrag(true)
+    if esSlider.Low then esSlider.Low:SetText(""); esSlider.Low:Hide() end
+    if esSlider.High then esSlider.High:SetText(""); esSlider.High:Hide() end
+    if esSlider.Text then esSlider.Text:SetText(""); esSlider.Text:Hide() end
+    
+    local esEditBox = CreateFrame("EditBox", nil, earlyShowContainer, "InputBoxTemplate")
+    esEditBox:SetPoint("LEFT", esSlider, "RIGHT", 10, 0)
+    esEditBox:SetSize(45, 20)
+    esEditBox:SetAutoFocus(false)
+    esEditBox:SetJustifyH("CENTER")
+    esEditBox:SetMaxLetters(5)
+    
+    local esUnit = earlyShowContainer:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    esUnit:SetPoint("LEFT", esEditBox, "RIGHT", 4, 0)
+    esUnit:SetText("|cff888888sec|r")
+    
+    local esUpdating = false
+    esSlider:SetScript("OnValueChanged", function(self, val)
+        if esUpdating then return end
+        esUpdating = true
+        val = math.floor(val + 0.5)
+        if val == 0 then
+            esEditBox:SetText("Off")
+        else
+            esEditBox:SetText(tostring(val))
+        end
+        if TUICD.Docks then
+            TUICD.Docks:SetDockSetting(selectedDock, "earlyShowSeconds", val)
+        end
+        esUpdating = false
+    end)
+    
+    esEditBox:SetScript("OnEnterPressed", function(self)
+        local text = self:GetText()
+        if text == "Off" or text == "off" or text == "0" then
+            esSlider:SetValue(0)
+        else
+            local val = tonumber(text)
+            if val and val >= 0 then
+                val = math.floor(val + 0.5)
+                esSlider:SetValue(math.min(val, 120))
+                if val > 120 then
+                    esEditBox:SetText(tostring(val))
+                end
+                if TUICD.Docks then
+                    TUICD.Docks:SetDockSetting(selectedDock, "earlyShowSeconds", val)
+                end
+            end
+        end
+        self:ClearFocus()
+    end)
+    esEditBox:SetScript("OnEscapePressed", function(self)
+        local val = math.floor(esSlider:GetValue() + 0.5)
+        self:SetText(val == 0 and "Off" or tostring(val))
+        self:ClearFocus()
+    end)
+    
+    earlyShowContainer.slider = esSlider
+    earlyShowContainer.editBox = esEditBox
+    content.earlyShowSlider = earlyShowContainer
+    yOffset = yOffset - 28
+    
+    local earlyShowHint = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    earlyShowHint:SetPoint("TOPLEFT", leftMargin + 5, yOffset)
+    earlyShowHint:SetWidth(380)
+    earlyShowHint:SetJustifyH("LEFT")
+    earlyShowHint:SetText("|cff888888Show hidden-on-cooldown icons early, X seconds before ready. (0 = Off)|r")
+    content.earlyShowHint = earlyShowHint
+    yOffset = yOffset - 22
+    
+    -- ── Flash on Reappearance ──
+    local flashEnableCB = CreateCheckbox(content, "Flash on Reappearance")
+    flashEnableCB:SetPoint("TOPLEFT", leftMargin, yOffset)
+    flashEnableCB:SetScript("OnClick", function(self)
+        if TUICD.Docks then
+            TUICD.Docks:SetDockSetting(selectedDock, "flashEnabled", self:GetChecked())
+        end
+        DocksUI:RefreshContent()
+    end)
+    content.flashEnableCB = flashEnableCB
+    yOffset = yOffset - 28
+    
+    -- Flash Trigger dropdown
+    local flashTriggerLabel = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    flashTriggerLabel:SetPoint("TOPLEFT", leftMargin + 15, yOffset)
+    flashTriggerLabel:SetText("Trigger:")
+    flashTriggerLabel:SetTextColor(0.8, 0.8, 0.8)
+    content.flashTriggerLabel = flashTriggerLabel
+    
+    local flashTriggerDropdown = CreateFrame("Frame", "TweaksCD_FlashTriggerDropdown", content, "UIDropDownMenuTemplate")
+    flashTriggerDropdown:SetPoint("LEFT", flashTriggerLabel, "RIGHT", -5, -2)
+    UIDropDownMenu_SetWidth(flashTriggerDropdown, 120)
+    content.flashTriggerDropdown = flashTriggerDropdown
+    yOffset = yOffset - 30
+    
+    -- Flash Type dropdown (pixel/shine/glow - matches multi-tracker styles)
+    local flashTypeLabel = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    flashTypeLabel:SetPoint("TOPLEFT", leftMargin + 15, yOffset)
+    flashTypeLabel:SetText("Glow Style:")
+    flashTypeLabel:SetTextColor(0.8, 0.8, 0.8)
+    content.flashTypeLabel = flashTypeLabel
+    
+    local flashTypeDropdown = CreateFrame("Frame", "TweaksCD_FlashTypeDropdown", content, "UIDropDownMenuTemplate")
+    flashTypeDropdown:SetPoint("LEFT", flashTypeLabel, "RIGHT", 0, -2)
+    UIDropDownMenu_SetWidth(flashTypeDropdown, 120)
+    content.flashTypeDropdown = flashTypeDropdown
+    yOffset = yOffset - 30
+    
+    -- Glow Color swatch
+    local flashColorLabel = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    flashColorLabel:SetPoint("TOPLEFT", leftMargin + 15, yOffset)
+    flashColorLabel:SetText("Glow Color:")
+    flashColorLabel:SetTextColor(0.8, 0.8, 0.8)
+    content.flashColorLabel = flashColorLabel
+    
+    local flashColorSwatch = CreateFrame("Button", nil, content)
+    flashColorSwatch:SetSize(20, 20)
+    flashColorSwatch:SetPoint("LEFT", flashColorLabel, "RIGHT", 10, 0)
+    local flashColorBorder = flashColorSwatch:CreateTexture(nil, "BACKGROUND")
+    flashColorBorder:SetPoint("TOPLEFT", -2, 2)
+    flashColorBorder:SetPoint("BOTTOMRIGHT", 2, -2)
+    flashColorBorder:SetColorTexture(0.5, 0.5, 0.5, 1)
+    local flashColorTex = flashColorSwatch:CreateTexture(nil, "ARTWORK")
+    flashColorTex:SetAllPoints()
+    flashColorTex:SetColorTexture(1, 1, 1, 1)
+    flashColorSwatch.tex = flashColorTex
+    flashColorSwatch:SetScript("OnClick", function(self)
+        local settings = TUICD.Docks and TUICD.Docks:GetDockSettings(selectedDock)
+        local c = settings and settings.flashColor or { r = 1, g = 0.82, b = 0, a = 1 }
+        ColorPickerFrame:SetupColorPickerAndShow({
+            r = c.r, g = c.g, b = c.b,
+            swatchFunc = function()
+                local r, g, b = ColorPickerFrame:GetColorRGB()
+                if TUICD.Docks then
+                    TUICD.Docks:SetDockSetting(selectedDock, "flashColor", { r = r, g = g, b = b, a = 1 })
+                end
+                self.tex:SetColorTexture(r, g, b, 1)
+            end,
+            cancelFunc = function(prev)
+                if TUICD.Docks then
+                    TUICD.Docks:SetDockSetting(selectedDock, "flashColor", { r = prev.r, g = prev.g, b = prev.b, a = 1 })
+                end
+                self.tex:SetColorTexture(prev.r, prev.g, prev.b, 1)
+            end,
+        })
+    end)
+    content.flashColorSwatch = flashColorSwatch
+    yOffset = yOffset - 28
+    
+    -- Thickness slider (for Pixel Border style)
+    local flashThicknessSlider = CreateVOSlider(content, "Thickness:", 1, 6, 1, false, 0)
+    flashThicknessSlider:SetPoint("TOPLEFT", leftMargin + 15, yOffset)
+    flashThicknessSlider.onValueChanged = function(val)
+        if TUICD.Docks then
+            TUICD.Docks:SetDockSetting(selectedDock, "flashThickness", val)
+        end
+    end
+    content.flashThicknessSlider = flashThicknessSlider
+    yOffset = yOffset - 28
+    
+    -- Scale slider (for Spell Glow style)
+    local flashScaleSlider = CreateVOSlider(content, "Scale:", 0.5, 2.0, 0.1, true, 1)
+    flashScaleSlider:SetPoint("TOPLEFT", leftMargin + 15, yOffset)
+    flashScaleSlider.onValueChanged = function(val)
+        if TUICD.Docks then
+            TUICD.Docks:SetDockSetting(selectedDock, "flashScale", val)
+        end
+    end
+    content.flashScaleSlider = flashScaleSlider
+    yOffset = yOffset - 28
+    
+    -- Speed slider (pulse speed for all styles)
+    local flashSpeedSlider = CreateVOSlider(content, "Speed:", 0.1, 2.0, 0.1, true, 1)
+    flashSpeedSlider:SetPoint("TOPLEFT", leftMargin + 15, yOffset)
+    flashSpeedSlider.onValueChanged = function(val)
+        if TUICD.Docks then
+            TUICD.Docks:SetDockSetting(selectedDock, "flashSpeed", val)
+        end
+    end
+    content.flashSpeedSlider = flashSpeedSlider
+    yOffset = yOffset - 28
+    
+    -- Intensity slider (brightness)
+    local flashIntensitySlider = CreateVOSlider(content, "Intensity:", 0.1, 1.0, 0.05, true, 2)
+    flashIntensitySlider:SetPoint("TOPLEFT", leftMargin + 15, yOffset)
+    flashIntensitySlider.onValueChanged = function(val)
+        if TUICD.Docks then
+            TUICD.Docks:SetDockSetting(selectedDock, "flashIntensity", val)
+        end
+    end
+    content.flashIntensitySlider = flashIntensitySlider
+    yOffset = yOffset - 28
+    
+    -- Duration slider (auto-hide timer)
+    local flashDurSlider = CreateVOSlider(content, "Duration:", 0.5, 10.0, 0.5, true, 1)
+    flashDurSlider:SetPoint("TOPLEFT", leftMargin + 15, yOffset)
+    flashDurSlider.onValueChanged = function(val)
+        if TUICD.Docks then
+            TUICD.Docks:SetDockSetting(selectedDock, "flashDuration", val)
+        end
+    end
+    content.flashDurSlider = flashDurSlider
+    
+    -- Hint text
+    local flashHint = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    flashHint:SetPoint("TOPLEFT", flashDurSlider, "BOTTOMLEFT", 0, -2)
+    flashHint:SetText("|cff888888Thickness → Pixel Border  |  Scale → Spell Glow|r")
+    flashHint:SetJustifyH("LEFT")
+    content.flashHint = flashHint
+    yOffset = yOffset - 42
+    
+    -- ── Pulse on Reappearance ──
+    local pulseEnableCB = CreateCheckbox(content, "Pulse on Reappearance")
+    pulseEnableCB:SetPoint("TOPLEFT", leftMargin, yOffset)
+    pulseEnableCB:SetScript("OnClick", function(self)
+        if TUICD.Docks then
+            TUICD.Docks:SetDockSetting(selectedDock, "pulseEnabled", self:GetChecked())
+        end
+        DocksUI:RefreshContent()
+    end)
+    content.pulseEnableCB = pulseEnableCB
+    yOffset = yOffset - 28
+    
+    -- Pulse Trigger dropdown
+    local pulseTriggerLabel = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    pulseTriggerLabel:SetPoint("TOPLEFT", leftMargin + 15, yOffset)
+    pulseTriggerLabel:SetText("Trigger:")
+    pulseTriggerLabel:SetTextColor(0.8, 0.8, 0.8)
+    content.pulseTriggerLabel = pulseTriggerLabel
+    
+    local pulseTriggerDropdown = CreateFrame("Frame", "TweaksCD_PulseTriggerDropdown", content, "UIDropDownMenuTemplate")
+    pulseTriggerDropdown:SetPoint("LEFT", pulseTriggerLabel, "RIGHT", -5, -2)
+    UIDropDownMenu_SetWidth(pulseTriggerDropdown, 120)
+    content.pulseTriggerDropdown = pulseTriggerDropdown
+    yOffset = yOffset - 30
+    
+    -- Pulse Scale slider
+    local pulseScaleSlider = CreateVOSlider(content, "Scale:", 1.1, 2.0, 0.1, false, 1)
+    pulseScaleSlider:SetPoint("TOPLEFT", leftMargin + 15, yOffset)
+    pulseScaleSlider.onValueChanged = function(val)
+        if TUICD.Docks then
+            TUICD.Docks:SetDockSetting(selectedDock, "pulseScale", val)
+        end
+    end
+    content.pulseScaleSlider = pulseScaleSlider
+    yOffset = yOffset - 28
+    
+    -- Pulse Duration slider
+    local pulseDurSlider = CreateVOSlider(content, "Duration:", 0.1, 2.0, 0.1, false, 1)
+    pulseDurSlider:SetPoint("TOPLEFT", leftMargin + 15, yOffset)
+    pulseDurSlider.onValueChanged = function(val)
+        if TUICD.Docks then
+            TUICD.Docks:SetDockSetting(selectedDock, "pulseDuration", val)
+        end
+    end
+    content.pulseDurSlider = pulseDurSlider
+    yOffset = yOffset - 28
+    
+    -- Pulse Count slider
+    local pulseCountSlider = CreateVOSlider(content, "Pulses:", 1, 10, 1, false, 0)
+    pulseCountSlider:SetPoint("TOPLEFT", leftMargin + 15, yOffset)
+    pulseCountSlider.onValueChanged = function(val)
+        if TUICD.Docks then
+            TUICD.Docks:SetDockSetting(selectedDock, "pulseCount", val)
+        end
+    end
+    content.pulseCountSlider = pulseCountSlider
+    yOffset = yOffset - 35
+    
+    -- ========================================================================
     -- VISUAL OVERRIDE SECTION
     -- ========================================================================
     local voHeader = CreateSectionHeader(content, "Visual Override")
@@ -1432,6 +1725,200 @@ function DocksUI:RefreshContent()
     end
     if contentFrame.showNotMountedCB then
         contentFrame.showNotMountedCB:SetChecked(settings.showNotMounted ~= false)
+    end
+    if contentFrame.earlyShowSlider then
+        local val = settings.earlyShowSeconds or 0
+        contentFrame.earlyShowSlider.slider:SetValue(math.min(val, 120))
+        contentFrame.earlyShowSlider.editBox:SetText(val == 0 and "Off" or tostring(val))
+    end
+    
+    -- ========================================================================
+    -- REAPPEARANCE EFFECTS
+    -- ========================================================================
+    local TRIGGER_OPTIONS = {
+        { label = "On Early Show", value = "onEarlyShow" },
+        { label = "On Ready",      value = "onReady" },
+        { label = "Both",          value = "both" },
+    }
+    local FLASH_TYPE_OPTIONS = {
+        { label = "Pixel Border",  value = "pixel" },
+        { label = "Shine",         value = "shine" },
+        { label = "Spell Glow",    value = "glow" },
+    }
+    
+    local flashEnabled = settings.flashEnabled
+    local pulseEnabled = settings.pulseEnabled
+    
+    -- Flash enable
+    if contentFrame.flashEnableCB then
+        contentFrame.flashEnableCB:SetChecked(flashEnabled)
+    end
+    
+    -- Flash sub-controls enable/disable
+    local flashSubControls = {
+        contentFrame.flashTriggerLabel, contentFrame.flashTriggerDropdown,
+        contentFrame.flashTypeLabel, contentFrame.flashTypeDropdown,
+        contentFrame.flashColorLabel, contentFrame.flashColorSwatch,
+        contentFrame.flashThicknessSlider, contentFrame.flashScaleSlider,
+        contentFrame.flashSpeedSlider, contentFrame.flashIntensitySlider,
+        contentFrame.flashDurSlider, contentFrame.flashHint,
+    }
+    for _, ctrl in ipairs(flashSubControls) do
+        if ctrl then
+            if ctrl.SetAlpha then ctrl:SetAlpha(flashEnabled and 1 or 0.4) end
+            if ctrl.EnableMouse then ctrl:EnableMouse(flashEnabled) end
+            if ctrl.slider then ctrl.slider:EnableMouse(flashEnabled) end
+            if ctrl.editBox then ctrl.editBox:EnableMouse(flashEnabled) end
+        end
+    end
+    
+    -- Flash trigger dropdown
+    if contentFrame.flashTriggerDropdown then
+        local currentTrigger = settings.flashTrigger or "onReady"
+        UIDropDownMenu_Initialize(contentFrame.flashTriggerDropdown, function(self, level)
+            for _, opt in ipairs(TRIGGER_OPTIONS) do
+                local info = UIDropDownMenu_CreateInfo()
+                info.text = opt.label
+                info.value = opt.value
+                info.checked = (currentTrigger == opt.value)
+                info.func = function()
+                    UIDropDownMenu_SetSelectedValue(contentFrame.flashTriggerDropdown, opt.value)
+                    UIDropDownMenu_SetText(contentFrame.flashTriggerDropdown, opt.label)
+                    if TUICD.Docks then
+                        TUICD.Docks:SetDockSetting(selectedDock, "flashTrigger", opt.value)
+                    end
+                end
+                UIDropDownMenu_AddButton(info, level)
+            end
+        end)
+        for _, opt in ipairs(TRIGGER_OPTIONS) do
+            if opt.value == currentTrigger then
+                UIDropDownMenu_SetText(contentFrame.flashTriggerDropdown, opt.label)
+                break
+            end
+        end
+    end
+    
+    -- Flash type dropdown
+    if contentFrame.flashTypeDropdown then
+        local currentType = settings.flashType or "pixel"
+        UIDropDownMenu_Initialize(contentFrame.flashTypeDropdown, function(self, level)
+            for _, opt in ipairs(FLASH_TYPE_OPTIONS) do
+                local info = UIDropDownMenu_CreateInfo()
+                info.text = opt.label
+                info.value = opt.value
+                info.checked = (currentType == opt.value)
+                info.func = function()
+                    UIDropDownMenu_SetSelectedValue(contentFrame.flashTypeDropdown, opt.value)
+                    UIDropDownMenu_SetText(contentFrame.flashTypeDropdown, opt.label)
+                    if TUICD.Docks then
+                        TUICD.Docks:SetDockSetting(selectedDock, "flashType", opt.value)
+                    end
+                    DocksUI:RefreshContent()  -- Toggle style-specific controls
+                end
+                UIDropDownMenu_AddButton(info, level)
+            end
+        end)
+        for _, opt in ipairs(FLASH_TYPE_OPTIONS) do
+            if opt.value == currentType then
+                UIDropDownMenu_SetText(contentFrame.flashTypeDropdown, opt.label)
+                break
+            end
+        end
+        -- Show/hide style-specific controls
+        local isPixel = (currentType == "pixel")
+        local isGlow = (currentType == "glow")
+        if contentFrame.flashThicknessSlider then
+            contentFrame.flashThicknessSlider:SetShown(flashEnabled and isPixel)
+        end
+        if contentFrame.flashScaleSlider then
+            contentFrame.flashScaleSlider:SetShown(flashEnabled and isGlow)
+        end
+    end
+    
+    -- Flash color swatch
+    if contentFrame.flashColorSwatch then
+        local c = settings.flashColor or { r = 1, g = 0.82, b = 0, a = 1 }
+        contentFrame.flashColorSwatch.tex:SetColorTexture(c.r or 1, c.g or 1, c.b or 1, 1)
+    end
+    
+    -- Flash sliders
+    if contentFrame.flashThicknessSlider then
+        contentFrame.flashThicknessSlider:SetValue(settings.flashThickness or 2)
+    end
+    if contentFrame.flashScaleSlider then
+        contentFrame.flashScaleSlider:SetValue(settings.flashScale or 1.0)
+    end
+    if contentFrame.flashSpeedSlider then
+        contentFrame.flashSpeedSlider:SetValue(settings.flashSpeed or 0.6)
+    end
+    if contentFrame.flashIntensitySlider then
+        contentFrame.flashIntensitySlider:SetValue(settings.flashIntensity or 0.8)
+    end
+    if contentFrame.flashDurSlider then
+        contentFrame.flashDurSlider:SetValue(settings.flashDuration or 0.6)
+    end
+    
+    -- Pulse enable
+    if contentFrame.pulseEnableCB then
+        contentFrame.pulseEnableCB:SetChecked(pulseEnabled)
+    end
+    
+    -- Pulse sub-controls enable/disable
+    local pulseSubControls = {
+        contentFrame.pulseTriggerLabel, contentFrame.pulseTriggerDropdown,
+        contentFrame.pulseScaleSlider, contentFrame.pulseDurSlider,
+        contentFrame.pulseCountSlider,
+    }
+    for _, ctrl in ipairs(pulseSubControls) do
+        if ctrl then
+            if ctrl.SetAlpha then ctrl:SetAlpha(pulseEnabled and 1 or 0.4) end
+            if ctrl.EnableMouse then ctrl:EnableMouse(pulseEnabled) end
+            if ctrl.slider then ctrl.slider:EnableMouse(pulseEnabled) end
+            if ctrl.editBox then ctrl.editBox:EnableMouse(pulseEnabled) end
+        end
+    end
+    
+    -- Pulse trigger dropdown
+    if contentFrame.pulseTriggerDropdown then
+        local currentTrigger = settings.pulseTrigger or "onReady"
+        UIDropDownMenu_Initialize(contentFrame.pulseTriggerDropdown, function(self, level)
+            for _, opt in ipairs(TRIGGER_OPTIONS) do
+                local info = UIDropDownMenu_CreateInfo()
+                info.text = opt.label
+                info.value = opt.value
+                info.checked = (currentTrigger == opt.value)
+                info.func = function()
+                    UIDropDownMenu_SetSelectedValue(contentFrame.pulseTriggerDropdown, opt.value)
+                    UIDropDownMenu_SetText(contentFrame.pulseTriggerDropdown, opt.label)
+                    if TUICD.Docks then
+                        TUICD.Docks:SetDockSetting(selectedDock, "pulseTrigger", opt.value)
+                    end
+                end
+                UIDropDownMenu_AddButton(info, level)
+            end
+        end)
+        for _, opt in ipairs(TRIGGER_OPTIONS) do
+            if opt.value == currentTrigger then
+                UIDropDownMenu_SetText(contentFrame.pulseTriggerDropdown, opt.label)
+                break
+            end
+        end
+    end
+    
+    -- Pulse scale
+    if contentFrame.pulseScaleSlider then
+        contentFrame.pulseScaleSlider:SetValue(settings.pulseScale or 1.3)
+    end
+    
+    -- Pulse duration
+    if contentFrame.pulseDurSlider then
+        contentFrame.pulseDurSlider:SetValue(settings.pulseDuration or 0.4)
+    end
+    
+    -- Pulse count
+    if contentFrame.pulseCountSlider then
+        contentFrame.pulseCountSlider:SetValue(settings.pulseCount or 3)
     end
 end
 

@@ -873,6 +873,11 @@ function BuffBarsDock:ShouldBeVisible()
     if self._isLayoutMode then
         return true
     end
+
+    -- Config preview: force dock visible while a bar is being previewed
+    if BuffBarsFrames and BuffBarsFrames.GetPreviewBarKey and BuffBarsFrames:GetPreviewBarKey() then
+        return true
+    end
     
     local dockSettings = BuffBarsData:GetDockSettings()
     local enabled = dockSettings.visibilityEnabled
@@ -910,7 +915,8 @@ function BuffBarsDock:UpdateVisibility()
     if shouldShow then
         -- Check if we have visible bars before showing
         local visible = GetVisibleBars()
-        if #visible > 0 or self._isLayoutMode then
+        local hasPreview = BuffBarsFrames and BuffBarsFrames.GetPreviewBarKey and BuffBarsFrames:GetPreviewBarKey()
+        if #visible > 0 or self._isLayoutMode or hasPreview then
             dockFrame:Show()
         end
     else

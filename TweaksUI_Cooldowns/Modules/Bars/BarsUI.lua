@@ -497,6 +497,7 @@ local function RefreshSpellList()
 
         btn:SetScript("OnClick", function()
             selectedBarKey = entry.barKey
+            BarsFrames:SetPreviewBar(selectedBarKey)
             RefreshSpellList()
             BarsUI:RefreshConfigPanel()
         end)
@@ -1028,6 +1029,7 @@ function BarsUI:RefreshConfigPanel()
     removeBtn:SetText("|cffff4444Remove Spell|r")
     removeBtn:Show()
     removeBtn:SetScript("OnClick", function()
+        BarsFrames:ClearPreviewBar()
         BarsData:RemoveSpell(selectedBarKey)
         BarsFrames:OnSpellRemoved(selectedBarKey)
         selectedBarKey = nil
@@ -1890,6 +1892,7 @@ function BarsUI:CreatePanel()
             if barKey then
                 BarsFrames:OnSpellAdded(barKey)
                 selectedBarKey = barKey
+                BarsFrames:SetPreviewBar(selectedBarKey)
                 RefreshSpellList()
                 BarsUI:RefreshConfigPanel()
                 addBox:SetText("")
@@ -1938,6 +1941,7 @@ function BarsUI:CreatePanel()
             TUICD:Print("Hold Shift and click to clear all bars.")
             return
         end
+        BarsFrames:ClearPreviewBar()
         BarsFrames:DestroyAllBars()
         local count = BarsData:RemoveAllSpells()
         selectedBarKey = nil
@@ -2086,10 +2090,16 @@ function BarsUI:Show()
     RefreshSpellList()
     self:RefreshConfigPanel()
     mainPanel:Show()
+
+    -- Restore preview for selected bar
+    if selectedBarKey then
+        BarsFrames:SetPreviewBar(selectedBarKey)
+    end
 end
 
 function BarsUI:Hide()
     if mainPanel then
+        BarsFrames:ClearPreviewBar()
         CloseActivePopup()
         mainPanel:Hide()
     end

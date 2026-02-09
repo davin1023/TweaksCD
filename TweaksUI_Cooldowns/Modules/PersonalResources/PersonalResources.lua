@@ -446,7 +446,7 @@ local function ApplyGradientPreset(cfg, presetId)
 end
 
 local TEXT_FORMATS = {
-    { id = "none", name = "Hidden" }, { id = "current", name = "Current" }, { id = "current_max", name = "Current / Max" },
+    { id = "none", name = "Hidden" }, { id = "current", name = "Current" }, { id = "current_max", name = "Current / Max" }, { id = "percent", name = "Percent" },
 }
 
 local DEFAULT_SETTINGS = {
@@ -1485,6 +1485,21 @@ local function UpdatePowerBar()
             powerBarFrame.text:SetFormattedText("%d", current)
         elseif cfg.textFormat == "current_max" then
             powerBarFrame.text:SetFormattedText("%d / %d", current, max)
+        elseif cfg.textFormat == "percent" then
+            if UnitPowerPercent then
+                -- UnitPower signature is (unit, powerType, unmodified)
+                -- So UnitPowerPercent is likely (unit, powerType, unmodified, curve)
+                -- Health has no powerType so it's (unit, unmodified, curve)
+                local curve = CurveConstants and CurveConstants.ScaleTo100
+                local ok, pct = pcall(UnitPowerPercent, "player", powerType, false, curve)
+                if ok and pct then
+                    powerBarFrame.text:SetFormattedText("%.0f%%", pct)
+                else
+                    powerBarFrame.text:SetText("?%")
+                end
+            else
+                powerBarFrame.text:SetText("?%")
+            end
         else
             powerBarFrame.text:SetText("")
         end
@@ -1991,11 +2006,22 @@ local function UpdateClassPower()
                 end
             else
                 -- Generic continuous resource text (Void Metamorphosis, Soul Fragments, etc.)
-                -- Use string.format which handles secrets, then SetText
-                if resourceType == SPECIAL_RESOURCES.VOID_METAMORPHOSIS then
+                -- These values may be secret during combat, so use pcall for arithmetic
+                if cfg.textFormat == "percent" then
+                    local ok, pct = pcall(function() return (current / max) * 100 end)
+                    if ok then
+                        classPowerFrame.text:SetFormattedText("%.0f%%", pct)
+                    else
+                        classPowerFrame.text:SetText(AbbreviateLargeNumbers(current))
+                    end
+                elseif resourceType == SPECIAL_RESOURCES.VOID_METAMORPHOSIS then
                     -- Void Meta: show current/max 
-                    local textStr = string.format("%s / %d", tostring(current), max)
-                    classPowerFrame.text:SetText(textStr)
+                    if cfg.textFormat == "current" then
+                        classPowerFrame.text:SetText(tostring(current))
+                    else
+                        local textStr = string.format("%s / %d", tostring(current), max)
+                        classPowerFrame.text:SetText(textStr)
+                    end
                 elseif resourceType == SPECIAL_RESOURCES.SOUL_FRAGMENTS then
                     -- Soul Fragments: current may be secret, use tostring() 
                     if cfg.textFormat == "current" then
@@ -2006,7 +2032,14 @@ local function UpdateClassPower()
                     end
                 else
                     -- Fallback for other continuous resources
-                    classPowerFrame.text:SetText(AbbreviateLargeNumbers(current))
+                    if cfg.textFormat == "current" then
+                        classPowerFrame.text:SetText(AbbreviateLargeNumbers(current))
+                    elseif cfg.textFormat == "current_max" then
+                        local textStr = string.format("%s / %d", tostring(current), max)
+                        classPowerFrame.text:SetText(textStr)
+                    else
+                        classPowerFrame.text:SetText(AbbreviateLargeNumbers(current))
+                    end
                 end
             end
             classPowerFrame.text:Show()
@@ -2067,9 +2100,22 @@ local function UpdateClassPower()
             classPowerFrame.text:SetTextColor(cfg.textColor[1], cfg.textColor[2], cfg.textColor[3], cfg.textColor[4] or 1)
             
             if isNormal then
-                classPowerFrame.text:SetText(cfg.textFormat == "current" and current or (current .. "/" .. safeMax))
+                if cfg.textFormat == "percent" then
+                    classPowerFrame.text:SetFormattedText("%.0f%%", (current / safeMax) * 100)
+                elseif cfg.textFormat == "current" then
+                    classPowerFrame.text:SetText(current .. "")
+                else
+                    classPowerFrame.text:SetText(current .. "/" .. safeMax)
+                end
             else
-                if cfg.textFormat == "current" then
+                if cfg.textFormat == "percent" then
+                    local ok, pct = pcall(function() return (current / safeMax) * 100 end)
+                    if ok then
+                        classPowerFrame.text:SetFormattedText("%.0f%%", pct)
+                    else
+                        classPowerFrame.text:SetFormattedText("%d", current)
+                    end
+                elseif cfg.textFormat == "current" then
                     classPowerFrame.text:SetFormattedText("%d", current)
                 else
                     classPowerFrame.text:SetFormattedText("%d/%d", current, safeMax)
@@ -3799,11 +3845,13 @@ local function CreateColorPicker(parent, x, y, label, color)
     return y - 28, btn
 end
 
+local dropdownCounter = 0
 local function CreateDropdown(parent, x, y, label, options, getFunc, setFunc)
+    dropdownCounter = dropdownCounter + 1
     local lbl = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     lbl:SetPoint("TOPLEFT", x, y)
     lbl:SetText(label)
-    local dd = CreateFrame("Frame", "TUICD_RB_DD_" .. label:gsub(" ", ""), parent, "UIDropDownMenuTemplate")
+    local dd = CreateFrame("Frame", "TUICD_RB_DD_" .. dropdownCounter, parent, "UIDropDownMenuTemplate")
     dd:SetPoint("TOPLEFT", x - 16, y - 18)
     UIDropDownMenu_SetWidth(dd, 150)
     local curVal = getFunc()
@@ -3859,11 +3907,12 @@ end
 
 -- Texture dropdown using LibSharedMedia
 local function CreateTextureDropdown(parent, x, y, label, getFunc, setFunc)
+    dropdownCounter = dropdownCounter + 1
     local lbl = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     lbl:SetPoint("TOPLEFT", x, y)
     lbl:SetText(label)
     
-    local dd = CreateFrame("Frame", "TUICD_RB_Tex_" .. label:gsub(" ", ""), parent, "UIDropDownMenuTemplate")
+    local dd = CreateFrame("Frame", "TUICD_RB_Tex_" .. dropdownCounter, parent, "UIDropDownMenuTemplate")
     dd:SetPoint("TOPLEFT", x - 16, y - 18)
     UIDropDownMenu_SetWidth(dd, 150)
     UIDropDownMenu_SetText(dd, getFunc() or "Blizzard")
@@ -3908,11 +3957,12 @@ end
 
 -- Font dropdown using LibSharedMedia
 local function CreateFontDropdown(parent, x, y, label, getFunc, setFunc)
+    dropdownCounter = dropdownCounter + 1
     local lbl = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     lbl:SetPoint("TOPLEFT", x, y)
     lbl:SetText(label)
     
-    local dd = CreateFrame("Frame", "TUICD_RB_Font_" .. label:gsub(" ", ""), parent, "UIDropDownMenuTemplate")
+    local dd = CreateFrame("Frame", "TUICD_RB_Font_" .. dropdownCounter, parent, "UIDropDownMenuTemplate")
     dd:SetPoint("TOPLEFT", x - 16, y - 18)
     UIDropDownMenu_SetWidth(dd, 150)
     UIDropDownMenu_SetText(dd, getFunc() or "Friz Quadrata TT")
@@ -3968,7 +4018,7 @@ function PersonalResources:CreatePanel(panelId)
     if panelId == "general" then
         CreateSettingsPanel("general", "General Settings", function(p)
             local y = -10
-            y = CreateSlider(p, 10, y, "Global Scale", 0.5, 2, 0.05,
+            y = CreateSlider(p, 10, y, "Global Scale", 0.25, 4, 0.05,
                 function() return settings.global.scale end,
                 function(v) settings.global.scale = v end)
             y = CreateCheckbox(p, 10, y, "Hide Blizzard Resource Bars",
@@ -4006,8 +4056,8 @@ function PersonalResources:CreatePanel(panelId)
                         function() return cfg.enabled end, function(c) cfg.enabled = c end)
                     
                     y = CreateHeader(p, 10, y - 10, "Size")
-                    y = CreateSlider(p, 10, y, "Width", 50, 500, 1, function() return cfg.width end, function(v) cfg.width = v end)
-                    y = CreateSlider(p, 10, y, "Height", 4, 50, 1, function() return cfg.height end, function(v) cfg.height = v end)
+                    y = CreateSlider(p, 10, y, "Width", 50, 1000, 1, function() return cfg.width end, function(v) cfg.width = v end)
+                    y = CreateSlider(p, 10, y, "Height", 4, 100, 1, function() return cfg.height end, function(v) cfg.height = v end)
                 end
             },
             {
@@ -4057,7 +4107,7 @@ function PersonalResources:CreatePanel(panelId)
                     y = CreateDropdown(p, 10, y, "Text Format", healthTextFormats, function() return cfg.textFormat end, function(v) cfg.textFormat = v end)
                     y = CreateCheckbox(p, 10, y, "Abbreviate Numbers (85k)", function() return cfg.abbreviateNumbers end, function(c) cfg.abbreviateNumbers = c end)
                     y = CreateFontDropdown(p, 10, y, "Font", function() return cfg.font end, function(v) cfg.font = v end)
-                    y = CreateSlider(p, 10, y, "Font Size", 8, 24, 1, function() return cfg.textFontSize end, function(v) cfg.textFontSize = v end)
+                    y = CreateSlider(p, 10, y, "Font Size", 8, 48, 1, function() return cfg.textFontSize end, function(v) cfg.textFontSize = v end)
                     y = CreateColorPicker(p, 10, y, "Text Color", cfg.textColor)
                     
                     local healthTextPositions = {
@@ -4066,8 +4116,8 @@ function PersonalResources:CreatePanel(panelId)
                         { id = "RIGHT", name = "Right" },
                     }
                     y = CreateDropdown(p, 10, y, "Text Position", healthTextPositions, function() return cfg.textPosition end, function(v) cfg.textPosition = v end)
-                    y = CreateSlider(p, 10, y, "Text Offset X", -50, 50, 1, function() return cfg.textOffsetX end, function(v) cfg.textOffsetX = v end)
-                    y = CreateSlider(p, 10, y, "Text Offset Y", -20, 20, 1, function() return cfg.textOffsetY end, function(v) cfg.textOffsetY = v end)
+                    y = CreateSlider(p, 10, y, "Text Offset X", -100, 100, 1, function() return cfg.textOffsetX end, function(v) cfg.textOffsetX = v end)
+                    y = CreateSlider(p, 10, y, "Text Offset Y", -40, 40, 1, function() return cfg.textOffsetY end, function(v) cfg.textOffsetY = v end)
                 end
             },
             {
@@ -4088,9 +4138,9 @@ function PersonalResources:CreatePanel(panelId)
                         { id = "RIGHT", name = "Right" },
                     }
                     y = CreateDropdown(p, 10, y, "Text Position", absorbTextPositions, function() return cfg.absorbTextPosition end, function(v) cfg.absorbTextPosition = v end)
-                    y = CreateSlider(p, 10, y, "Text Size", 8, 20, 1, function() return cfg.absorbTextFontSize end, function(v) cfg.absorbTextFontSize = v end)
-                    y = CreateSlider(p, 10, y, "Offset X", -50, 50, 1, function() return cfg.absorbTextOffsetX end, function(v) cfg.absorbTextOffsetX = v end)
-                    y = CreateSlider(p, 10, y, "Offset Y", -20, 20, 1, function() return cfg.absorbTextOffsetY end, function(v) cfg.absorbTextOffsetY = v end)
+                    y = CreateSlider(p, 10, y, "Text Size", 8, 40, 1, function() return cfg.absorbTextFontSize end, function(v) cfg.absorbTextFontSize = v end)
+                    y = CreateSlider(p, 10, y, "Offset X", -100, 100, 1, function() return cfg.absorbTextOffsetX end, function(v) cfg.absorbTextOffsetX = v end)
+                    y = CreateSlider(p, 10, y, "Offset Y", -40, 40, 1, function() return cfg.absorbTextOffsetY end, function(v) cfg.absorbTextOffsetY = v end)
                     y = CreateColorPicker(p, 10, y, "Text Color", cfg.absorbTextColor)
                 end
             },
@@ -4115,7 +4165,7 @@ function PersonalResources:CreatePanel(panelId)
                     
                     y = CreateHeader(p, 10, y - 10, "Fade")
                     y = CreateCheckbox(p, 10, y, "Enable Fade", function() return cfg.fadeEnabled end, function(c) cfg.fadeEnabled = c end)
-                    y = CreateSlider(p, 10, y, "Fade Delay (sec)", 0, 10, 0.5, function() return cfg.fadeDelay end, function(v) cfg.fadeDelay = v end)
+                    y = CreateSlider(p, 10, y, "Fade Delay (sec)", 0, 20, 0.5, function() return cfg.fadeDelay end, function(v) cfg.fadeDelay = v end)
                     y = CreateSlider(p, 10, y, "Fade Alpha", 0, 1, 0.05, function() return cfg.fadeAlpha end, function(v) cfg.fadeAlpha = v end)
                 end
             },
@@ -4134,8 +4184,8 @@ function PersonalResources:CreatePanel(panelId)
                         function() return cfg.enabled end, function(c) cfg.enabled = c end)
                     
                     y = CreateHeader(p, 10, y - 10, "Size")
-                    y = CreateSlider(p, 10, y, "Width", 50, 400, 1, function() return cfg.width end, function(v) cfg.width = v end)
-                    y = CreateSlider(p, 10, y, "Height", 4, 40, 1, function() return cfg.height end, function(v) cfg.height = v end)
+                    y = CreateSlider(p, 10, y, "Width", 50, 800, 1, function() return cfg.width end, function(v) cfg.width = v end)
+                    y = CreateSlider(p, 10, y, "Height", 4, 80, 1, function() return cfg.height end, function(v) cfg.height = v end)
                 end
             },
             {
@@ -4177,7 +4227,7 @@ function PersonalResources:CreatePanel(panelId)
                     y = CreateCheckbox(p, 10, y, "Show Text", function() return cfg.showText end, function(c) cfg.showText = c end)
                     y = CreateDropdown(p, 10, y, "Text Format", TEXT_FORMATS, function() return cfg.textFormat end, function(v) cfg.textFormat = v end)
                     y = CreateFontDropdown(p, 10, y, "Font", function() return cfg.font end, function(v) cfg.font = v end)
-                    y = CreateSlider(p, 10, y, "Font Size", 8, 24, 1, function() return cfg.textFontSize end, function(v) cfg.textFontSize = v end)
+                    y = CreateSlider(p, 10, y, "Font Size", 8, 48, 1, function() return cfg.textFontSize end, function(v) cfg.textFontSize = v end)
                     y = CreateColorPicker(p, 10, y, "Text Color", cfg.textColor)
                 end
             },
@@ -4202,7 +4252,7 @@ function PersonalResources:CreatePanel(panelId)
                     
                     y = CreateHeader(p, 10, y - 10, "Fade")
                     y = CreateCheckbox(p, 10, y, "Enable Fade", function() return cfg.fadeEnabled end, function(c) cfg.fadeEnabled = c end)
-                    y = CreateSlider(p, 10, y, "Fade Delay (sec)", 0, 10, 0.5, function() return cfg.fadeDelay end, function(v) cfg.fadeDelay = v end)
+                    y = CreateSlider(p, 10, y, "Fade Delay (sec)", 0, 20, 0.5, function() return cfg.fadeDelay end, function(v) cfg.fadeDelay = v end)
                     y = CreateSlider(p, 10, y, "Fade Alpha", 0, 1, 0.05, function() return cfg.fadeAlpha end, function(v) cfg.fadeAlpha = v end)
                 end
             },
@@ -4222,9 +4272,9 @@ function PersonalResources:CreatePanel(panelId)
                             function() return cfg.enabled end, function(c) cfg.enabled = c end)
                         
                         y = CreateHeader(p, 10, y - 10, "Size")
-                        y = CreateSlider(p, 10, y, "Width", 50, 400, 1, function() return cfg.width end, function(v) cfg.width = v end)
-                        y = CreateSlider(p, 10, y, "Height", 4, 30, 1, function() return cfg.height end, function(v) cfg.height = v end)
-                        y = CreateSlider(p, 10, y, "Spacing", 0, 10, 1, function() return cfg.spacing end, function(v) cfg.spacing = v end)
+                        y = CreateSlider(p, 10, y, "Width", 50, 800, 1, function() return cfg.width end, function(v) cfg.width = v end)
+                        y = CreateSlider(p, 10, y, "Height", 4, 60, 1, function() return cfg.height end, function(v) cfg.height = v end)
+                        y = CreateSlider(p, 10, y, "Spacing", 0, 40, 1, function() return cfg.spacing end, function(v) cfg.spacing = v end)
                         
                         y = CreateHeader(p, 10, y - 10, "Appearance")
                         
@@ -4294,8 +4344,14 @@ function PersonalResources:CreatePanel(panelId)
                         y = CreateSeparator(p, y - 10)
                         y = CreateHeader(p, 10, y - 5, "Text")
                         y = CreateCheckbox(p, 10, y, "Show Text", function() return cfg.showText end, function(c) cfg.showText = c end)
+                        local cpTextFormats = {
+                            { id = "current", name = "Current" },
+                            { id = "current_max", name = "Current / Max" },
+                            { id = "percent", name = "Percent" },
+                        }
+                        y = CreateDropdown(p, 10, y, "Text Format", cpTextFormats, function() return cfg.textFormat end, function(v) cfg.textFormat = v end)
                         y = CreateFontDropdown(p, 10, y, "Font", function() return cfg.textFont end, function(v) cfg.textFont = v end)
-                        y = CreateSlider(p, 10, y, "Font Size", 6, 24, 1, function() return cfg.textFontSize end, function(v) cfg.textFontSize = v end)
+                        y = CreateSlider(p, 10, y, "Font Size", 6, 48, 1, function() return cfg.textFontSize end, function(v) cfg.textFontSize = v end)
                         
                         local outlineOptions = {
                             { id = "NONE", name = "None" },
@@ -4303,8 +4359,8 @@ function PersonalResources:CreatePanel(panelId)
                             { id = "THICKOUTLINE", name = "Thick Outline" },
                         }
                         y = CreateDropdown(p, 10, y, "Outline", outlineOptions, function() return cfg.textFontOutline end, function(v) cfg.textFontOutline = v end)
-                        y = CreateSlider(p, 10, y, "Offset X", -50, 50, 1, function() return cfg.textOffsetX end, function(v) cfg.textOffsetX = v end)
-                        y = CreateSlider(p, 10, y, "Offset Y", -50, 50, 1, function() return cfg.textOffsetY end, function(v) cfg.textOffsetY = v end)
+                        y = CreateSlider(p, 10, y, "Offset X", -100, 100, 1, function() return cfg.textOffsetX end, function(v) cfg.textOffsetX = v end)
+                        y = CreateSlider(p, 10, y, "Offset Y", -100, 100, 1, function() return cfg.textOffsetY end, function(v) cfg.textOffsetY = v end)
                         y = CreateColorPicker(p, 10, y, "Text Color", cfg.textColor)
                     end
                 },
@@ -4328,7 +4384,7 @@ function PersonalResources:CreatePanel(panelId)
                         
                         y = CreateHeader(p, 10, y - 10, "Fade")
                         y = CreateCheckbox(p, 10, y, "Enable Fade", function() return cfg.fadeEnabled end, function(c) cfg.fadeEnabled = c end)
-                        y = CreateSlider(p, 10, y, "Fade Delay (sec)", 0, 10, 0.5, function() return cfg.fadeDelay end, function(v) cfg.fadeDelay = v end)
+                        y = CreateSlider(p, 10, y, "Fade Delay (sec)", 0, 20, 0.5, function() return cfg.fadeDelay end, function(v) cfg.fadeDelay = v end)
                         y = CreateSlider(p, 10, y, "Fade Alpha", 0, 1, 0.05, function() return cfg.fadeAlpha end, function(v) cfg.fadeAlpha = v end)
                     end
                 },
@@ -4378,9 +4434,9 @@ function PersonalResources:CreatePanel(panelId)
                     function() return cfg.enabled end, function(c) cfg.enabled = c end)
                 
                 y = CreateHeader(p, 10, y - 10, "Size")
-                y = CreateSlider(p, 10, y, "Width", 50, 400, 1, function() return cfg.width end, function(v) cfg.width = v end)
-                y = CreateSlider(p, 10, y, "Height", 4, 30, 1, function() return cfg.height end, function(v) cfg.height = v end)
-                y = CreateSlider(p, 10, y, "Spacing", 0, 10, 1, function() return cfg.spacing end, function(v) cfg.spacing = v end)
+                y = CreateSlider(p, 10, y, "Width", 50, 800, 1, function() return cfg.width end, function(v) cfg.width = v end)
+                y = CreateSlider(p, 10, y, "Height", 4, 60, 1, function() return cfg.height end, function(v) cfg.height = v end)
+                y = CreateSlider(p, 10, y, "Spacing", 0, 40, 1, function() return cfg.spacing end, function(v) cfg.spacing = v end)
                 
                 y = CreateHeader(p, 10, y - 10, "Appearance")
                 
@@ -4451,7 +4507,7 @@ function PersonalResources:CreatePanel(panelId)
                 y = CreateHeader(p, 10, y - 5, "Text")
                 y = CreateCheckbox(p, 10, y, "Show Text", function() return cfg.showText end, function(c) cfg.showText = c end)
                 y = CreateFontDropdown(p, 10, y, "Font", function() return cfg.textFont end, function(v) cfg.textFont = v end)
-                y = CreateSlider(p, 10, y, "Font Size", 6, 24, 1, function() return cfg.textFontSize end, function(v) cfg.textFontSize = v end)
+                y = CreateSlider(p, 10, y, "Font Size", 6, 48, 1, function() return cfg.textFontSize end, function(v) cfg.textFontSize = v end)
                 
                 local outlineOptions = {
                     { id = "NONE", name = "None" },

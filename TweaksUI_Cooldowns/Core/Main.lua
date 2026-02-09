@@ -418,12 +418,12 @@ local function Initialize()
     TUICD:LoadForceAllVisibleState()
     
     -- Fire initialization complete event - modules can now auto-enable
-    print("|cff00ccff[TUICD Main]|r Firing TUICD_INITIALIZED event...")
+    TUICD:PrintDebug("Firing TUICD_INITIALIZED event...")
     if TUICD.Events then
         TUICD.Events:Fire("TUICD_INITIALIZED")
-        print("|cff00ccff[TUICD Main]|r TUICD_INITIALIZED fired")
+        TUICD:PrintDebug("TUICD_INITIALIZED fired")
     else
-        print("|cffff0000[TUICD Main]|r ERROR: TUICD.Events not available!")
+        TUICD:PrintError("TUICD.Events not available!")
     end
     
     TUICD:Print("v" .. TUICD.VERSION .. " Loaded - Type |cffFFFFFF/tuicd|r to open settings")
@@ -826,6 +826,52 @@ local function HandleSlashCommand(msg)
         else
             TUICD:Print("Unknown dock command: " .. subcmd)
             TUICD:Print("Type /tuicd dock help for commands")
+        end
+        
+    elseif cmd == "earlyshow" then
+        -- Diagnostic for Early Show feature
+        TUICD:Print("|cff00ccff=== Early Show Diagnostic ===|r")
+        for dockIndex = 1, 4 do
+            if TUICD.Docks then
+                local settings = TUICD.Docks:GetDockSettings(dockIndex)
+                local esSec = settings and settings.earlyShowSeconds or 0
+                if esSec > 0 then
+                    TUICD:Print(string.format("  Dock %d: earlyShowSeconds = |cffffff00%d|r", dockIndex, esSec))
+                else
+                    TUICD:Print(string.format("  Dock %d: earlyShowSeconds = |cff888888Off|r", dockIndex))
+                end
+            end
+        end
+        -- Check docked cooldown icons for remaining time
+        for _, trackerKey in ipairs({"essential", "utility", "customTrackers"}) do
+            local db = TweaksUI_Cooldowns_CharDB and TweaksUI_Cooldowns_CharDB[trackerKey .. "Highlights"]
+            if db and db.dockAssignment then
+                for slotIndex, dockIndex in pairs(db.dockAssignment) do
+                    if dockIndex and TUICD.CooldownHighlights then
+                        local slotInfo = TUICD.CooldownHighlights:GetSlotInfo(trackerKey, slotIndex)
+                        local sourceIcon = slotInfo and slotInfo.icon
+                        local sourceCooldown = sourceIcon and (sourceIcon.Cooldown or sourceIcon.cooldown)
+                        local remainingSec = nil
+                        local cdSecret = false
+                        if sourceCooldown and sourceCooldown.GetCooldownTimes then
+                            pcall(function()
+                                local start, duration = sourceCooldown:GetCooldownTimes()
+                                if start and duration then
+                                    if type(start) ~= "number" then
+                                        cdSecret = true
+                                    elseif start > 0 and duration > 3000 then
+                                        remainingSec = ((start + duration) - (GetTime() * 1000)) / 1000
+                                    end
+                                end
+                            end)
+                        end
+                        local showInactive = db.inactive and db.inactive.show and db.inactive.show[slotIndex]
+                        local remainStr = cdSecret and "|cffff8888SECRET|r" or (remainingSec and string.format("%.1fs", remainingSec) or "|cff00ff00ready|r")
+                        TUICD:Print(string.format("    %s:%d → Dock %d | showInactive=%s | remaining=%s",
+                            trackerKey, slotIndex, dockIndex, tostring(showInactive), remainStr))
+                    end
+                end
+            end
         end
         
     elseif cmd == "buffbars" or cmd == "bb" then

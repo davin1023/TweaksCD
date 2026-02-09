@@ -31,6 +31,9 @@ local barFrames = {}
 -- Layout mode state
 local isLayoutMode = false
 
+-- Config preview: force-show this bar even if disabled/inactive
+local previewBarKey = nil
+
 -- ============================================================================
 -- CONSTANTS
 -- ============================================================================
@@ -462,6 +465,11 @@ function BarsFrames:ApplyConfig(barKey)
     pcall(function() frame.bar:SetOrientation(orientation) end)
     StatusBarAPI:SetFillStyle(frame.bar, fillStyle)
 
+    -- Cache on frame so UpdateBarDisplay can re-assert after SetTimerDuration
+    frame._barOrientation = orientation
+    frame._barFillStyle = fillStyle
+    frame._barIsVert = isVert
+
     -- ========================================
     -- Textures (fill bar only; bgBar is a plain Frame with ColorTexture)
     -- ========================================
@@ -715,7 +723,8 @@ function BarsFrames:UpdateBarDisplay(barKey)
     if not frame then return end
 
     local config = BarsData:GetEffectiveConfig(barKey)
-    if not config or not config.enabled then
+    local isPreview = (barKey == previewBarKey)
+    if not config or (not config.enabled and not isPreview) then
         local wasShown = frame:IsShown()
         frame:Hide()
         if wasShown then
@@ -740,6 +749,31 @@ function BarsFrames:UpdateBarDisplay(barKey)
         frame.bar:SetValue(0.65)
         frame.timeText:SetText("12s")
         return
+    end
+
+    -- Config preview: show selected bar with placeholder even if disabled/inactive
+    if isPreview then
+        local wouldNormallyShow = config.enabled and
+            ((state and state.isActive) or config.showWhenReady)
+        if not wouldNormallyShow then
+            local wasHidden = not frame:IsShown()
+            frame:Show()
+            frame.bgBar:Show()
+            local bgc = config.backgroundColor or { r = 0.1, g = 0.1, b = 0.1, a = 0.8 }
+            if frame.bgBar.colorTex then
+                frame.bgBar.colorTex:SetColorTexture(bgc.r, bgc.g, bgc.b, bgc.a or 0.8)
+            end
+            ShowBorder(frame.barBorder)
+            frame.bar:SetMinMaxValues(0, 1)
+            frame.bar:SetValue(0.65)
+            frame.timeText:SetText("12s")
+            if wasHidden then
+                local dock = GetDock()
+                if dock then dock:OnBarShown(barKey) end
+            end
+            return
+        end
+        -- Bar would show normally, fall through to real display
     end
 
     -- Determine visibility
@@ -815,6 +849,16 @@ function BarsFrames:UpdateBarDisplay(barKey)
         end
 
         frame._manualDrain = false
+
+        -- Re-assert orientation after SetTimerDuration (it may reset to horizontal)
+        if frame._barOrientation then
+            pcall(function() frame.bar:SetOrientation(frame._barOrientation) end)
+            StatusBarAPI:SetFillStyle(frame.bar, frame._barFillStyle)
+            if frame._barIsVert then
+                local barTex = frame.bar:GetStatusBarTexture()
+                if barTex then barTex:SetTexCoord(0, 1, 0, 0, 1, 1, 1, 0) end
+            end
+        end
 
         -- Set initial bar color (colorByTime or static)
         if config.colorByTime then
@@ -1047,7 +1091,9 @@ function BarsFrames:OnConfigChanged(barKey)
     local config = BarsData:GetSpellConfig(barKey)
     if not config then return end
 
-    if config.enabled then
+    local isPreview = (barKey == previewBarKey)
+
+    if config.enabled or isPreview then
         if not barFrames[barKey] then
             self:CreateBar(barKey)
         end
@@ -1064,6 +1110,70 @@ function BarsFrames:OnConfigChanged(barKey)
             self:DestroyBar(barKey)
         end
     end
+end
+
+-- ============================================================================
+-- CONFIG PREVIEW (force-show selected bar in settings panel)
+-- ============================================================================
+
+function BarsFrames:SetPreviewBar(barKey)
+    local oldKey = previewBarKey
+    previewBarKey = barKey
+
+    -- Hide old preview if it was only showing because of preview
+    if oldKey and oldKey ~= barKey then
+        if barFrames[oldKey] then
+            self:UpdateBarDisplay(oldKey)
+            -- If bar was disabled, OnConfigChanged would normally destroy it
+            local config = BarsData:GetSpellConfig(oldKey)
+            if config and not config.enabled and barFrames[oldKey] then
+                self:DestroyBar(oldKey)
+            end
+        end
+    end
+
+    -- Show new preview bar
+    if barKey then
+        if not barFrames[barKey] then
+            self:CreateBar(barKey)
+        end
+        if barFrames[barKey] then
+            self:ApplyConfig(barKey)
+            self:UpdateBarDisplay(barKey)
+        end
+        -- Force dock visible for preview
+        local dock = GetDock()
+        if dock then dock:UpdateVisibility() end
+    end
+end
+
+function BarsFrames:ClearPreviewBar()
+    local oldKey = previewBarKey
+    previewBarKey = nil
+
+    if oldKey and barFrames[oldKey] then
+        -- Re-evaluate: hide if disabled, normal display if enabled
+        local config = BarsData:GetSpellConfig(oldKey)
+        if config and not config.enabled then
+            local wasShown = barFrames[oldKey]:IsShown()
+            barFrames[oldKey]:Hide()
+            if wasShown then
+                local dock = GetDock()
+                if dock then dock:OnBarHidden(oldKey) end
+            end
+            self:DestroyBar(oldKey)
+        else
+            self:UpdateBarDisplay(oldKey)
+        end
+    end
+
+    -- Let dock re-evaluate visibility
+    local dock = GetDock()
+    if dock then dock:UpdateVisibility() end
+end
+
+function BarsFrames:GetPreviewBarKey()
+    return previewBarKey
 end
 
 return BarsFrames

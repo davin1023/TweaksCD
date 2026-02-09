@@ -1,8 +1,8 @@
 ## Interface: 120000
 ## Title: TweaksUI: Cooldowns
-## Notes: Enhanced cooldown tracking with custom layouts, visibility controls, and proc alerts.|n|cff00ccffv3.0.45:|r Timeline delayed spell loading fix
+## Notes: Enhanced cooldown tracking with custom layouts, visibility controls, and proc alerts.|n|cff00ccffv3.1.0:|r Release prep and cleanup
 ## Author: Meltheran
-## Version: 3.0.55
+## Version: 3.1.5
 ## SavedVariables: TweaksUI_Cooldowns_DB
 ## SavedVariablesPerCharacter: TweaksUI_Cooldowns_CharDB
 ## OptionalDeps: Masque, LibSharedMedia-3.0, CMT, !TweaksUI

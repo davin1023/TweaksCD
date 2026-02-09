@@ -41,8 +41,6 @@ local DEFAULTS = {
     maxDuration = 30,
     direction = "rightToLeft",  -- "rightToLeft" = ready on left, "leftToRight" = ready on right
     showOverflowStack = true,
-    showHashMarks = true,       -- Show time marker lines on the bar
-    hashMarkColor = { r = 0.6, g = 0.6, b = 0.6, a = 0.5 },
     
     -- Cooldown display
     showCooldownSweep = true,
@@ -68,26 +66,6 @@ local DEFAULTS = {
     showNoTarget = true,
     showMounted = true,
     showNotMounted = true,
-    
-    -- On-Ready Glow
-    onReadyGlowEnabled = false,
-    onReadyGlowStyle = "pixel",
-    onReadyGlowColorR = 1.0,
-    onReadyGlowColorG = 0.82,
-    onReadyGlowColorB = 0.0,
-    onReadyGlowSpeed = 0.6,
-    onReadyGlowIntensity = 0.8,
-    onReadyGlowThickness = 2,
-    onReadyGlowScale = 1.0,
-    onReadyGlowDuration = 3.0,
-    onReadyGlowTiming = 0,
-    
-    -- On-Ready Pulse
-    onReadyPulseEnabled = false,
-    onReadyPulseScale = 1.3,
-    onReadyPulseDuration = 0.4,
-    onReadyPulseCount = 3,
-    onReadyPulseTiming = 0,
 }
 
 -- Aspect ratio lookup table
@@ -112,13 +90,6 @@ local readyIcons = {}         -- { [spellID] = iconFrame } - icons at 0 remainin
 local settings = {}           -- Current settings (merged with defaults)
 local lastUpdate = 0
 local isEnabled = false
-
--- On-Ready effect state
-local wasOnCooldown = {}      -- { [spellID] = true } tracks spells that were on CD
-local onReadyHolding = {}     -- { [spellID] = { holdUntil, icon, data, glowActive, pulseActive, pulsesPlayed } }
-
--- Forward declarations for on-ready effect helpers (defined later, called from ReleaseIcon)
-local CleanupOnReadyEffects
 
 -- Debug
 local debugMode = false
@@ -334,7 +305,6 @@ local function AcquireIcon()
 end
 
 local function ReleaseIcon(icon)
-    CleanupOnReadyEffects(icon)
     icon:Hide()
     icon.spellID = nil
     icon.isReady = false
@@ -555,236 +525,6 @@ local function CalculateAntiOverlapOffsets(iconList, iconW, iconSpacing)
     return maxRow
 end
 
--- ============================================================================
--- ON-READY EFFECTS: Glow and Pulse helpers
--- ============================================================================
-
--- Pixel glow: animated colored border
-local function ShowPixelGlow(icon, r, g, b, thickness, intensity, speed)
-    if not icon._pixelGlow then
-        local gf = CreateFrame("Frame", nil, icon, "BackdropTemplate")
-        gf:SetFrameLevel(icon:GetFrameLevel() + 5)
-        
-        local ag = gf:CreateAnimationGroup()
-        ag:SetLooping("BOUNCE")
-        local alpha = ag:CreateAnimation("Alpha")
-        alpha:SetSmoothing("IN_OUT")
-        gf._pulseAG = ag
-        gf._pulseAlpha = alpha
-        
-        icon._pixelGlow = gf
-    end
-    
-    local t = math.max(1, math.floor(thickness or 2))
-    local gf = icon._pixelGlow
-    gf:ClearAllPoints()
-    gf:SetPoint("TOPLEFT", -t, t)
-    gf:SetPoint("BOTTOMRIGHT", t, -t)
-    gf:SetBackdrop({ edgeFile = "Interface\\Buttons\\WHITE8x8", edgeSize = t })
-    gf:SetBackdropBorderColor(r, g, b, intensity)
-    
-    gf._pulseAlpha:SetFromAlpha(intensity)
-    gf._pulseAlpha:SetToAlpha(math.max(0.05, intensity * 0.2))
-    gf._pulseAlpha:SetDuration(speed or 0.6)
-    
-    gf:Show()
-    gf._pulseAG:Stop()
-    gf._pulseAG:Play()
-end
-
--- Shine glow: colored flash overlay
-local function ShowShineGlow(icon, r, g, b, intensity, speed)
-    if not icon._shineGlow then
-        local shine = icon:CreateTexture(nil, "OVERLAY")
-        shine:SetAllPoints()
-        shine:SetBlendMode("ADD")
-        shine:SetDrawLayer("OVERLAY", 6)
-        
-        local ag = shine:CreateAnimationGroup()
-        ag:SetLooping("BOUNCE")
-        local alpha = ag:CreateAnimation("Alpha")
-        alpha:SetSmoothing("IN_OUT")
-        shine._pulseAG = ag
-        shine._pulseAlpha = alpha
-        
-        icon._shineGlow = shine
-    end
-    
-    icon._shineGlow:SetColorTexture(r, g, b, intensity)
-    icon._shineGlow._pulseAlpha:SetFromAlpha(intensity)
-    icon._shineGlow._pulseAlpha:SetToAlpha(math.max(0.02, intensity * 0.1))
-    icon._shineGlow._pulseAlpha:SetDuration(speed or 0.6)
-    
-    icon._shineGlow:Show()
-    icon._shineGlow._pulseAG:Stop()
-    icon._shineGlow._pulseAG:Play()
-end
-
--- Spell activation glow: radiant edges + spinning ants
-local function ShowSpellGlow(icon, r, g, b, glowScale, speed)
-    if not icon._spellGlow then
-        local glow = CreateFrame("Frame", nil, icon)
-        glow:SetFrameLevel(icon:GetFrameLevel() + 5)
-        
-        local inner = glow:CreateTexture(nil, "ARTWORK")
-        inner:SetTexture("Interface\\SpellActivationOverlay\\IconAlert")
-        inner:SetTexCoord(0.00781250, 0.50781250, 0.27734375, 0.52734375)
-        inner:SetBlendMode("ADD")
-        inner:SetDrawLayer("ARTWORK", 1)
-        glow._inner = inner
-        
-        local outer = glow:CreateTexture(nil, "ARTWORK")
-        outer:SetTexture("Interface\\SpellActivationOverlay\\IconAlert")
-        outer:SetTexCoord(0.00781250, 0.50781250, 0.53515625, 0.78515625)
-        outer:SetBlendMode("ADD")
-        outer:SetDrawLayer("ARTWORK", 0)
-        glow._outer = outer
-        
-        local ants = glow:CreateTexture(nil, "OVERLAY")
-        ants:SetTexture("Interface\\SpellActivationOverlay\\IconAlertAnts")
-        ants:SetBlendMode("ADD")
-        ants:SetDrawLayer("OVERLAY", 5)
-        glow._ants = ants
-        
-        local antsAG = ants:CreateAnimationGroup()
-        antsAG:SetLooping("REPEAT")
-        local rot = antsAG:CreateAnimation("Rotation")
-        rot:SetDegrees(-360)
-        rot:SetDuration(12)
-        glow._antsAG = antsAG
-        
-        local pulseAG = glow:CreateAnimationGroup()
-        pulseAG:SetLooping("BOUNCE")
-        local alpha = pulseAG:CreateAnimation("Alpha")
-        alpha:SetFromAlpha(1)
-        alpha:SetToAlpha(0.5)
-        alpha:SetSmoothing("IN_OUT")
-        glow._pulseAG = pulseAG
-        glow._pulseAlpha = alpha
-        
-        icon._spellGlow = glow
-    end
-    
-    local glow = icon._spellGlow
-    local scale = glowScale or 1.0
-    local w, h = icon:GetSize()
-    local pad = (w * 0.4) * scale
-    
-    glow:ClearAllPoints()
-    glow:SetPoint("TOPLEFT", icon, "TOPLEFT", -pad, pad)
-    glow:SetPoint("BOTTOMRIGHT", icon, "BOTTOMRIGHT", pad, -pad)
-    
-    glow._inner:SetAllPoints(glow)
-    glow._outer:SetAllPoints(glow)
-    glow._ants:SetAllPoints(glow)
-    
-    glow._inner:SetVertexColor(r, g, b, 1)
-    glow._outer:SetVertexColor(r, g, b, 0.6)
-    glow._ants:SetVertexColor(r, g, b, 0.7)
-    
-    glow._pulseAlpha:SetDuration(speed or 0.8)
-    
-    glow:Show()
-    glow._antsAG:Play()
-    glow._pulseAG:Stop()
-    glow._pulseAG:Play()
-end
-
--- Show the appropriate glow style based on settings
-local function ShowOnReadyGlow(icon, s)
-    local style = s.onReadyGlowStyle or "pixel"
-    local r = s.onReadyGlowColorR or 1.0
-    local g = s.onReadyGlowColorG or 0.82
-    local b = s.onReadyGlowColorB or 0.0
-    local speed = s.onReadyGlowSpeed or 0.6
-    local intensity = s.onReadyGlowIntensity or 0.8
-    local thickness = s.onReadyGlowThickness or 2
-    local glowScale = s.onReadyGlowScale or 1.0
-    
-    -- Hide other glow types first
-    if style ~= "pixel" and icon._pixelGlow then icon._pixelGlow:Hide() end
-    if style ~= "shine" and icon._shineGlow then icon._shineGlow:Hide() end
-    if style ~= "glow" and icon._spellGlow then icon._spellGlow:Hide() end
-    
-    if style == "pixel" then
-        ShowPixelGlow(icon, r, g, b, thickness, intensity, speed)
-    elseif style == "shine" then
-        ShowShineGlow(icon, r, g, b, intensity, speed)
-    else
-        ShowSpellGlow(icon, r, g, b, glowScale, speed)
-    end
-end
-
--- Hide all glow types from an icon
-local function HideOnReadyGlow(icon)
-    if icon._pixelGlow then
-        if icon._pixelGlow._pulseAG then icon._pixelGlow._pulseAG:Stop() end
-        icon._pixelGlow:Hide()
-    end
-    if icon._shineGlow then
-        if icon._shineGlow._pulseAG then icon._shineGlow._pulseAG:Stop() end
-        icon._shineGlow:Hide()
-    end
-    if icon._spellGlow then
-        if icon._spellGlow._pulseAG then icon._spellGlow._pulseAG:Stop() end
-        if icon._spellGlow._antsAG then icon._spellGlow._antsAG:Stop() end
-        icon._spellGlow:Hide()
-    end
-end
-
--- Play a scale-bounce pulse animation on an icon
-local function PlayPulseAnimation(icon, pulseScale, pulseDuration, onFinish)
-    if not icon._pulseAG then
-        local ag = icon:CreateAnimationGroup()
-        
-        local scaleUp = ag:CreateAnimation("Scale")
-        scaleUp:SetOrigin("CENTER", 0, 0)
-        scaleUp:SetOrder(1)
-        scaleUp:SetSmoothing("OUT")
-        ag._scaleUp = scaleUp
-        
-        local scaleDown = ag:CreateAnimation("Scale")
-        scaleDown:SetOrigin("CENTER", 0, 0)
-        scaleDown:SetOrder(2)
-        scaleDown:SetSmoothing("IN")
-        ag._scaleDown = scaleDown
-        
-        icon._pulseAG = ag
-    end
-    
-    local halfDur = (pulseDuration or 0.4) / 2
-    local s = pulseScale or 1.3
-    
-    icon._pulseAG._scaleUp:SetScaleFrom(1, 1)
-    icon._pulseAG._scaleUp:SetScaleTo(s, s)
-    icon._pulseAG._scaleUp:SetDuration(halfDur)
-    
-    icon._pulseAG._scaleDown:SetScaleFrom(s, s)
-    icon._pulseAG._scaleDown:SetScaleTo(1, 1)
-    icon._pulseAG._scaleDown:SetDuration(halfDur)
-    
-    if onFinish then
-        icon._pulseAG:SetScript("OnFinished", onFinish)
-    end
-    
-    icon._pulseAG:Stop()
-    icon._pulseAG:Play()
-end
-
--- Stop pulse animation
-local function StopPulseAnimation(icon)
-    if icon._pulseAG then
-        icon._pulseAG:Stop()
-        icon._pulseAG:SetScript("OnFinished", nil)
-    end
-end
-
--- Clean up all on-ready effects from an icon before release
-CleanupOnReadyEffects = function(icon)
-    HideOnReadyGlow(icon)
-    StopPulseAnimation(icon)
-end
-
 local function OnUpdate(self, elapsed)
     if not isEnabled then return end
     
@@ -858,148 +598,18 @@ local function OnUpdate(self, elapsed)
         if readyIcons[spellID] then
             readyIcons[spellID] = nil
         end
-        
-        -- Track that this spell is currently on cooldown (for transition detection)
-        wasOnCooldown[spellID] = true
-        
-        -- If this spell was being held for on-ready, cancel it (went back on CD)
-        if onReadyHolding[spellID] then
-            onReadyHolding[spellID] = nil
-        end
     end
     
-    -- Process ready spells: detect transitions and handle on-ready effects
-    local now = GetTime()
-    local glowEnabled = s.onReadyGlowEnabled
-    local pulseEnabled = s.onReadyPulseEnabled
-    local anyOnReadyEnabled = glowEnabled or pulseEnabled
-    
+    -- Ready spells should NOT be shown - release their icons
     for spellID, data in pairs(readySpells) do
         processed[spellID] = true
         
-        -- Check if this is a NEW transition from cooldown → ready
-        if wasOnCooldown[spellID] and anyOnReadyEnabled and not onReadyHolding[spellID] then
-            -- Calculate hold duration (max of glow and pulse durations)
-            local holdDuration = 0
-            if glowEnabled then
-                local glowDur = (s.onReadyGlowDuration or 3.0) + math.max(0, s.onReadyGlowTiming or 0)
-                holdDuration = math.max(holdDuration, glowDur)
-            end
-            if pulseEnabled then
-                local pulseTotal = (s.onReadyPulseCount or 3) * (s.onReadyPulseDuration or 0.4)
-                    + math.max(0, s.onReadyPulseTiming or 0)
-                holdDuration = math.max(holdDuration, pulseTotal)
-            end
-            
-            -- Acquire/keep the icon for the hold period
-            local icon = activeIcons[spellID]
-            if not icon then
-                icon = AcquireIcon()
-                activeIcons[spellID] = icon
-            end
-            
-            -- Set texture if needed
-            if icon.texture:GetTexture() ~= data.icon then
-                icon.texture:SetTexture(data.icon)
-                UpdateIconAppearance(icon)
-            end
-            icon.spellID = spellID
-            icon.cooldown:Clear()
-            icon.isReady = true
-            
-            onReadyHolding[spellID] = {
-                holdUntil = now + holdDuration,
-                startTime = now,
-                icon = icon,
-                data = data,
-                glowStarted = false,
-                pulseStarted = false,
-                pulsesPlayed = 0,
-            }
-            
-            dprint("On-ready transition: " .. (data.name or tostring(spellID)) .. " hold=" .. holdDuration .. "s")
+        local icon = activeIcons[spellID]
+        if icon then
+            ReleaseIcon(icon)
+            activeIcons[spellID] = nil
         end
-        
-        -- If NOT holding this spell, release its icon
-        if not onReadyHolding[spellID] then
-            local icon = activeIcons[spellID]
-            if icon then
-                ReleaseIcon(icon)
-                activeIcons[spellID] = nil
-            end
-            readyIcons[spellID] = nil
-        end
-        
-        -- Clear the wasOnCooldown flag (spell is now ready)
-        wasOnCooldown[spellID] = nil
-    end
-    
-    -- Process on-ready holding icons: position, effects, expiration
-    local readyX = (s.direction == "leftToRight") and (s.barWidth - iconW) or 0
-    
-    for spellID, hold in pairs(onReadyHolding) do
-        processed[spellID] = true
-        local elapsed_hold = now - hold.startTime
-        
-        -- Check if hold has expired
-        if now >= hold.holdUntil then
-            -- Release the icon
-            local icon = hold.icon
-            if icon then
-                CleanupOnReadyEffects(icon)
-                ReleaseIcon(icon)
-                activeIcons[spellID] = nil
-            end
-            onReadyHolding[spellID] = nil
-            wasOnCooldown[spellID] = nil
-        else
-            -- Still holding: position icon at ready edge
-            local icon = hold.icon
-            if icon then
-                icon:ClearAllPoints()
-                icon:SetPoint("BOTTOMLEFT", timelineFrame.bar, "TOPLEFT", readyX, 2 + s.iconVerticalOffset)
-                icon.durationText:SetText("")
-                icon:Show()
-                
-                -- Apply glow effect (with timing offset)
-                if glowEnabled and not hold.glowStarted then
-                    local glowTiming = s.onReadyGlowTiming or 0
-                    if elapsed_hold >= glowTiming then
-                        ShowOnReadyGlow(icon, s)
-                        hold.glowStarted = true
-                        dprint("Glow started for: " .. tostring(spellID))
-                    end
-                end
-                
-                -- Check glow expiration
-                if hold.glowStarted and glowEnabled then
-                    local glowTiming = math.max(0, s.onReadyGlowTiming or 0)
-                    local glowEnd = glowTiming + (s.onReadyGlowDuration or 3.0)
-                    if elapsed_hold >= glowEnd then
-                        HideOnReadyGlow(icon)
-                    end
-                end
-                
-                -- Apply pulse effect (with timing offset)
-                if pulseEnabled then
-                    local pulseTiming = s.onReadyPulseTiming or 0
-                    local maxPulses = s.onReadyPulseCount or 3
-                    local pulseDur = s.onReadyPulseDuration or 0.4
-                    
-                    if elapsed_hold >= pulseTiming and hold.pulsesPlayed < maxPulses then
-                        -- Check if it's time for the next pulse
-                        local pulseElapsed = elapsed_hold - pulseTiming
-                        local expectedPulses = math.floor(pulseElapsed / pulseDur) + 1
-                        
-                        if expectedPulses > hold.pulsesPlayed then
-                            hold.pulsesPlayed = hold.pulsesPlayed + 1
-                            PlayPulseAnimation(icon, s.onReadyPulseScale or 1.3, pulseDur)
-                            dprint("Pulse " .. hold.pulsesPlayed .. "/" .. maxPulses .. " for: " .. tostring(spellID))
-                        end
-                    end
-                end
-            end
-        end
+        readyIcons[spellID] = nil
     end
     
     -- Calculate anti-overlap offsets (only if enabled)
@@ -1044,8 +654,6 @@ local function OnUpdate(self, elapsed)
             ReleaseIcon(icon)
             activeIcons[spellID] = nil
             readyIcons[spellID] = nil
-            onReadyHolding[spellID] = nil
-            wasOnCooldown[spellID] = nil
         end
     end
     
@@ -1120,67 +728,6 @@ local function RestorePosition()
     end
 end
 
--- ============================================================================
--- HASH MARKS (time interval markers on the bar)
--- ============================================================================
-
-local hashMarkPool = {}
-
-local function UpdateHashMarks()
-    if not timelineFrame or not timelineFrame.bar then return end
-    
-    local s = GetSettings()
-    
-    -- Hide all existing hash marks
-    for _, mark in ipairs(hashMarkPool) do
-        mark:Hide()
-    end
-    
-    if not s.showHashMarks then return end
-    
-    local barWidth = s.barWidth
-    local barHeight = s.barHeight
-    local maxDur = s.maxDuration
-    local reversed = (s.direction == "leftToRight")
-    local color = s.hashMarkColor or { r = 0.6, g = 0.6, b = 0.6, a = 0.5 }
-    local iconW, iconH = GetIconDimensions()
-    
-    -- Short marks at 5s, tall marks at 10s
-    local markIndex = 0
-    for sec = 5, maxDur, 5 do
-        markIndex = markIndex + 1
-        
-        -- Get or create the texture
-        local mark = hashMarkPool[markIndex]
-        if not mark then
-            mark = timelineFrame.bar:CreateTexture(nil, "OVERLAY")
-            mark:SetColorTexture(1, 1, 1, 1)
-            hashMarkPool[markIndex] = mark
-        end
-        
-        -- Long mark at 10s intervals, short at 5s
-        local isMajor = (sec % 10 == 0)
-        local markHeight = isMajor and (iconH * 0.5) or (iconH * 0.25)
-        local markWidth = isMajor and 2 or 1
-        
-        -- Calculate X position (same math as icon positioning)
-        local ratio = sec / maxDur
-        local xPos
-        if reversed then
-            xPos = (1 - ratio) * barWidth
-        else
-            xPos = ratio * barWidth
-        end
-        
-        mark:SetSize(markWidth, markHeight)
-        mark:SetVertexColor(color.r, color.g, color.b, color.a)
-        mark:ClearAllPoints()
-        -- Bottom of mark sits at bottom of bar, extends upward
-        mark:SetPoint("BOTTOM", timelineFrame.bar, "BOTTOMLEFT", xPos, 0)
-        mark:Show()
-    end
-end
-
 local function CreateTimelineFrame()
     if timelineFrame then 
         return timelineFrame 
@@ -1231,9 +778,6 @@ local function CreateTimelineFrame()
     
     -- OnUpdate for animation
     timelineFrame:SetScript("OnUpdate", OnUpdate)
-    
-    -- Create hash marks
-    UpdateHashMarks()
     
     -- Restore saved position
     RestorePosition()
@@ -1292,17 +836,9 @@ function TimelineFrames:Disable()
     for spellID, icon in pairs(activeIcons) do
         ReleaseIcon(icon)
     end
-    -- Clean up on-ready holding icons
-    for spellID, hold in pairs(onReadyHolding) do
-        if hold.icon then
-            CleanupOnReadyEffects(hold.icon)
-        end
-    end
     wipe(activeIcons)
     wipe(readyIcons)
     wipe(overflowIcons)
-    wipe(wasOnCooldown)
-    wipe(onReadyHolding)
     
     if timelineFrame then
         timelineFrame:Hide()
@@ -1367,9 +903,6 @@ function TimelineFrames:Refresh()
         for _, icon in ipairs(iconPool) do
             UpdateIconAppearance(icon)
         end
-        
-        -- Update hash marks
-        UpdateHashMarks()
         
         -- Force immediate position update
         lastUpdate = 999
