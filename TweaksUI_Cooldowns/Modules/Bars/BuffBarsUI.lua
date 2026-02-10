@@ -652,7 +652,7 @@ function BuffBarsUI:RefreshConfigPanel()
     local config = BuffBarsData:GetSpellConfig(selectedBarKey)
     if not config then return end
 
-    local slotIndex = BuffBarsData.ParseBarKey(selectedBarKey)
+    local slotIndex = BuffBarsData.GetSlotIndexForBarKey(selectedBarKey)
     local y = 0
 
     -- ========================================
@@ -682,12 +682,9 @@ function BuffBarsUI:RefreshConfigPanel()
 
     -- Enable
     local enableCheck = CreateCheckbox(configScrollChild, "Enabled", function(checked)
-        local si = BuffBarsData.ParseBarKey(selectedBarKey)
-        if si then
-            BuffBarsData:EnableSlot(si, checked)
-            BuffBarsFrames:OnConfigChanged(selectedBarKey)
-            RefreshSpellList()
-        end
+        BuffBarsData:EnableByBarKey(selectedBarKey, nil, checked)
+        BuffBarsFrames:OnConfigChanged(selectedBarKey)
+        RefreshSpellList()
     end)
     enableCheck:SetPoint("TOPLEFT", 0, -y)
     enableCheck:SetChecked(config.enabled ~= false)

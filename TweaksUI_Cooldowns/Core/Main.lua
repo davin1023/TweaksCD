@@ -484,6 +484,8 @@ local function HandleSlashCommand(msg)
         TUICD:Print("|cffffff00/tuicd remigrate|r - Re-import positions from TweaksUI")
         TUICD:Print("|cffffff00/tuicd migrateprofiles|r - Convert old profiles to 3.0 format")
         TUICD:Print("|cffffff00/tuicd version|r - Show version info")
+        TUICD:Print("|cffffff00/tuicd reseticons|r - Reset per-icon order (fixes jumbled icons)")
+        TUICD:Print("|cffffff00/tuicd bridge|r - Buff identity bridge diagnostics")
         TUICD:Print("|cffffff00/tuicdresetmulti|r - Reset all multi-trackers")
         TUICD:Print("|cffffff00/cdm|r - Toggle Blizzard Cooldown Settings")
         TUICD:Print("|cffffff00/rl|r - Reload UI")
@@ -888,6 +890,75 @@ local function HandleSlashCommand(msg)
             TUICD.Bars:HandleSlashCommand(args)
         else
             TUICD:PrintError("Bars module not loaded")
+        end
+
+    elseif cmd == "reseticons" then
+        -- Nuclear reset of all per-icon ordering data across all trackers
+        if InCombatLockdown() then
+            TUICD:PrintError("Cannot reset icon order during combat")
+            return
+        end
+        local Cooldowns = TUICD.Cooldowns
+        if Cooldowns then
+            -- Clear all caches: session + persistent + original Blizzard order
+            if Cooldowns.ClearIconOrderCache then
+                Cooldowns.ClearIconOrderCache(nil, true)  -- nil = all trackers, true = persistent
+            end
+            if Cooldowns.ClearOriginalOrderCache then
+                Cooldowns.ClearOriginalOrderCache(nil)  -- nil = all trackers
+            end
+            -- Clear BuffIdentityBridge caches
+            if TUICD.BuffIdentityBridge then
+                TUICD.BuffIdentityBridge:WipeAll()
+            end
+            -- Clear BuffHighlights texture cache (prevents stale textures)
+            if TUICD.BuffHighlights and TUICD.BuffHighlights.WipeCachedTextures then
+                TUICD.BuffHighlights:WipeCachedTextures()
+            end
+            -- Resync spell ID caches
+            if TUICD.CooldownHighlights and TUICD.CooldownHighlights.RefreshSpellIDCache then
+                TUICD.CooldownHighlights:RefreshSpellIDCache(nil)  -- nil = all trackers
+            end
+            -- Re-apply layouts
+            if Cooldowns.ApplyGridLayout then
+                local trackers = {
+                    { name = "EssentialCooldownViewer", key = "essential" },
+                    { name = "UtilityCooldownViewer", key = "utility" },
+                    { name = "BuffIconCooldownViewer", key = "buffs" },
+                }
+                for _, t in ipairs(trackers) do
+                    local viewer = _G[t.name]
+                    if viewer then
+                        pcall(Cooldowns.ApplyGridLayout, viewer, t.key)
+                    end
+                end
+            end
+            -- Trigger bridge rebuild after layouts settle
+            if TUICD.BuffIdentityBridge then
+                C_Timer.After(0.5, function()
+                    TUICD.BuffIdentityBridge:ForceRebuildSlotMap()
+                    -- Prune orphaned entries after bridge has fresh data
+                    C_Timer.After(0.3, function()
+                        if TUICD.BuffHighlights and TUICD.BuffHighlights.PruneOrphans then
+                            local pruned = TUICD.BuffHighlights:PruneOrphans()
+                            if pruned > 0 then
+                                TUICD:PrintDebug("Pruned " .. pruned .. " orphaned highlight(s)")
+                            end
+                        end
+                    end)
+                end)
+            end
+            TUICD:Print("|cff00ff00Per-icon order reset for all trackers.|r Reopen settings to see updated list.")
+        else
+            TUICD:PrintError("Cooldowns module not loaded")
+        end
+
+    elseif cmd == "bridge" then
+        -- Route to BuffIdentityBridge slash handler
+        if TUICD.BuffIdentityBridge then
+            TUICD.BuffIdentityBridge:HandleSlashCommand(args)
+        else
+            TUICD:PrintError("BuffIdentityBridge not loaded")
         end
 
     else

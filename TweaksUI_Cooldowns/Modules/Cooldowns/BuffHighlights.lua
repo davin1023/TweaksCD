@@ -27,8 +27,8 @@ local FRAME_PREFIX = "TweaksUI_BuffHighlight_"
 -- STATE
 -- ============================================================================
 
-local highlightFrames = {}  -- [slotIndex] = frame
-local cachedTextures = {}   -- [slotIndex] = textureID (captured when per-icon enabled, static)
+local highlightFrames = {}  -- [slotIndex] = frame (visual frames stay positional)
+local cachedTextures = {}   -- [spellID or slotIndex] = textureID (keyed by settings key)
 -- updateFrame is defined in the UPDATE SYSTEM section
 local isInitialized = false
 
@@ -39,10 +39,131 @@ local function dprint(...)
 end
 
 -- ============================================================================
+-- SPELL ID-BASED SETTINGS KEY (v3.2.0)
+-- Settings are stored by spellID so they follow the spell, not the position.
+-- Uses BuffIdentityBridge for combat-safe slotIndex → spellID resolution.
+-- Falls back to raw slotIndex when bridge data isn't available yet.
+-- SpellIDs are always > 1000; slotIndexes are always 1-20.
+-- ============================================================================
+
+local function IsSpellIDKey(key)
+    return type(key) == "number" and key > 100
+end
+
+local function GetSettingsKey(slotIndex)
+    if not slotIndex then return nil end
+    local Bridge = TUICD.BuffIdentityBridge
+    if Bridge then
+        local spellID = Bridge:GetSpellIDForSlot(slotIndex)
+        if spellID then return spellID end
+    end
+    -- Fallback: raw slotIndex (legacy or bridge not populated yet)
+    return slotIndex
+end
+
+-- Lazy migration: when bridge first resolves a spellID for a slot that still
+-- has old slotIndex-keyed data, migrate those entries on the fly.
+local function LazyMigrateSlot(db, slotIndex, spellID)
+    if not db or not slotIndex or not spellID then return end
+    if slotIndex == spellID then return end  -- Already same key
+    if IsSpellIDKey(slotIndex) then return end  -- Already a spellID key
+    
+    -- List of all flat DB tables that store per-icon settings
+    local flatTables = {
+        "enabled", "hidden", "positions", "dockAssignment",
+        "cooldownTextScale", "cooldownTextColor", "cooldownTextOffsetX", "cooldownTextOffsetY", "cooldownTextAnchor",
+        "countTextScale", "countTextColor", "countTextOffsetX", "countTextOffsetY", "countTextAnchor",
+        "labelEnabled", "labelText", "labelFontSize", "labelColor", "labelOffsetX", "labelOffsetY", "labelAnchor",
+        "showSweep", "showCountdownText", "showProcGlow",
+    }
+    
+    local migrated = false
+    for _, tableName in ipairs(flatTables) do
+        if db[tableName] and db[tableName][slotIndex] ~= nil then
+            db[tableName][spellID] = db[tableName][slotIndex]
+            db[tableName][slotIndex] = nil
+            migrated = true
+        end
+    end
+    
+    -- Migrate state sub-tables (active/inactive)
+    for _, state in ipairs({"active", "inactive"}) do
+        if db[state] then
+            for _, key in ipairs({"size", "opacity", "saturation", "aspectRatio", "customAspectW", "customAspectH", "show"}) do
+                if db[state][key] and db[state][key][slotIndex] ~= nil then
+                    db[state][key][spellID] = db[state][key][slotIndex]
+                    db[state][key][slotIndex] = nil
+                    migrated = true
+                end
+            end
+        end
+    end
+    
+    -- Migrate cachedTextures too
+    if cachedTextures[slotIndex] and not cachedTextures[spellID] then
+        cachedTextures[spellID] = cachedTextures[slotIndex]
+        cachedTextures[slotIndex] = nil
+    end
+    
+    return migrated
+end
+
+-- Smart key resolver: gets settings key AND triggers lazy migration if needed
+local function GetSettingsKeyWithMigration(slotIndex)
+    if not slotIndex then return nil end
+    local Bridge = TUICD.BuffIdentityBridge
+    if Bridge then
+        local spellID = Bridge:GetSpellIDForSlot(slotIndex)
+        if spellID then
+            -- Check if lazy migration is needed
+            local db = TweaksUI_Cooldowns_CharDB and TweaksUI_Cooldowns_CharDB.buffHighlights
+            if db and not IsSpellIDKey(slotIndex) then
+                -- Only migrate if old slotIndex data exists
+                if db.enabled and db.enabled[slotIndex] ~= nil then
+                    LazyMigrateSlot(db, slotIndex, spellID)
+                end
+            end
+            return spellID
+        end
+    end
+    return slotIndex
+end
+
+-- Resolve a settings key (spellID or slotIndex) back to a visual slotIndex
+-- Used when iterating db.enabled which now stores spellID keys
+local function ResolveToSlotIndex(settingsKey)
+    if not settingsKey then return nil end
+    -- If it's already a small number, it's a legacy slotIndex
+    if not IsSpellIDKey(settingsKey) then return settingsKey end
+    -- It's a spellID — look up the current slotIndex via Bridge
+    local Bridge = TUICD.BuffIdentityBridge
+    if Bridge then
+        return Bridge:GetSlotForSpellID(settingsKey)
+    end
+    return nil  -- Can't resolve without Bridge
+end
+
+-- Iterate all enabled highlights, yielding (slotIndex, settingsKey) pairs
+-- Handles both legacy slotIndex keys and migrated spellID keys
+local GetDB  -- forward declaration (defined in DATABASE section below)
+local function ForEachEnabledHighlight(callback)
+    local db = GetDB()
+    if not db.enabled then return end
+    for settingsKey, enabled in pairs(db.enabled) do
+        if enabled then
+            local slotIndex = ResolveToSlotIndex(settingsKey)
+            if slotIndex then
+                callback(slotIndex, settingsKey)
+            end
+        end
+    end
+end
+
+-- ============================================================================
 -- DATABASE
 -- ============================================================================
 
-local function GetDB()
+GetDB = function()
     if not TweaksUI_Cooldowns_CharDB then TweaksUI_Cooldowns_CharDB = {} end
     if not TweaksUI_Cooldowns_CharDB.buffHighlights then
         TweaksUI_Cooldowns_CharDB.buffHighlights = {
@@ -179,38 +300,63 @@ local function GetDB()
     -- Dock assignment (state-independent) - which dock (1-4) icon is assigned to
     if not db.dockAssignment then db.dockAssignment = {} end
     
+    -- =========================================================================
+    -- v3.2.0 MIGRATION: slotIndex keys → spellID keys
+    -- Run once on first load when bridge has data (outside combat, APIs non-secret)
+    -- =========================================================================
+    if not db._migratedToSpellID then
+        local Bridge = TUICD.BuffIdentityBridge
+        if Bridge and Bridge.GetSpellIDForSlot then
+            -- Try to migrate all known slots
+            for slotIndex = 1, 20 do
+                local spellID = Bridge:GetSpellIDForSlot(slotIndex)
+                if spellID then
+                    LazyMigrateSlot(db, slotIndex, spellID)
+                end
+            end
+            -- Mark complete — lazy migration handles any slots resolved later
+            db._migratedToSpellID = true
+        end
+    end
+    
     return db
 end
 
 local function IsHighlightEnabled(slotIndex)
     local db = GetDB()
-    return db.enabled[slotIndex] == true
+    local key = GetSettingsKeyWithMigration(slotIndex)
+    return db.enabled[key] == true
 end
 
 local function SetHighlightEnabled(slotIndex, enabled)
     local db = GetDB()
-    db.enabled[slotIndex] = enabled
+    local key = GetSettingsKeyWithMigration(slotIndex)
+    db.enabled[key] = enabled
 end
 
 local function IsIconHidden(slotIndex)
     local db = GetDB()
-    return db.hidden[slotIndex] == true
+    local key = GetSettingsKeyWithMigration(slotIndex)
+    return db.hidden[key] == true
 end
 
 local function SetIconHidden(slotIndex, hidden)
     local db = GetDB()
-    db.hidden[slotIndex] = hidden
+    local key = GetSettingsKeyWithMigration(slotIndex)
+    db.hidden[key] = hidden
 end
 
 local function GetDockAssignment(slotIndex)
     local db = GetDB()
-    return db.dockAssignment[slotIndex]  -- nil, 1, 2, 3, or 4
+    local key = GetSettingsKeyWithMigration(slotIndex)
+    return db.dockAssignment[key]  -- nil, 1, 2, 3, or 4
 end
 
 local function SetDockAssignment(slotIndex, dockIndex)
     local db = GetDB()
-    local oldDock = db.dockAssignment[slotIndex]
-    db.dockAssignment[slotIndex] = dockIndex
+    local key = GetSettingsKeyWithMigration(slotIndex)
+    local oldDock = db.dockAssignment[key]
+    db.dockAssignment[key] = dockIndex
     
     -- Update Docks module
     if TUICD.Docks then
@@ -233,13 +379,15 @@ end
 -- State-aware getters/setters
 local function GetStateSetting(slotIndex, state, key)
     local db = GetDB()
-    return db[state] and db[state][key] and db[state][key][slotIndex]
+    local settingsKey = GetSettingsKeyWithMigration(slotIndex)
+    return db[state] and db[state][key] and db[state][key][settingsKey]
 end
 
 local function SetStateSetting(slotIndex, state, key, value)
     local db = GetDB()
+    local settingsKey = GetSettingsKeyWithMigration(slotIndex)
     if db[state] and db[state][key] then
-        db[state][key][slotIndex] = value
+        db[state][key][settingsKey] = value
     end
 end
 
@@ -294,12 +442,14 @@ end
 
 local function GetHighlightPosition(slotIndex)
     local db = GetDB()
-    return db.positions[slotIndex]
+    local key = GetSettingsKeyWithMigration(slotIndex)
+    return db.positions[key]
 end
 
 local function SetHighlightPosition(slotIndex, point, relPoint, x, y)
     local db = GetDB()
-    db.positions[slotIndex] = {point = point, relPoint = relPoint, x = x, y = y}
+    local key = GetSettingsKeyWithMigration(slotIndex)
+    db.positions[key] = {point = point, relPoint = relPoint, x = x, y = y}
 end
 
 local function IsTrackerHidden()
@@ -387,198 +537,236 @@ local function ShouldHighlightBeVisible()
     return false
 end
 
--- Text scale helpers (state-independent)
+-- Text scale helpers (state-independent) - keyed by spellID via GetSettingsKey
 local function GetCooldownTextScale(slotIndex)
     local db = GetDB()
-    return db.cooldownTextScale[slotIndex] or 1.0
+    local key = GetSettingsKey(slotIndex)
+    return db.cooldownTextScale[key] or 1.0
 end
 
 local function SetCooldownTextScale(slotIndex, scale)
     local db = GetDB()
-    db.cooldownTextScale[slotIndex] = scale
+    local key = GetSettingsKey(slotIndex)
+    db.cooldownTextScale[key] = scale
 end
 
 local function GetCountTextScale(slotIndex)
     local db = GetDB()
-    return db.countTextScale[slotIndex] or 1.0
+    local key = GetSettingsKey(slotIndex)
+    return db.countTextScale[key] or 1.0
 end
 
 local function SetCountTextScale(slotIndex, scale)
     local db = GetDB()
-    db.countTextScale[slotIndex] = scale
+    local key = GetSettingsKey(slotIndex)
+    db.countTextScale[key] = scale
 end
 
 local function GetCooldownTextColor(slotIndex)
     local db = GetDB()
-    return db.cooldownTextColor[slotIndex] or {1, 1, 1, 1}  -- Default white
+    local key = GetSettingsKey(slotIndex)
+    return db.cooldownTextColor[key] or {1, 1, 1, 1}  -- Default white
 end
 
 local function SetCooldownTextColor(slotIndex, color)
     local db = GetDB()
-    db.cooldownTextColor[slotIndex] = color
+    local key = GetSettingsKey(slotIndex)
+    db.cooldownTextColor[key] = color
 end
 
 local function GetCountTextColor(slotIndex)
     local db = GetDB()
-    return db.countTextColor[slotIndex] or {1, 1, 1, 1}  -- Default white
+    local key = GetSettingsKey(slotIndex)
+    return db.countTextColor[key] or {1, 1, 1, 1}  -- Default white
 end
 
 local function SetCountTextColor(slotIndex, color)
     local db = GetDB()
-    db.countTextColor[slotIndex] = color
+    local key = GetSettingsKey(slotIndex)
+    db.countTextColor[key] = color
 end
 
 local function GetCooldownTextOffsetX(slotIndex)
     local db = GetDB()
-    return db.cooldownTextOffsetX[slotIndex] or 0
+    local key = GetSettingsKey(slotIndex)
+    return db.cooldownTextOffsetX[key] or 0
 end
 
 local function SetCooldownTextOffsetX(slotIndex, offset)
     local db = GetDB()
-    db.cooldownTextOffsetX[slotIndex] = offset
+    local key = GetSettingsKey(slotIndex)
+    db.cooldownTextOffsetX[key] = offset
 end
 
 local function GetCooldownTextOffsetY(slotIndex)
     local db = GetDB()
-    return db.cooldownTextOffsetY[slotIndex] or 0
+    local key = GetSettingsKey(slotIndex)
+    return db.cooldownTextOffsetY[key] or 0
 end
 
 local function SetCooldownTextOffsetY(slotIndex, offset)
     local db = GetDB()
-    db.cooldownTextOffsetY[slotIndex] = offset
+    local key = GetSettingsKey(slotIndex)
+    db.cooldownTextOffsetY[key] = offset
 end
 
 local function GetCountTextOffsetX(slotIndex)
     local db = GetDB()
-    return db.countTextOffsetX[slotIndex] or 0
+    local key = GetSettingsKey(slotIndex)
+    return db.countTextOffsetX[key] or 0
 end
 
 local function SetCountTextOffsetX(slotIndex, offset)
     local db = GetDB()
-    db.countTextOffsetX[slotIndex] = offset
+    local key = GetSettingsKey(slotIndex)
+    db.countTextOffsetX[key] = offset
 end
 
 local function GetCountTextOffsetY(slotIndex)
     local db = GetDB()
-    return db.countTextOffsetY[slotIndex] or 0
+    local key = GetSettingsKey(slotIndex)
+    return db.countTextOffsetY[key] or 0
 end
 
 local function SetCountTextOffsetY(slotIndex, offset)
     local db = GetDB()
-    db.countTextOffsetY[slotIndex] = offset
+    local key = GetSettingsKey(slotIndex)
+    db.countTextOffsetY[key] = offset
 end
 
 local function GetCooldownTextAnchor(slotIndex)
     local db = GetDB()
-    return db.cooldownTextAnchor[slotIndex] or "CENTER"
+    local key = GetSettingsKey(slotIndex)
+    return db.cooldownTextAnchor[key] or "CENTER"
 end
 
 local function SetCooldownTextAnchor(slotIndex, anchor)
     local db = GetDB()
-    db.cooldownTextAnchor[slotIndex] = anchor
+    local key = GetSettingsKey(slotIndex)
+    db.cooldownTextAnchor[key] = anchor
 end
 
 local function GetCountTextAnchor(slotIndex)
     local db = GetDB()
-    return db.countTextAnchor[slotIndex] or "BOTTOMRIGHT"
+    local key = GetSettingsKey(slotIndex)
+    return db.countTextAnchor[key] or "BOTTOMRIGHT"
 end
 
 local function SetCountTextAnchor(slotIndex, anchor)
     local db = GetDB()
-    db.countTextAnchor[slotIndex] = anchor
+    local key = GetSettingsKey(slotIndex)
+    db.countTextAnchor[key] = anchor
 end
 
--- Custom label functions
+-- Custom label functions - keyed by spellID via GetSettingsKey
 local function GetLabelEnabled(slotIndex)
     local db = GetDB()
-    return db.labelEnabled[slotIndex] == true
+    local key = GetSettingsKey(slotIndex)
+    return db.labelEnabled[key] == true
 end
 
 local function SetLabelEnabled(slotIndex, enabled)
     local db = GetDB()
-    db.labelEnabled[slotIndex] = enabled
+    local key = GetSettingsKey(slotIndex)
+    db.labelEnabled[key] = enabled
 end
 
 local function GetLabelText(slotIndex)
     local db = GetDB()
-    return db.labelText[slotIndex] or ""
+    local key = GetSettingsKey(slotIndex)
+    return db.labelText[key] or ""
 end
 
 local function SetLabelText(slotIndex, text)
     local db = GetDB()
-    db.labelText[slotIndex] = text
+    local key = GetSettingsKey(slotIndex)
+    db.labelText[key] = text
 end
 
 local function GetLabelFontSize(slotIndex)
     local db = GetDB()
-    return db.labelFontSize[slotIndex] or 14
+    local key = GetSettingsKey(slotIndex)
+    return db.labelFontSize[key] or 14
 end
 
 local function SetLabelFontSize(slotIndex, size)
     local db = GetDB()
-    db.labelFontSize[slotIndex] = size
+    local key = GetSettingsKey(slotIndex)
+    db.labelFontSize[key] = size
 end
 
 local function GetLabelColor(slotIndex)
     local db = GetDB()
-    return db.labelColor[slotIndex] or {1, 1, 1, 1}
+    local key = GetSettingsKey(slotIndex)
+    return db.labelColor[key] or {1, 1, 1, 1}
 end
 
 local function SetLabelColor(slotIndex, color)
     local db = GetDB()
-    db.labelColor[slotIndex] = color
+    local key = GetSettingsKey(slotIndex)
+    db.labelColor[key] = color
 end
 
 local function GetLabelOffsetX(slotIndex)
     local db = GetDB()
-    return db.labelOffsetX[slotIndex] or 0
+    local key = GetSettingsKey(slotIndex)
+    return db.labelOffsetX[key] or 0
 end
 
 local function SetLabelOffsetX(slotIndex, offset)
     local db = GetDB()
-    db.labelOffsetX[slotIndex] = offset
+    local key = GetSettingsKey(slotIndex)
+    db.labelOffsetX[key] = offset
 end
 
 local function GetLabelOffsetY(slotIndex)
     local db = GetDB()
-    return db.labelOffsetY[slotIndex] or 0
+    local key = GetSettingsKey(slotIndex)
+    return db.labelOffsetY[key] or 0
 end
 
 local function SetLabelOffsetY(slotIndex, offset)
     local db = GetDB()
-    db.labelOffsetY[slotIndex] = offset
+    local key = GetSettingsKey(slotIndex)
+    db.labelOffsetY[key] = offset
 end
 
 local function GetLabelAnchor(slotIndex)
     local db = GetDB()
-    return db.labelAnchor[slotIndex] or "CENTER"
+    local key = GetSettingsKey(slotIndex)
+    return db.labelAnchor[key] or "CENTER"
 end
 
 local function SetLabelAnchor(slotIndex, anchor)
     local db = GetDB()
-    db.labelAnchor[slotIndex] = anchor
+    local key = GetSettingsKey(slotIndex)
+    db.labelAnchor[key] = anchor
 end
 
--- Per-icon sweep visibility (nil = use tracker default)
+-- Per-icon sweep visibility (nil = use tracker default) - keyed by spellID
 local function GetShowSweep(slotIndex)
     local db = GetDB()
-    return db.showSweep[slotIndex]  -- Returns nil if not set (use tracker default)
+    local key = GetSettingsKey(slotIndex)
+    return db.showSweep[key]  -- Returns nil if not set (use tracker default)
 end
 
 local function SetShowSweep(slotIndex, show)
     local db = GetDB()
-    db.showSweep[slotIndex] = show
+    local key = GetSettingsKey(slotIndex)
+    db.showSweep[key] = show
 end
 
--- Per-icon countdown text visibility (nil = use tracker default)
+-- Per-icon countdown text visibility (nil = use tracker default) - keyed by spellID
 local function GetShowCountdownText(slotIndex)
     local db = GetDB()
-    return db.showCountdownText[slotIndex]  -- Returns nil if not set (use tracker default)
+    local key = GetSettingsKey(slotIndex)
+    return db.showCountdownText[key]  -- Returns nil if not set (use tracker default)
 end
 
 local function SetShowCountdownText(slotIndex, show)
     local db = GetDB()
-    db.showCountdownText[slotIndex] = show
+    local key = GetSettingsKey(slotIndex)
+    db.showCountdownText[key] = show
 end
 
 -- ============================================================================
@@ -673,18 +861,37 @@ local function GetBuffSlotInfo(slotIndex)
         icon = icon,
         isActive = false,
         auraInstanceID = nil,
-        spellID = nil,  -- Static spellID from icon configuration (not runtime data)
+        spellID = nil,  -- Resolved spellID (from Bridge or icon properties)
         texture = nil,
         name = "Buff Slot " .. slotIndex,
     }
     
-    -- Get spellID from source icon's STATIC properties (set at config time, not secrets)
-    pcall(function()
-        info.spellID = icon.spellID or icon.SpellID or icon.spellId
-    end)
+    -- PRIORITY 1: Use BuffIdentityBridge (combat-safe, always non-secret)
+    local Bridge = TUICD.BuffIdentityBridge
+    if Bridge then
+        info.spellID = Bridge:GetSpellIDForSlot(slotIndex)
+        if info.spellID then
+            info.isActive = Bridge:IsBuffActive(info.spellID)
+            info.auraInstanceID = Bridge:GetAuraIDForSpellID(info.spellID)
+            -- Get name from bridge or spell API
+            local bridgeInfo = Bridge:GetBuffInfo(info.spellID)
+            if bridgeInfo and bridgeInfo.name then
+                info.name = bridgeInfo.name
+            elseif GetSpellName then
+                pcall(function() info.name = GetSpellName(info.spellID) or info.name end)
+            end
+        end
+    end
     
-    -- PRIORITY 1: If we have static spellID, query aura API directly (bypasses frame lag)
-    if info.spellID and C_UnitAuras and C_UnitAuras.GetPlayerAuraBySpellID then
+    -- PRIORITY 2: Fallback to icon STATIC properties (may be tainted in combat)
+    if not info.spellID then
+        pcall(function()
+            info.spellID = icon.spellID or icon.SpellID or icon.spellId
+        end)
+    end
+    
+    -- PRIORITY 3: If we have spellID but no Bridge active state, query aura API
+    if not info.isActive and info.spellID and C_UnitAuras and C_UnitAuras.GetPlayerAuraBySpellID then
         pcall(function()
             local auraData = C_UnitAuras.GetPlayerAuraBySpellID(info.spellID)
             if auraData then
@@ -694,7 +901,7 @@ local function GetBuffSlotInfo(slotIndex)
         end)
     end
     
-    -- PRIORITY 2: Fallback to checking auraInstanceID from source icon
+    -- PRIORITY 4: Fallback to checking auraInstanceID from source icon
     if not info.isActive then
         pcall(function()
             info.auraInstanceID = icon.auraInstanceID
@@ -908,6 +1115,24 @@ local function CreateHighlightFrame(slotIndex)
     -- Register with LayoutMode for drag support
     if TUICD.LayoutMode and TUICD.LayoutMode.RegisterPerIconFrame then
         local displayName = "Buff Icon " .. slotIndex
+        -- Try to get actual spell name from bridge
+        local Bridge = TUICD.BuffIdentityBridge
+        if Bridge then
+            local spellID = Bridge:GetSpellIDForSlot(slotIndex)
+            if spellID then
+                local buffInfo = Bridge:GetBuffInfo(spellID)
+                if buffInfo and buffInfo.name then
+                    displayName = buffInfo.name
+                else
+                    pcall(function()
+                        local name = C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(spellID)
+                        if name and not issecretvalue(name) then
+                            displayName = name
+                        end
+                    end)
+                end
+            end
+        end
         TUICD.LayoutMode:RegisterPerIconFrame(frame, "buffs", slotIndex, displayName)
     end
     
@@ -941,11 +1166,12 @@ local function ParseAspectRatio(aspectStr, slotIndex, state)
         return 1, 1
     end
     
-    -- Check for "custom" which uses per-slot custom values
+    -- Check for "custom" which uses per-slot custom values (keyed by spellID)
     if aspectStr == "custom" and slotIndex and state then
         local db = GetDB()
-        local customW = db[state].customAspectW[slotIndex] or 1
-        local customH = db[state].customAspectH[slotIndex] or 1
+        local key = GetSettingsKey(slotIndex)
+        local customW = db[state].customAspectW[key] or 1
+        local customH = db[state].customAspectH[key] or 1
         return customW, customH
     end
     
@@ -999,6 +1225,436 @@ local function ApplyAspectRatio(frame, size, aspectStr, slotIndex, state)
     end
 end
 
+-- ============================================================================
+-- BUFF STATE ALERTS  (On Gained / On Expiring)
+-- Fires glow and/or pulse effects at buff state transitions.
+-- "On Start"  = buff gained   (inactive → active)
+-- "On End"    = buff expiring (active → inactive)
+-- ============================================================================
+
+local BUFF_TRACKER_KEY = "buffs"
+
+local function GetBuffAlertSetting(key)
+    if not TUICD.Database then return nil end
+    return TUICD.Database:GetTrackerSetting(BUFF_TRACKER_KEY, key)
+end
+
+-- Try to read remaining seconds for a buff (for pre-expiry warnings).
+-- Returns nil when the value is secret or unavailable.
+local function GetBuffRemainingSeconds(auraInstanceID)
+    if not auraInstanceID then return nil end
+    -- Method 1: DurationObject (Midnight primary)
+    if C_UnitAuras and C_UnitAuras.GetUnitAuraDuration then
+        local ok, dObj = pcall(C_UnitAuras.GetUnitAuraDuration, "player", auraInstanceID)
+        if ok and dObj and dObj.GetRemainingDuration then
+            local ok2, rem = pcall(dObj.GetRemainingDuration, dObj)
+            if ok2 and rem then
+                if issecretvalue and issecretvalue(rem) then return nil end
+                if type(rem) == "number" and rem > 0 then return rem end
+            end
+        end
+    end
+    -- Method 2: AuraData fallback
+    if C_UnitAuras and C_UnitAuras.GetAuraDataByAuraInstanceID then
+        local ok, ad = pcall(C_UnitAuras.GetAuraDataByAuraInstanceID, "player", auraInstanceID)
+        if ok and ad then
+            local exp = ad.expirationTime
+            if exp and type(exp) == "number" then
+                if issecretvalue and issecretvalue(exp) then return nil end
+                local rem = exp - GetTime()
+                if rem > 0 then return rem end
+            end
+        end
+    end
+    return nil
+end
+
+-- Create a getSetting closure for per-icon alerts keyed by spellID.
+-- Returns a function(key) that reads from iconAlerts[spellID][key].
+-- Compatible with PlayAlertGlow/PlayAlertPulse which expect getSetting(prefix..key).
+local function MakePerIconAlertGetter(spellID)
+    return function(key)
+        return BuffHighlights:GetIconAlertSetting(spellID, key)
+    end
+end
+
+-- Check if a spellID has any per-icon alerts enabled (quick bail-out).
+local function HasAnyPerIconAlert(spellID)
+    if not spellID then return false end
+    local db = GetDB()
+    if not db.iconAlerts then return false end
+    local entry = db.iconAlerts[spellID]
+    if not entry then return false end
+    return entry["onStartGlowEnabled"] or entry["onStartPulseEnabled"]
+        or entry["onEndGlowEnabled"] or entry["onEndPulseEnabled"]
+        or false
+end
+
+-- ---------------------------------------------------------------------------
+-- Alert glow frames  (lazily created, shared across On Start / On End)
+-- These are SEPARATE from the proc-glow frames (frame.glowFrame).
+-- ---------------------------------------------------------------------------
+
+local function HideAlertGlows(frame)
+    if frame._alertHideTimer then frame._alertHideTimer:Cancel(); frame._alertHideTimer = nil end
+    frame._alertKeepAlive = nil
+    if frame._alertPixelGlow then
+        if frame._alertPixelGlow._pulseAG then frame._alertPixelGlow._pulseAG:Stop() end
+        frame._alertPixelGlow:Hide()
+    end
+    if frame._alertShineGlow then
+        if frame._alertShineGlow._pulseAG then frame._alertShineGlow._pulseAG:Stop() end
+        frame._alertShineGlow:Hide()
+    end
+    if frame._alertSpellGlow then
+        if frame._alertSpellGlow._pulseAG then frame._alertSpellGlow._pulseAG:Stop() end
+        if frame._alertSpellGlow._antsAG then frame._alertSpellGlow._antsAG:Stop() end
+        frame._alertSpellGlow:Hide()
+    end
+end
+
+local function CancelAlertTimers(frame)
+    local keys = {
+        "_onStartGlowTimer", "_onStartPulseTimer",
+        "_onEndGlowTimer",   "_onEndPulseTimer",
+    }
+    for _, k in ipairs(keys) do
+        if frame[k] then frame[k]:Cancel(); frame[k] = nil end
+    end
+end
+
+-- Play alert glow effect.  `prefix` is "onStart" or "onEnd".
+local function PlayAlertGlow(frame, prefix, getSetting)
+    if not frame then return end
+    getSetting = getSetting or GetBuffAlertSetting
+    local style     = getSetting(prefix .. "GlowStyle")     or "pixel"
+    local r         = getSetting(prefix .. "GlowColorR")    or 1.0
+    local g         = getSetting(prefix .. "GlowColorG")    or 0.82
+    local b         = getSetting(prefix .. "GlowColorB")    or 0.0
+    local speed     = getSetting(prefix .. "GlowSpeed")     or 0.6
+    local intensity = getSetting(prefix .. "GlowIntensity") or 0.8
+    local thickness = getSetting(prefix .. "GlowThickness") or 2
+    local glowScale = getSetting(prefix .. "GlowScale")     or 1.0
+    local duration  = getSetting(prefix .. "GlowDuration")  or 3.0
+
+    HideAlertGlows(frame)
+
+    if style == "pixel" then
+        -- Pixel border ---------------------------------------------------
+        if not frame._alertPixelGlow then
+            local gf = CreateFrame("Frame", nil, frame, "BackdropTemplate")
+            gf:SetFrameLevel(frame:GetFrameLevel() + 6)
+            local ag = gf:CreateAnimationGroup()
+            ag:SetLooping("BOUNCE")
+            local alpha = ag:CreateAnimation("Alpha")
+            alpha:SetSmoothing("IN_OUT")
+            gf._pulseAG    = ag
+            gf._pulseAlpha = alpha
+            frame._alertPixelGlow = gf
+        end
+        local gf = frame._alertPixelGlow
+        local t = math.max(1, math.floor(thickness))
+        gf:ClearAllPoints()
+        gf:SetPoint("TOPLEFT", -t, t)
+        gf:SetPoint("BOTTOMRIGHT", t, -t)
+        gf:SetBackdrop({ edgeFile = "Interface\\Buttons\\WHITE8x8", edgeSize = t })
+        gf:SetBackdropBorderColor(r, g, b, intensity)
+        gf._pulseAlpha:SetFromAlpha(intensity)
+        gf._pulseAlpha:SetToAlpha(math.max(0.05, intensity * 0.2))
+        gf._pulseAlpha:SetDuration(speed)
+        gf:Show()
+        gf._pulseAG:Play()
+
+    elseif style == "shine" then
+        -- Shine flash -----------------------------------------------------
+        if not frame._alertShineGlow then
+            local sh = frame:CreateTexture(nil, "OVERLAY")
+            sh:SetAllPoints()
+            sh:SetBlendMode("ADD")
+            sh:SetDrawLayer("OVERLAY", 6)
+            local ag = sh:CreateAnimationGroup()
+            ag:SetLooping("BOUNCE")
+            local alpha = ag:CreateAnimation("Alpha")
+            alpha:SetSmoothing("IN_OUT")
+            sh._pulseAG    = ag
+            sh._pulseAlpha = alpha
+            frame._alertShineGlow = sh
+        end
+        local sh = frame._alertShineGlow
+        sh:SetColorTexture(r, g, b, intensity)
+        sh._pulseAlpha:SetFromAlpha(intensity)
+        sh._pulseAlpha:SetToAlpha(math.max(0.02, intensity * 0.1))
+        sh._pulseAlpha:SetDuration(speed)
+        sh:Show()
+        sh._pulseAG:Play()
+
+    else  -- "glow" (SpellActivation style)
+        if not frame._alertSpellGlow then
+            local glow = CreateFrame("Frame", nil, frame)
+            glow:SetFrameLevel(frame:GetFrameLevel() + 6)
+            local inner = glow:CreateTexture(nil, "ARTWORK")
+            inner:SetTexture("Interface\\SpellActivationOverlay\\IconAlert")
+            inner:SetTexCoord(0.00781250, 0.50781250, 0.27734375, 0.52734375)
+            inner:SetBlendMode("ADD")
+            inner:SetDrawLayer("ARTWORK", 1)
+            glow._inner = inner
+            local outer = glow:CreateTexture(nil, "ARTWORK")
+            outer:SetTexture("Interface\\SpellActivationOverlay\\IconAlert")
+            outer:SetTexCoord(0.00781250, 0.50781250, 0.53515625, 0.78515625)
+            outer:SetBlendMode("ADD")
+            outer:SetDrawLayer("ARTWORK", 0)
+            glow._outer = outer
+            local ants = glow:CreateTexture(nil, "OVERLAY")
+            ants:SetTexture("Interface\\SpellActivationOverlay\\IconAlertAnts")
+            ants:SetBlendMode("ADD")
+            ants:SetDrawLayer("OVERLAY", 5)
+            glow._ants = ants
+            local antsAG = ants:CreateAnimationGroup()
+            antsAG:SetLooping("REPEAT")
+            local rot = antsAG:CreateAnimation("Rotation")
+            rot:SetDegrees(-360)
+            rot:SetDuration(12)
+            glow._antsAG = antsAG
+            local pulseAG = glow:CreateAnimationGroup()
+            pulseAG:SetLooping("BOUNCE")
+            local alpha = pulseAG:CreateAnimation("Alpha")
+            alpha:SetFromAlpha(1)
+            alpha:SetToAlpha(0.5)
+            alpha:SetSmoothing("IN_OUT")
+            glow._pulseAG    = pulseAG
+            glow._pulseAlpha = alpha
+            frame._alertSpellGlow = glow
+        end
+        local glow = frame._alertSpellGlow
+        local scale = glowScale or 1.0
+        local w, h = frame:GetSize()
+        local pad = (w * 0.4) * scale
+        glow:ClearAllPoints()
+        glow:SetPoint("TOPLEFT",     frame, "TOPLEFT",     -pad,  pad)
+        glow:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT",  pad, -pad)
+        glow._inner:SetAllPoints(glow)
+        glow._outer:SetAllPoints(glow)
+        glow._ants:SetAllPoints(glow)
+        glow._inner:SetVertexColor(r, g, b, 1)
+        glow._outer:SetVertexColor(r, g, b, 0.6)
+        glow._ants:SetVertexColor(r, g, b, 0.7)
+        glow._pulseAlpha:SetDuration(speed)
+        glow:Show()
+        glow._antsAG:Play()
+        glow._pulseAG:Play()
+    end
+
+    -- Auto-hide after duration
+    frame._alertHideTimer = C_Timer.NewTimer(duration, function()
+        frame._alertHideTimer = nil
+        HideAlertGlows(frame)
+    end)
+end
+
+-- Play alert pulse effect.  `prefix` is "onStart" or "onEnd".
+local function PlayAlertPulse(frame, prefix, getSetting)
+    if not frame then return end
+    getSetting = getSetting or GetBuffAlertSetting
+    local pulseScale    = getSetting(prefix .. "PulseScale")    or 1.3
+    local pulseDuration = getSetting(prefix .. "PulseDuration") or 0.4
+    local pulseCount    = getSetting(prefix .. "PulseCount")    or 3
+
+    -- Use existing pulse animation group or create one
+    if not frame._alertPulseAG then
+        local ag = frame:CreateAnimationGroup()
+        local grow = ag:CreateAnimation("Scale")
+        grow:SetOrder(1)
+        grow:SetSmoothing("IN_OUT")
+        local shrink = ag:CreateAnimation("Scale")
+        shrink:SetOrder(2)
+        shrink:SetSmoothing("IN_OUT")
+        ag._grow   = grow
+        ag._shrink = shrink
+        frame._alertPulseAG = ag
+    end
+
+    local ag = frame._alertPulseAG
+    ag:Stop()
+
+    ag._grow:SetScaleFrom(1, 1)
+    ag._grow:SetScaleTo(pulseScale, pulseScale)
+    ag._grow:SetDuration(pulseDuration / 2)
+
+    ag._shrink:SetScaleFrom(pulseScale, pulseScale)
+    ag._shrink:SetScaleTo(1, 1)
+    ag._shrink:SetDuration(pulseDuration / 2)
+
+    local played = 0
+    ag:SetScript("OnFinished", function(self)
+        played = played + 1
+        if played < pulseCount then
+            self:Play()
+        end
+    end)
+    ag:Play()
+end
+
+-- ---------------------------------------------------------------------------
+-- Scheduling helpers  (mirrors MultiTrackerFrames pattern)
+-- ---------------------------------------------------------------------------
+
+local function ScheduleAlertGlow(frame, prefix, timing, remaining, timerKey, getSetting)
+    if frame[timerKey] then frame[timerKey]:Cancel(); frame[timerKey] = nil end
+
+    if timing < 0 and remaining then
+        -- Negative: fire |timing| seconds before the event
+        local delay = remaining + timing  -- e.g. 30 + (-5) = 25s
+        if delay <= 0 then
+            PlayAlertGlow(frame, prefix, getSetting)
+        else
+            frame[timerKey] = C_Timer.NewTimer(delay, function()
+                frame[timerKey] = nil
+                PlayAlertGlow(frame, prefix, getSetting)
+            end)
+        end
+    elseif timing == 0 then
+        PlayAlertGlow(frame, prefix, getSetting)
+    else
+        -- Positive: fire timing seconds after the event
+        frame[timerKey] = C_Timer.NewTimer(timing, function()
+            frame[timerKey] = nil
+            PlayAlertGlow(frame, prefix, getSetting)
+        end)
+    end
+end
+
+local function ScheduleAlertPulse(frame, prefix, timing, remaining, timerKey, getSetting)
+    if frame[timerKey] then frame[timerKey]:Cancel(); frame[timerKey] = nil end
+
+    if timing < 0 and remaining then
+        local delay = remaining + timing
+        if delay <= 0 then
+            PlayAlertPulse(frame, prefix, getSetting)
+        else
+            frame[timerKey] = C_Timer.NewTimer(delay, function()
+                frame[timerKey] = nil
+                PlayAlertPulse(frame, prefix, getSetting)
+            end)
+        end
+    elseif timing == 0 then
+        PlayAlertPulse(frame, prefix, getSetting)
+    else
+        frame[timerKey] = C_Timer.NewTimer(timing, function()
+            frame[timerKey] = nil
+            PlayAlertPulse(frame, prefix, getSetting)
+        end)
+    end
+end
+
+-- ---------------------------------------------------------------------------
+-- Transition handlers
+-- ---------------------------------------------------------------------------
+
+-- Called when a buff is GAINED (inactive → active)
+-- getSetting: function(key) returning setting value (allows tracker-level or per-icon)
+local function OnBuffGained(frame, slotIndex, auraInstanceID, getSetting)
+    getSetting = getSetting or GetBuffAlertSetting
+    CancelAlertTimers(frame)
+    HideAlertGlows(frame)
+
+    -- ── On Start effects ──
+    if getSetting("onStartGlowEnabled") then
+        local timing = getSetting("onStartGlowTiming") or 0
+        -- For On Start, negative timing doesn't apply (can't predict gain).
+        -- Clamp to 0 minimum.
+        if timing < 0 then timing = 0 end
+        ScheduleAlertGlow(frame, "onStart", timing, nil, "_onStartGlowTimer", getSetting)
+    end
+    if getSetting("onStartPulseEnabled") then
+        local timing = getSetting("onStartPulseTiming") or 0
+        if timing < 0 then timing = 0 end
+        ScheduleAlertPulse(frame, "onStart", timing, nil, "_onStartPulseTimer", getSetting)
+    end
+
+    -- ── On End effects with NEGATIVE timing (early warning before expiry) ──
+    -- Schedule now using remaining duration so timer fires before buff drops.
+    local remaining = GetBuffRemainingSeconds(auraInstanceID)
+    if remaining and remaining > 0 then
+        if getSetting("onEndGlowEnabled") then
+            local timing = getSetting("onEndGlowTiming") or 0
+            if timing < 0 then
+                ScheduleAlertGlow(frame, "onEnd", timing, remaining, "_onEndGlowTimer", getSetting)
+            end
+        end
+        if getSetting("onEndPulseEnabled") then
+            local timing = getSetting("onEndPulseTiming") or 0
+            if timing < 0 then
+                ScheduleAlertPulse(frame, "onEnd", timing, remaining, "_onEndPulseTimer", getSetting)
+            end
+        end
+    end
+end
+
+-- Called when a buff is LOST (active → inactive)
+local function OnBuffLost(frame, slotIndex, getSetting)
+    getSetting = getSetting or GetBuffAlertSetting
+    -- Cancel any pending early-warning timers (they're no longer relevant)
+    if frame._onEndGlowTimer then frame._onEndGlowTimer:Cancel(); frame._onEndGlowTimer = nil end
+    if frame._onEndPulseTimer then frame._onEndPulseTimer:Cancel(); frame._onEndPulseTimer = nil end
+
+    -- ── On End effects ──
+    -- Always fire when the buff actually drops:
+    --   timing >= 0: fire with that delay (0 = immediate, positive = delayed)
+    --   timing < 0:  early-warning window has passed, fire immediately as fallback
+    --                (the early-warning timer from OnBuffGained may or may not have fired)
+    local hasOnEnd = false
+    local maxDuration = 0
+    if getSetting("onEndGlowEnabled") then
+        hasOnEnd = true
+        local timing = getSetting("onEndGlowTiming") or 0
+        local effectiveDelay = math.max(timing, 0)
+        local dur = (getSetting("onEndGlowDuration") or 3.0) + effectiveDelay
+        if dur > maxDuration then maxDuration = dur end
+        ScheduleAlertGlow(frame, "onEnd", effectiveDelay, nil, "_onEndGlowTimer", getSetting)
+    end
+    if getSetting("onEndPulseEnabled") then
+        hasOnEnd = true
+        local timing = getSetting("onEndPulseTiming") or 0
+        local effectiveDelay = math.max(timing, 0)
+        local pulseDur = (getSetting("onEndPulseDuration") or 0.4) * (getSetting("onEndPulseCount") or 3) + effectiveDelay
+        if pulseDur > maxDuration then maxDuration = pulseDur end
+        ScheduleAlertPulse(frame, "onEnd", effectiveDelay, nil, "_onEndPulseTimer", getSetting)
+    end
+    -- Keep the frame alive so On End effects are visible even if inactive state is hidden
+    if hasOnEnd and maxDuration > 0 then
+        frame._alertKeepAlive = GetTime() + maxDuration + 0.1
+    end
+end
+
+-- ---------------------------------------------------------------------------
+-- Exposed alert API  (for Cooldowns.lua to fire tracker-level alerts on main icons)
+-- ---------------------------------------------------------------------------
+
+-- Fire tracker-level buff gained alert on any frame (reads tracker settings)
+function BuffHighlights:FireTrackerAlertGained(frame, auraInstanceID)
+    if not frame then return end
+    pcall(OnBuffGained, frame, nil, auraInstanceID, GetBuffAlertSetting)
+end
+
+-- Fire tracker-level buff lost alert on any frame (reads tracker settings)
+function BuffHighlights:FireTrackerAlertLost(frame)
+    if not frame then return end
+    pcall(OnBuffLost, frame, nil, GetBuffAlertSetting)
+end
+
+-- Cleanup helpers (exposed for external callers)
+function BuffHighlights:HideFrameAlertGlows(frame)
+    if frame then HideAlertGlows(frame) end
+end
+
+function BuffHighlights:CancelFrameAlertTimers(frame)
+    if frame then CancelAlertTimers(frame) end
+end
+
+-- ============================================================================
+-- END BUFF STATE ALERTS
+-- ============================================================================
+
 local function UpdateHighlightFrame(slotIndex)
     local frame = highlightFrames[slotIndex]
     if not frame then return end
@@ -1034,6 +1690,9 @@ local function UpdateHighlightFrame(slotIndex)
     end
     
     if not IsHighlightEnabled(slotIndex) then
+        CancelAlertTimers(frame)
+        HideAlertGlows(frame)
+        frame._alertLastActive = nil
         frame:Hide()
         return
     end
@@ -1065,24 +1724,35 @@ local function UpdateHighlightFrame(slotIndex)
         isLayoutMode = true
     end
     
-    -- Get texture from source or cache
-    local cachedTex = cachedTextures[slotIndex]
+    -- Get texture from source or cache (keyed by spellID via settings key)
+    local settingsKey = GetSettingsKey(slotIndex)
+    local cachedTex = cachedTextures[settingsKey]
     if sourceIcon and not cachedTex then
         local textureObj = sourceIcon.Icon or sourceIcon.icon
         if textureObj then
             pcall(function()
                 cachedTex = textureObj:GetTexture()
                 if cachedTex then
-                    cachedTextures[slotIndex] = cachedTex
+                    cachedTextures[settingsKey] = cachedTex
                 end
             end)
         end
     end
     
-    -- Determine if buff is active by checking source icon's auraInstanceID
+    -- Determine if buff is active
+    -- PRIORITY 1: Use BuffIdentityBridge (combat-safe, always non-secret)
     local isActive = false
     local auraInstanceID = nil
-    if sourceIcon then
+    local Bridge = TUICD.BuffIdentityBridge
+    if Bridge then
+        local spellID = Bridge:GetSpellIDForSlot(slotIndex)
+        if spellID then
+            isActive = Bridge:IsBuffActive(spellID)
+            auraInstanceID = Bridge:GetAuraIDForSpellID(spellID)
+        end
+    end
+    -- PRIORITY 2: Fallback to source icon's auraInstanceID (pre-bridge behavior)
+    if not isActive and not Bridge and sourceIcon then
         pcall(function()
             auraInstanceID = sourceIcon.auraInstanceID
             isActive = (auraInstanceID ~= nil)
@@ -1122,6 +1792,35 @@ local function UpdateHighlightFrame(slotIndex)
     local currentState = isActive and "active" or "inactive"
     local showThisState = GetShowState(slotIndex, currentState)
     
+    -- =========================================================================
+    -- PER-ICON ALERT TRANSITION DETECTION (Phase 3)
+    -- Tracker-level alerts fire on main tracker icons via Cooldowns.lua.
+    -- Per-icon alerts fire here on highlight frames using iconAlerts[spellID].
+    -- =========================================================================
+    local wasActive = frame._alertLastActive
+    frame._alertLastActive = isActive
+    
+    -- Only fire on actual transitions (wasActive must be non-nil to avoid
+    -- first-load false triggers).  Skip during layout mode.
+    if wasActive ~= nil and wasActive ~= isActive and not isLayoutMode then
+        -- Get spellID from bridge (per-icon alerts are keyed by spellID)
+        local alertSpellID = nil
+        if Bridge then
+            alertSpellID = Bridge:GetSpellIDForSlot(slotIndex)
+        end
+        
+        if alertSpellID and HasAnyPerIconAlert(alertSpellID) then
+            local getter = MakePerIconAlertGetter(alertSpellID)
+            if isActive then
+                -- inactive → active = buff gained
+                pcall(OnBuffGained, frame, slotIndex, auraInstanceID, getter)
+            else
+                -- active → inactive = buff lost
+                pcall(OnBuffLost, frame, slotIndex, getter)
+            end
+        end
+    end
+    
     -- During layout mode, always show (using active state settings)
     if isLayoutMode then
         local size = GetHighlightSize(slotIndex, "active")
@@ -1154,8 +1853,27 @@ local function UpdateHighlightFrame(slotIndex)
     end
     
     -- Normal mode: only show if this state is enabled
+    -- Exception: keep frame alive if On End alerts are still playing
     if not showThisState then
-        frame:Hide()
+        local keepAlive = frame._alertKeepAlive and (GetTime() < frame._alertKeepAlive)
+        if not keepAlive then
+            frame._alertKeepAlive = nil
+            frame:Hide()
+            return
+        end
+        -- On End alert active: keep frame visible with inactive appearance
+        -- (use active state size so the glow has something to attach to)
+        local size = GetHighlightSize(slotIndex, "active")
+        local aspectRatio = GetHighlightAspectRatio(slotIndex, "active")
+        ApplyAspectRatio(frame, size, aspectRatio, slotIndex, "active")
+        if displayTex then
+            frame.icon:SetTexture(displayTex)
+        end
+        frame.icon:SetDesaturated(true)
+        frame:SetAlpha(0.6)
+        frame.count:Hide()
+        frame.cooldown:Clear()
+        frame:Show()
         return
     end
     
@@ -1305,14 +2023,18 @@ local function UpdateHighlightFrame(slotIndex)
     
     -- First, check if per-icon proc glow is enabled (default true)
     local db = GetDB()
-    local procGlowEnabled = db.showProcGlow and db.showProcGlow[slotIndex]
+    local procGlowKey = GetSettingsKey(slotIndex)
+    local procGlowEnabled = db.showProcGlow and db.showProcGlow[procGlowKey]
     if procGlowEnabled == nil then procGlowEnabled = true end
     
     if procGlowEnabled then
         -- Method 1: Direct API check using IsSpellOverlayed (most reliable)
-        -- Get spellID from source icon
+        -- Get spellID from Bridge (combat-safe) or source icon (fallback)
         local spellID = nil
-        if sourceIcon then
+        if Bridge then
+            spellID = Bridge:GetSpellIDForSlot(slotIndex)
+        end
+        if not spellID and sourceIcon then
             pcall(function()
                 spellID = sourceIcon.spellID or sourceIcon.SpellID or sourceIcon.spellId
             end)
@@ -1470,8 +2192,10 @@ end
 
 local function UpdateAllHighlights()
     local db = GetDB()
-    for slotIndex, enabled in pairs(db.enabled) do
-        if enabled then
+    -- Iterate by slot position (frame space), not by db keys (which are spellIDs after migration)
+    local slotCount = GetBuffSlotCount()
+    for slotIndex = 1, math.max(slotCount, 20) do
+        if IsHighlightEnabled(slotIndex) then
             -- Ensure frame exists
             if not highlightFrames[slotIndex] then
                 pcall(CreateHighlightFrame, slotIndex)
@@ -1718,12 +2442,11 @@ local function RegisterAllWithLayout()
         return
     end
     
-    local db = GetDB()
-    for slotIndex, enabled in pairs(db.enabled) do
-        if enabled and highlightFrames[slotIndex] then
+    ForEachEnabledHighlight(function(slotIndex)
+        if highlightFrames[slotIndex] then
             RegisterWithLayout(slotIndex)
         end
-    end
+    end)
 end
 
 -- ============================================================================
@@ -1763,6 +2486,7 @@ end
 
 function BuffHighlights:EnableHighlight(slotIndex, enabled)
     SetHighlightEnabled(slotIndex, enabled)
+    local settingsKey = GetSettingsKey(slotIndex)
     
     if enabled then
         -- Capture texture from Blizzard's icon NOW (static, won't change)
@@ -1774,8 +2498,8 @@ function BuffHighlights:EnableHighlight(slotIndex, enabled)
                 pcall(function()
                     local tex = textureObj:GetTexture()
                     if tex then
-                        cachedTextures[slotIndex] = tex
-                        dprint("Captured texture for slot", slotIndex, ":", tex)
+                        cachedTextures[settingsKey] = tex
+                        dprint("Captured texture for slot", slotIndex, "(key:", settingsKey, "):", tex)
                     end
                 end)
             end
@@ -1783,13 +2507,13 @@ function BuffHighlights:EnableHighlight(slotIndex, enabled)
         
         local frame = CreateHighlightFrame(slotIndex)
         
-        -- Set default show states if not set
+        -- Set default show states if not set (use spellID key)
         local db = GetDB()
-        if db.active.show[slotIndex] == nil then
-            db.active.show[slotIndex] = true
+        if db.active.show[settingsKey] == nil then
+            db.active.show[settingsKey] = true
         end
-        if db.inactive.show[slotIndex] == nil then
-            db.inactive.show[slotIndex] = false
+        if db.inactive.show[settingsKey] == nil then
+            db.inactive.show[settingsKey] = false
         end
         
         -- Show frame immediately so user can see it
@@ -1820,8 +2544,8 @@ function BuffHighlights:EnableHighlight(slotIndex, enabled)
         if highlightFrames[slotIndex] then
             highlightFrames[slotIndex]:Hide()
         end
-        -- Clear cached texture
-        cachedTextures[slotIndex] = nil
+        -- Clear cached texture (by settings key)
+        cachedTextures[settingsKey] = nil
         UnregisterFromLayout(slotIndex)
     end
 end
@@ -1862,17 +2586,19 @@ function BuffHighlights:GetSaturation(slotIndex, state)
     return GetHighlightSaturation(slotIndex, state)
 end
 
--- Proc glow API
+-- Proc glow API - keyed by spellID
 function BuffHighlights:SetShowProcGlow(slotIndex, show)
     local db = GetDB()
+    local key = GetSettingsKey(slotIndex)
     db.showProcGlow = db.showProcGlow or {}
-    db.showProcGlow[slotIndex] = show
+    db.showProcGlow[key] = show
     UpdateHighlightFrame(slotIndex)
 end
 
 function BuffHighlights:GetShowProcGlow(slotIndex)
     local db = GetDB()
-    return db.showProcGlow and db.showProcGlow[slotIndex]  -- Returns nil if not set (default true)
+    local key = GetSettingsKey(slotIndex)
+    return db.showProcGlow and db.showProcGlow[key]  -- Returns nil if not set (default true)
 end
 
 function BuffHighlights:SetAspectRatio(slotIndex, state, ratio)
@@ -1886,15 +2612,17 @@ end
 
 function BuffHighlights:SetCustomAspectRatio(slotIndex, state, width, height)
     local db = GetDB()
-    db[state].customAspectW[slotIndex] = width or 1
-    db[state].customAspectH[slotIndex] = height or 1
+    local key = GetSettingsKey(slotIndex)
+    db[state].customAspectW[key] = width or 1
+    db[state].customAspectH[key] = height or 1
     SetHighlightAspectRatio(slotIndex, state, "custom")
     UpdateHighlightFrame(slotIndex)
 end
 
 function BuffHighlights:GetCustomAspectRatio(slotIndex, state)
     local db = GetDB()
-    return db[state].customAspectW[slotIndex] or 1, db[state].customAspectH[slotIndex] or 1
+    local key = GetSettingsKey(slotIndex)
+    return db[state].customAspectW[key] or 1, db[state].customAspectH[key] or 1
 end
 
 -- Text scale API
@@ -2213,6 +2941,24 @@ function BuffHighlights:SetDockAssignment(slotIndex, dockIndex)
     UpdateHighlightFrame(slotIndex)
 end
 
+-- Per-icon alert settings
+function BuffHighlights:GetIconAlertSetting(spellID, key)
+    if not spellID then return nil end
+    local db = GetDB()
+    if not db.iconAlerts then return nil end
+    local entry = db.iconAlerts[spellID]
+    if entry then return entry[key] end
+    return nil
+end
+
+function BuffHighlights:SetIconAlertSetting(spellID, key, value)
+    if not spellID then return end
+    local db = GetDB()
+    if not db.iconAlerts then db.iconAlerts = {} end
+    if not db.iconAlerts[spellID] then db.iconAlerts[spellID] = {} end
+    db.iconAlerts[spellID][key] = value
+end
+
 function BuffHighlights:GetSlotCount()
     return GetBuffSlotCount()
 end
@@ -2351,19 +3097,15 @@ function BuffHighlights:Initialize()
     -- This must happen BEFORE Blizzard updates the cooldowns
     self:SetupCooldownHooks()
     
-    -- Create frames for any enabled highlights
+    -- Create frames for any enabled highlights (resolve spellID keys to slot indices)
     local db = GetDB()
-    for slotIndex, enabled in pairs(db.enabled) do
-        if enabled then
-            CreateHighlightFrame(slotIndex)
-        end
-    end
+    local hasEnabled = false
+    ForEachEnabledHighlight(function(slotIndex)
+        CreateHighlightFrame(slotIndex)
+        hasEnabled = true
+    end)
     
     -- Start update ticker if we have any enabled
-    local hasEnabled = false
-    for _, enabled in pairs(db.enabled) do
-        if enabled then hasEnabled = true break end
-    end
     if hasEnabled then
         StartUpdateTicker()
     end
@@ -2378,10 +3120,18 @@ function BuffHighlights:Initialize()
         local assignmentDb = GetDB()
         if not assignmentDb.dockAssignment then return end
         
-        for slotIndex, dockIndex in pairs(assignmentDb.dockAssignment) do
-            if dockIndex and highlightFrames[slotIndex] then
-                dprint("Restoring dock assignment for buff slot", slotIndex, "-> dock", dockIndex)
-                TUICD.Docks:AssignIcon(dockIndex, "buffs", slotIndex)
+        local Bridge = TUICD.BuffIdentityBridge
+        for settingsKey, dockIndex in pairs(assignmentDb.dockAssignment) do
+            if dockIndex then
+                -- Settings keys are spellIDs after migration; resolve to current slot
+                local resolvedSlot = settingsKey
+                if IsSpellIDKey(settingsKey) and Bridge then
+                    resolvedSlot = Bridge:GetSlotForSpellID(settingsKey)
+                end
+                if resolvedSlot and highlightFrames[resolvedSlot] then
+                    dprint("Restoring dock assignment for buff key", settingsKey, "slot", resolvedSlot, "-> dock", dockIndex)
+                    TUICD.Docks:AssignIcon(dockIndex, "buffs", resolvedSlot)
+                end
             end
         end
     end
@@ -2774,8 +3524,9 @@ SlashCmdList["TUIBUFFHIGHLIGHTS"] = function(msg)
             end
             print("  texture: " .. tostring(tex))
             
-            local cachedTex = cachedTextures[slotIndex]
-            print("  cached texture: " .. tostring(cachedTex))
+            local debugKey = GetSettingsKey(slotIndex)
+            local cachedTex = cachedTextures[debugKey]
+            print("  cached texture: " .. tostring(cachedTex) .. " (key: " .. tostring(debugKey) .. ")")
         end
         
         local currentState = (sourceIcon and sourceIcon.auraInstanceID) and "active" or "inactive"

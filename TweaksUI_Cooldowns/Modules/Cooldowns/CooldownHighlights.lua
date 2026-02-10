@@ -1138,6 +1138,282 @@ local function FireReappearanceEffects(frame, triggerEvent, trackerKey, slotInde
     end
 end
 
+-- ============================================================================
+-- PER-ICON ALERTS  (independent from dock reappearance effects above)
+-- DB keys use dot-separated format: "onReady.glowEnabled", "onCooldown.pulseScale", etc.
+-- Frame keys use _piAlert prefix to avoid collision with _TUI_ reappearance keys.
+-- ============================================================================
+
+-- Read a per-icon alert property.  prefix = "onReady" or "onCooldown", prop = "glowEnabled" etc.
+local function GetCDPerIconAlert(trackerKey, slotIndex, prefix, prop)
+    return CooldownHighlights:GetIconAlertSetting(trackerKey, slotIndex, prefix .. "." .. prop)
+end
+
+-- Quick bail-out: does this slot have any per-icon alerts for the given event?
+local function HasCDPerIconAlert(trackerKey, slotIndex, prefix)
+    return GetCDPerIconAlert(trackerKey, slotIndex, prefix, "glowEnabled")
+        or GetCDPerIconAlert(trackerKey, slotIndex, prefix, "pulseEnabled")
+        or false
+end
+
+-- Hide per-icon alert glows on a frame
+local function HidePerIconAlertGlows(frame)
+    if frame._piAlertHideTimer then frame._piAlertHideTimer:Cancel(); frame._piAlertHideTimer = nil end
+    if frame._piAlertPixelGlow then
+        if frame._piAlertPixelGlow._pulseAG then frame._piAlertPixelGlow._pulseAG:Stop() end
+        frame._piAlertPixelGlow:Hide()
+    end
+    if frame._piAlertShineGlow then
+        if frame._piAlertShineGlow._pulseAG then frame._piAlertShineGlow._pulseAG:Stop() end
+        frame._piAlertShineGlow:Hide()
+    end
+    if frame._piAlertSpellGlow then
+        if frame._piAlertSpellGlow._pulseAG then frame._piAlertSpellGlow._pulseAG:Stop() end
+        if frame._piAlertSpellGlow._antsAG then frame._piAlertSpellGlow._antsAG:Stop() end
+        frame._piAlertSpellGlow:Hide()
+    end
+end
+
+-- Cancel scheduled per-icon alert timers
+local function CancelPerIconAlertTimers(frame)
+    for _, key in ipairs({
+        "_piAlertGlowTimer", "_piAlertPulseTimer",
+    }) do
+        if frame[key] then frame[key]:Cancel(); frame[key] = nil end
+    end
+end
+
+-- Play a per-icon alert glow on a highlight frame
+local function PlayPerIconAlertGlow(frame, trackerKey, slotIndex, prefix)
+    if not frame then return end
+    local style     = GetCDPerIconAlert(trackerKey, slotIndex, prefix, "glowStyle")     or "pixel"
+    local r         = GetCDPerIconAlert(trackerKey, slotIndex, prefix, "glowColorR")    or 1.0
+    local g         = GetCDPerIconAlert(trackerKey, slotIndex, prefix, "glowColorG")    or 0.82
+    local b         = GetCDPerIconAlert(trackerKey, slotIndex, prefix, "glowColorB")    or 0.0
+    local speed     = GetCDPerIconAlert(trackerKey, slotIndex, prefix, "glowSpeed")     or 0.6
+    local intensity = GetCDPerIconAlert(trackerKey, slotIndex, prefix, "glowIntensity") or 0.8
+    local thickness = GetCDPerIconAlert(trackerKey, slotIndex, prefix, "glowThickness") or 2
+    local glowScale = GetCDPerIconAlert(trackerKey, slotIndex, prefix, "glowScale")     or 1.0
+    local duration  = GetCDPerIconAlert(trackerKey, slotIndex, prefix, "glowDuration")  or 3.0
+
+    HidePerIconAlertGlows(frame)
+
+    if style == "pixel" then
+        if not frame._piAlertPixelGlow then
+            local gf = CreateFrame("Frame", nil, frame, "BackdropTemplate")
+            gf:SetFrameLevel(frame:GetFrameLevel() + 6)
+            local ag = gf:CreateAnimationGroup()
+            ag:SetLooping("BOUNCE")
+            local alpha = ag:CreateAnimation("Alpha")
+            alpha:SetSmoothing("IN_OUT")
+            gf._pulseAG    = ag
+            gf._pulseAlpha = alpha
+            frame._piAlertPixelGlow = gf
+        end
+        local gf = frame._piAlertPixelGlow
+        local t = math.max(1, math.floor(thickness))
+        gf:ClearAllPoints()
+        gf:SetPoint("TOPLEFT", -t, t)
+        gf:SetPoint("BOTTOMRIGHT", t, -t)
+        gf:SetBackdrop({ edgeFile = "Interface\\Buttons\\WHITE8x8", edgeSize = t })
+        gf:SetBackdropBorderColor(r, g, b, intensity)
+        gf._pulseAlpha:SetFromAlpha(intensity)
+        gf._pulseAlpha:SetToAlpha(math.max(0.05, intensity * 0.2))
+        gf._pulseAlpha:SetDuration(speed)
+        gf:Show()
+        gf._pulseAG:Play()
+
+    elseif style == "shine" then
+        if not frame._piAlertShineGlow then
+            local sh = frame:CreateTexture(nil, "OVERLAY")
+            sh:SetAllPoints()
+            sh:SetBlendMode("ADD")
+            sh:SetDrawLayer("OVERLAY", 6)
+            local ag = sh:CreateAnimationGroup()
+            ag:SetLooping("BOUNCE")
+            local alpha = ag:CreateAnimation("Alpha")
+            alpha:SetSmoothing("IN_OUT")
+            sh._pulseAG    = ag
+            sh._pulseAlpha = alpha
+            frame._piAlertShineGlow = sh
+        end
+        local sh = frame._piAlertShineGlow
+        sh:SetColorTexture(r, g, b, intensity)
+        sh._pulseAlpha:SetFromAlpha(intensity)
+        sh._pulseAlpha:SetToAlpha(math.max(0.02, intensity * 0.1))
+        sh._pulseAlpha:SetDuration(speed)
+        sh:Show()
+        sh._pulseAG:Play()
+
+    else  -- "glow" (SpellActivation style)
+        if not frame._piAlertSpellGlow then
+            local glow = CreateFrame("Frame", nil, frame)
+            glow:SetFrameLevel(frame:GetFrameLevel() + 6)
+            local inner = glow:CreateTexture(nil, "ARTWORK")
+            inner:SetTexture("Interface\\SpellActivationOverlay\\IconAlert")
+            inner:SetTexCoord(0.00781250, 0.50781250, 0.27734375, 0.52734375)
+            inner:SetBlendMode("ADD")
+            inner:SetDrawLayer("ARTWORK", 1)
+            glow._inner = inner
+            local outer = glow:CreateTexture(nil, "ARTWORK")
+            outer:SetTexture("Interface\\SpellActivationOverlay\\IconAlert")
+            outer:SetTexCoord(0.00781250, 0.50781250, 0.53515625, 0.78515625)
+            outer:SetBlendMode("ADD")
+            outer:SetDrawLayer("ARTWORK", 0)
+            glow._outer = outer
+            local ants = glow:CreateTexture(nil, "OVERLAY")
+            ants:SetTexture("Interface\\SpellActivationOverlay\\IconAlertAnts")
+            ants:SetBlendMode("ADD")
+            ants:SetDrawLayer("OVERLAY", 5)
+            glow._ants = ants
+            local antsAG = ants:CreateAnimationGroup()
+            antsAG:SetLooping("REPEAT")
+            local rot = antsAG:CreateAnimation("Rotation")
+            rot:SetDegrees(-360)
+            rot:SetDuration(12)
+            glow._antsAG = antsAG
+            local pulseAG = glow:CreateAnimationGroup()
+            pulseAG:SetLooping("BOUNCE")
+            local alpha2 = pulseAG:CreateAnimation("Alpha")
+            alpha2:SetFromAlpha(1)
+            alpha2:SetToAlpha(0.5)
+            alpha2:SetSmoothing("IN_OUT")
+            glow._pulseAG    = pulseAG
+            glow._pulseAlpha = alpha2
+            frame._piAlertSpellGlow = glow
+        end
+        local glow = frame._piAlertSpellGlow
+        local scale = glowScale or 1.0
+        local w, h = frame:GetSize()
+        local pad = (w * 0.4) * scale
+        glow:ClearAllPoints()
+        glow:SetPoint("TOPLEFT",     frame, "TOPLEFT",     -pad,  pad)
+        glow:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT",  pad, -pad)
+        glow._inner:SetAllPoints(glow)
+        glow._outer:SetAllPoints(glow)
+        glow._ants:SetAllPoints(glow)
+        glow._inner:SetVertexColor(r, g, b, 1)
+        glow._outer:SetVertexColor(r, g, b, 0.6)
+        glow._ants:SetVertexColor(r, g, b, 0.7)
+        glow._pulseAlpha:SetDuration(speed)
+        glow:Show()
+        glow._antsAG:Play()
+        glow._pulseAG:Play()
+    end
+
+    -- Auto-hide after duration
+    frame._piAlertHideTimer = C_Timer.NewTimer(duration, function()
+        frame._piAlertHideTimer = nil
+        HidePerIconAlertGlows(frame)
+    end)
+end
+
+-- Play a per-icon alert pulse on a highlight frame
+local function PlayPerIconAlertPulse(frame, trackerKey, slotIndex, prefix)
+    if not frame then return end
+    local pulseScale    = GetCDPerIconAlert(trackerKey, slotIndex, prefix, "pulseScale")    or 1.3
+    local pulseDuration = GetCDPerIconAlert(trackerKey, slotIndex, prefix, "pulseDuration") or 0.4
+    local pulseCount    = GetCDPerIconAlert(trackerKey, slotIndex, prefix, "pulseCount")    or 3
+    if pulseCount < 1 then pulseCount = 1 end
+
+    if not frame._piAlertPulseAG then
+        local ag = frame:CreateAnimationGroup()
+        local scaleUp = ag:CreateAnimation("Scale")
+        scaleUp:SetOrigin("CENTER", 0, 0)
+        scaleUp:SetOrder(1)
+        local scaleDown = ag:CreateAnimation("Scale")
+        scaleDown:SetOrigin("CENTER", 0, 0)
+        scaleDown:SetOrder(2)
+        ag._scaleUp = scaleUp
+        ag._scaleDown = scaleDown
+        ag._loopCount = 0
+        ag._targetLoops = 1
+        ag:SetScript("OnLoop", function(self)
+            self._loopCount = self._loopCount + 1
+            if self._loopCount >= self._targetLoops then
+                self:Stop()
+            end
+        end)
+        frame._piAlertPulseAG = ag
+    end
+
+    local ag = frame._piAlertPulseAG
+    local halfDur = math.max((pulseDuration / pulseCount) * 0.5, 0.05)
+    ag._scaleUp:SetScaleFrom(1, 1)
+    ag._scaleUp:SetScaleTo(pulseScale, pulseScale)
+    ag._scaleUp:SetDuration(halfDur)
+    ag._scaleUp:SetSmoothing("OUT")
+    ag._scaleDown:SetScaleFrom(pulseScale, pulseScale)
+    ag._scaleDown:SetScaleTo(1, 1)
+    ag._scaleDown:SetDuration(halfDur)
+    ag._scaleDown:SetSmoothing("IN")
+    ag._loopCount = 0
+    ag._targetLoops = pulseCount
+    ag:SetLooping(pulseCount > 1 and "REPEAT" or "NONE")
+    if ag:IsPlaying() then ag:Stop() end
+    ag:Play()
+end
+
+-- Schedule glow/pulse with timing offset (negative = early, 0 = immediate, positive = delay)
+local function SchedulePerIconAlertGlow(frame, trackerKey, slotIndex, prefix, timing)
+    if frame._piAlertGlowTimer then frame._piAlertGlowTimer:Cancel(); frame._piAlertGlowTimer = nil end
+    if timing <= 0 then
+        PlayPerIconAlertGlow(frame, trackerKey, slotIndex, prefix)
+    else
+        frame._piAlertGlowTimer = C_Timer.NewTimer(timing, function()
+            frame._piAlertGlowTimer = nil
+            PlayPerIconAlertGlow(frame, trackerKey, slotIndex, prefix)
+        end)
+    end
+end
+
+local function SchedulePerIconAlertPulse(frame, trackerKey, slotIndex, prefix, timing)
+    if frame._piAlertPulseTimer then frame._piAlertPulseTimer:Cancel(); frame._piAlertPulseTimer = nil end
+    if timing <= 0 then
+        PlayPerIconAlertPulse(frame, trackerKey, slotIndex, prefix)
+    else
+        frame._piAlertPulseTimer = C_Timer.NewTimer(timing, function()
+            frame._piAlertPulseTimer = nil
+            PlayPerIconAlertPulse(frame, trackerKey, slotIndex, prefix)
+        end)
+    end
+end
+
+-- Fire per-icon On Ready alert (cooldown ended)
+local function FirePerIconOnReady(frame, trackerKey, slotIndex)
+    CancelPerIconAlertTimers(frame)
+    HidePerIconAlertGlows(frame)
+    if GetCDPerIconAlert(trackerKey, slotIndex, "onReady", "glowEnabled") then
+        local timing = GetCDPerIconAlert(trackerKey, slotIndex, "onReady", "glowTiming") or 0
+        if timing < 0 then timing = 0 end  -- Can't predict ready in advance here
+        SchedulePerIconAlertGlow(frame, trackerKey, slotIndex, "onReady", timing)
+    end
+    if GetCDPerIconAlert(trackerKey, slotIndex, "onReady", "pulseEnabled") then
+        local timing = GetCDPerIconAlert(trackerKey, slotIndex, "onReady", "pulseTiming") or 0
+        if timing < 0 then timing = 0 end
+        SchedulePerIconAlertPulse(frame, trackerKey, slotIndex, "onReady", timing)
+    end
+end
+
+-- Fire per-icon On Cooldown Start alert (cooldown began)
+local function FirePerIconOnCooldown(frame, trackerKey, slotIndex)
+    -- Don't cancel existing On Ready timers - they're independent
+    if GetCDPerIconAlert(trackerKey, slotIndex, "onCooldown", "glowEnabled") then
+        local timing = GetCDPerIconAlert(trackerKey, slotIndex, "onCooldown", "glowTiming") or 0
+        if timing < 0 then timing = 0 end
+        SchedulePerIconAlertGlow(frame, trackerKey, slotIndex, "onCooldown", timing)
+    end
+    if GetCDPerIconAlert(trackerKey, slotIndex, "onCooldown", "pulseEnabled") then
+        local timing = GetCDPerIconAlert(trackerKey, slotIndex, "onCooldown", "pulseTiming") or 0
+        if timing < 0 then timing = 0 end
+        SchedulePerIconAlertPulse(frame, trackerKey, slotIndex, "onCooldown", timing)
+    end
+end
+
+-- ============================================================================
+-- END PER-ICON ALERTS
+-- ============================================================================
+
 -- Cooldowns longer than 3000ms (3 sec) are "real" cooldowns, not GCD (~1500ms)
 local GCD_THRESHOLD = 3000
 
@@ -1999,6 +2275,25 @@ function CooldownHighlights:ApplyVisibilityConditions(trackerKey, slotIndex, isO
     -- Fire "onReady" reappearance effects when transitioning off cooldown
     if wasOnCooldown and not isOnCooldown and shouldShowCustomHighlight then
         FireReappearanceEffects(frame, "onReady", trackerKey, slotIndex)
+    end
+    
+    -- =========================================================================
+    -- PER-ICON ALERT TRANSITION DETECTION (Phase 4)
+    -- Dock reappearance effects (above) and per-icon alerts are independent.
+    -- Per-icon alerts fire on highlight frames using iconAlerts[slotIndex].
+    -- =========================================================================
+    if wasOnCooldown ~= nil then
+        if wasOnCooldown and not isOnCooldown then
+            -- Cooldown ended → On Ready per-icon alert
+            if HasCDPerIconAlert(trackerKey, slotIndex, "onReady") then
+                pcall(FirePerIconOnReady, frame, trackerKey, slotIndex)
+            end
+        elseif not wasOnCooldown and isOnCooldown then
+            -- Cooldown started → On Cooldown per-icon alert
+            if HasCDPerIconAlert(trackerKey, slotIndex, "onCooldown") then
+                pcall(FirePerIconOnCooldown, frame, trackerKey, slotIndex)
+            end
+        end
     end
     
     -- Save cooldown state for next transition detection
@@ -3186,6 +3481,33 @@ end
 function CooldownHighlights:IsIconHidden(trackerKey, slotIndex)
     -- Use GetState which handles spellID translation with slotIndex fallback
     return CooldownHighlights:GetState(trackerKey, "hidden." .. slotIndex) == true
+end
+
+-- ============================================================================
+-- Per-Icon Alert Settings (for Alerts tab)
+-- Data stored at: TweaksUI_Cooldowns_CharDB[trackerKey .. "Highlights"].iconAlerts[slotIndex][key]
+-- ============================================================================
+function CooldownHighlights:GetIconAlertSetting(trackerKey, slotIndex, key)
+    if not trackerKey or not slotIndex or not key then return nil end
+    local dbKey = trackerKey .. "Highlights"
+    local charDB = TweaksUI_Cooldowns_CharDB
+    if not charDB or not charDB[dbKey] then return nil end
+    local iconAlerts = charDB[dbKey].iconAlerts
+    if not iconAlerts then return nil end
+    local slotData = iconAlerts[slotIndex]
+    if not slotData then return nil end
+    return slotData[key]
+end
+
+function CooldownHighlights:SetIconAlertSetting(trackerKey, slotIndex, key, value)
+    if not trackerKey or not slotIndex or not key then return end
+    local dbKey = trackerKey .. "Highlights"
+    local charDB = TweaksUI_Cooldowns_CharDB
+    if not charDB then return end
+    if not charDB[dbKey] then charDB[dbKey] = {} end
+    if not charDB[dbKey].iconAlerts then charDB[dbKey].iconAlerts = {} end
+    if not charDB[dbKey].iconAlerts[slotIndex] then charDB[dbKey].iconAlerts[slotIndex] = {} end
+    charDB[dbKey].iconAlerts[slotIndex][key] = value
 end
 
 -- Helper to check for CDM viewer layout issues (duplicate icons, stale state)

@@ -67,7 +67,7 @@ local TRACKERS = {
 
 local HUB_WIDTH = 220
 local HUB_HEIGHT = 480
-local PANEL_WIDTH = 500
+local PANEL_WIDTH = 520
 local PANEL_HEIGHT = 600
 local BUTTON_HEIGHT = 28
 local BUTTON_SPACING = 6
@@ -992,6 +992,8 @@ end
 
 -- Export GetOrderedIcons for use by CooldownHighlights
 Cooldowns.GetOrderedIcons = GetOrderedIcons
+Cooldowns.ClearIconOrderCache = ClearIconOrderCache
+Cooldowns.ClearOriginalOrderCache = ClearOriginalOrderCache
 
 -- Clear icon order cache (session cache and optionally persistent savedIconOrder)
 local function ClearIconOrderCache(trackerKey, clearPersistent)
@@ -1544,20 +1546,16 @@ local function ApplyGridLayout(viewer, trackerKey)
     end
     
     -- Apply per-icon hide based on layout order
-    -- Need to map layout order icons to their original Blizzard slot index
-    local blizzardOrder = GetOriginalOrder(viewer, trackerKey)
-    local iconToSlotIndex = {}  -- [icon] = slotIndex
-    for slotIndex, blizzardIcon in ipairs(blizzardOrder) do
-        iconToSlotIndex[blizzardIcon] = slotIndex
-    end
-    
+    -- Use idx (position in GetOrderedIcons result) as slotIndex for per-icon lookups
+    -- This matches how CacheSpellIDs maps slotIndex -> spellID, ensuring the correct
+    -- spell's settings are checked. Do NOT use GetOriginalOrder here - it can diverge
+    -- from GetOrderedIcons when savedIconOrder has reordered things.
     for idx, icon in ipairs(icons) do
-        local slotIndex = iconToSlotIndex[icon] or idx  -- Fallback to layout index if not found
         local isHiddenByPerIcon = false
         if trackerKey == "buffs" then
-            isHiddenByPerIcon = TUICD.BuffHighlights and TUICD.BuffHighlights:IsIconHidden(slotIndex)
+            isHiddenByPerIcon = TUICD.BuffHighlights and TUICD.BuffHighlights:IsIconHidden(idx)
         else
-            isHiddenByPerIcon = TUICD.CooldownHighlights and TUICD.CooldownHighlights:IsIconHidden(trackerKey, slotIndex)
+            isHiddenByPerIcon = TUICD.CooldownHighlights and TUICD.CooldownHighlights:IsIconHidden(trackerKey, idx)
         end
         if isHiddenByPerIcon then
             icon:SetAlpha(0)
@@ -2310,6 +2308,8 @@ local function ApplyGridLayout(viewer, trackerKey)
     return true
 end
 
+Cooldowns.ApplyGridLayout = ApplyGridLayout
+
 -- Update custom tracker visibility
 local function UpdateCustomTrackerVisibility()
     if not customTrackerFrame then return end
@@ -2448,10 +2448,35 @@ local function ApplyBuffVisualState(icon, isActive, trackerKey, iconIndex)
     if not icon then return end
     trackerKey = trackerKey or "buffs"
     
+    -- ── Tracker-level alert state tracking ──
+    -- Track on ALL icons (even hidden) to prevent false triggers on unhide
+    local previousAlertActive = icon._trackerAlertLastActive
+    icon._trackerAlertLastActive = isActive
+    
     -- Check if this icon is hidden by per-icon settings
     if iconIndex and TUICD.BuffHighlights and TUICD.BuffHighlights:IsIconHidden(iconIndex) then
         icon:SetAlpha(0)
+        -- Clean up any active alerts on hidden icons
+        if TUICD.BuffHighlights then
+            TUICD.BuffHighlights:HideFrameAlertGlows(icon)
+            TUICD.BuffHighlights:CancelFrameAlertTimers(icon)
+        end
         return  -- Don't apply any other visual state
+    end
+    
+    -- ── Fire tracker-level alerts on state transitions ──
+    -- Skip first update per icon (previousAlertActive == nil = initialization)
+    if previousAlertActive ~= nil and previousAlertActive ~= isActive then
+        local BH = TUICD.BuffHighlights
+        if BH then
+            if isActive and not previousAlertActive then
+                -- Buff GAINED (inactive → active) — fire On Start on tracker icon
+                BH:FireTrackerAlertGained(icon, icon.auraInstanceID)
+            elseif not isActive and previousAlertActive then
+                -- Buff LOST (active → inactive) — fire On End on tracker icon
+                BH:FireTrackerAlertLost(icon)
+            end
+        end
     end
     
     -- Get settings
@@ -2524,14 +2549,9 @@ local function UpdateBuffVisualStates()
     dprint(string.format("Buff icons: %d active, %d inactive", activeCount, inactiveCount))
 end
 
--- Start the buff state update ticker (only if greyscaleInactive is enabled)
+-- Start the buff state update ticker
+-- Required for both greyscaleInactive visual states AND tracker-level alert detection
 local function StartBuffStateTracking()
-    -- Only start if greyscale feature is actually enabled
-    if not GetSetting("buffs", "greyscaleInactive") then
-        dprint("Buff state tracking skipped (greyscaleInactive disabled)")
-        return
-    end
-    
     if buffUpdateTicker then return end  -- Already running
     
     buffUpdateTicker = C_Timer.NewTicker(BUFF_UPDATE_INTERVAL, function()
@@ -5636,12 +5656,6 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         currentOpenPanel = nil
     end)
     
-    -- Tab buttons container
-    local tabContainer = CreateFrame("Frame", nil, panel)
-    tabContainer:SetPoint("TOPLEFT", 10, -40)
-    tabContainer:SetPoint("TOPRIGHT", -10, -40)
-    tabContainer:SetHeight(28)
-    
     -- Content frames (one per tab)
     local contentFrames = {}
     local tabButtons = {}
@@ -5652,7 +5666,7 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         { name = "Layout", key = "layout" },
         { name = "Appearance", key = "appearance" },
         { name = "Text", key = "text" },
-        { name = "On Ready", key = "onready" },
+        { name = (trackerKey == "buffs") and "Alerts" or "On Ready", key = "onready" },
         { name = "Visibility", key = "visibility" },
     }
     
@@ -5667,6 +5681,18 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         table.insert(tabs, { name = "Individual Icons", key = "cooldownhighlights" })
     end
     
+    -- Tab buttons container (after tabs defined so we know row count)
+    local MAX_TABS_PER_ROW = 5
+    local tabRows = math.ceil(#tabs / MAX_TABS_PER_ROW)
+    local tabContainerHeight = tabRows * 28
+    
+    local tabContainer = CreateFrame("Frame", nil, panel)
+    tabContainer:SetPoint("TOPLEFT", 10, -40)
+    tabContainer:SetPoint("TOPRIGHT", -10, -40)
+    tabContainer:SetHeight(tabContainerHeight)
+    
+    local contentTopOffset = -(40 + tabContainerHeight + 4)
+    
     -- Helper function to refresh layout
     local function RefreshLayout()
         local viewer = _G[trackerInfo.name]
@@ -5678,7 +5704,7 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
     -- Create tab content frame
     local function CreateTabContent()
         local content = CreateFrame("ScrollFrame", nil, panel, "UIPanelScrollFrameTemplate")
-        content:SetPoint("TOPLEFT", 10, -72)
+        content:SetPoint("TOPLEFT", 10, contentTopOffset)
         content:SetPoint("BOTTOMRIGHT", -28, 10)
         
         local scrollChild = CreateFrame("Frame", nil, content)
@@ -6780,6 +6806,7 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         local BuffHighlights = TUICD.BuffHighlights
         local selectedSlot = nil
         local currentState = "active"  -- "active" or "inactive"
+        local currentAlertSpellID = nil  -- SpellID of currently selected slot, for per-icon alerts
         local slotRows = {}
         
         -- Aspect ratio presets (same as other trackers)
@@ -6805,6 +6832,14 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         refreshBtn:SetPoint("TOPRIGHT", -5, y)
         refreshBtn:SetSize(100, 20)
         refreshBtn:SetText("Refresh List")
+        refreshBtn:SetScript("OnEnter", function(self)
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:SetText("Refresh Per-Icon List", 1, 0.82, 0)
+            GameTooltip:AddLine("Resets icon order caches and rebuilds the list from current Blizzard state.", 1, 1, 1, true)
+            GameTooltip:AddLine("Use if icons appear jumbled or mismatched.", 0.5, 0.5, 0.5, true)
+            GameTooltip:Show()
+        end)
+        refreshBtn:SetScript("OnLeave", GameTooltip_Hide)
         y = y - 26
         
         -- Description
@@ -6845,17 +6880,27 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         listContainer:SetBackdropColor(0.1, 0.1, 0.1, 0.8)
         listContainer:SetBackdropBorderColor(0.3, 0.3, 0.3, 1)
         
-        -- Create scroll frame inside list container
+        -- Create scroll frame inside list container (scrollbar hidden - main panel handles scrolling)
         local scrollFrame = CreateFrame("ScrollFrame", nil, listContainer, "UIPanelScrollFrameTemplate")
         scrollFrame:SetPoint("TOPLEFT", 2, -2)
-        scrollFrame:SetPoint("BOTTOMRIGHT", -22, 2)
+        scrollFrame:SetPoint("BOTTOMRIGHT", -2, 2)
+        scrollFrame.ScrollBar:Hide()
+        scrollFrame.ScrollBar:SetAlpha(0)
+        scrollFrame:EnableMouseWheel(true)
+        scrollFrame:SetScript("OnMouseWheel", function(self, delta)
+            local current = self:GetVerticalScroll()
+            local maxScroll = self:GetVerticalScrollRange()
+            local step = 21  -- row height
+            self:SetVerticalScroll(math.max(0, math.min(maxScroll, current - (delta * step))))
+        end)
         
         local scrollChild = CreateFrame("Frame", nil, scrollFrame)
-        scrollChild:SetWidth(PANEL_WIDTH - 84)
+        scrollChild:SetWidth(PANEL_WIDTH - 64)
         scrollChild:SetHeight(1)  -- Will be updated dynamically
         scrollFrame:SetScrollChild(scrollChild)
         
         y = y - 100
+        local controlsStartY = y  -- Store for parent height calculation
         
         -- Controls container with backdrop (outer frame)
         local controlsContainer = CreateFrame("Frame", nil, parent, "BackdropTemplate")
@@ -6869,15 +6914,124 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controlsContainer:SetBackdropColor(0.12, 0.12, 0.12, 0.9)
         controlsContainer:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
         
-        -- Scroll frame inside container
-        local controlsScrollFrame = CreateFrame("ScrollFrame", nil, controlsContainer, "UIPanelScrollFrameTemplate")
-        controlsScrollFrame:SetPoint("TOPLEFT", 2, -2)
-        controlsScrollFrame:SetPoint("BOTTOMRIGHT", -22, 2)
+        -- Scroll frame removed - controls panel is a direct child
+        -- The outer tab's scroll frame handles all scrolling
         
-        -- Controls panel as scroll child (content area)
-        local controlsPanel = CreateFrame("Frame", nil, controlsScrollFrame)
-        controlsPanel:SetSize(PANEL_WIDTH - 84, 860)  -- Height for full content
-        controlsScrollFrame:SetScrollChild(controlsPanel)
+        -- Controls panel as direct child (content area)
+        local controlsPanel = CreateFrame("Frame", nil, controlsContainer)
+        controlsPanel:SetPoint("TOPLEFT", 2, -32)
+        controlsPanel:SetPoint("RIGHT", -2, 0)
+        controlsPanel:SetHeight(860)  -- Will be updated dynamically
+
+        -- =====================================================
+        -- Per-Icon Tab Bar
+        -- =====================================================
+        local activePerIconTab = "settings"
+        
+        local tabBarFrame = CreateFrame("Frame", nil, controlsContainer)
+        tabBarFrame:SetPoint("TOPLEFT", 5, -5)
+        tabBarFrame:SetPoint("TOPRIGHT", -25, -5)
+        tabBarFrame:SetHeight(25)
+        
+        local perIconTabButtons = {}
+        local perIconTabFrames = {}
+        
+        -- Tab button creation helper
+        local function CreatePerIconTabBtn(label, key, xPos)
+            local btn = CreateFrame("Button", nil, tabBarFrame)
+            btn:SetPoint("LEFT", xPos, 0)
+            btn:SetHeight(22)
+            
+            local text = btn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            text:SetPoint("CENTER")
+            text:SetText(label)
+            btn:SetFontString(text)
+            btn:SetWidth(text:GetStringWidth() + 20)
+            
+            btn:SetScript("OnEnter", function(self)
+                if activePerIconTab ~= key then
+                    self:GetFontString():SetTextColor(1, 1, 1)
+                end
+            end)
+            btn:SetScript("OnLeave", function(self)
+                if activePerIconTab ~= key then
+                    self:GetFontString():SetTextColor(0.5, 0.5, 0.5)
+                end
+            end)
+            
+            perIconTabButtons[key] = btn
+            return btn
+        end
+        
+        local tabSettings = CreatePerIconTabBtn("Settings", "settings", 0)
+        local tabText = CreatePerIconTabBtn("Text", "text", tabSettings:GetWidth() + 10)
+        local tabAlerts = CreatePerIconTabBtn("Alerts", "alerts", tabSettings:GetWidth() + tabText:GetWidth() + 20)
+        
+        -- Underline for active tab
+        local tabUnderline = tabBarFrame:CreateTexture(nil, "ARTWORK")
+        tabUnderline:SetHeight(2)
+        tabUnderline:SetColorTexture(1, 0.82, 0, 1)
+        
+        -- Container frames for each tab (children of controlsPanel)
+        local settingsFrame = CreateFrame("Frame", nil, controlsPanel)
+        settingsFrame:SetAllPoints()
+        
+        local textFrame = CreateFrame("Frame", nil, controlsPanel)
+        textFrame:SetAllPoints()
+        
+        local alertsFrame = CreateFrame("Frame", nil, controlsPanel)
+        alertsFrame:SetAllPoints()
+        
+        perIconTabFrames["settings"] = settingsFrame
+        perIconTabFrames["text"] = textFrame
+        perIconTabFrames["alerts"] = alertsFrame
+        
+        local function SelectPerIconTab(tabKey)
+            activePerIconTab = tabKey
+            for key, btn in pairs(perIconTabButtons) do
+                if key == tabKey then
+                    btn:GetFontString():SetTextColor(1, 0.82, 0)
+                else
+                    btn:GetFontString():SetTextColor(0.5, 0.5, 0.5)
+                end
+            end
+            for key, frame in pairs(perIconTabFrames) do
+                frame:SetShown(key == tabKey)
+            end
+            -- Update underline position
+            local activeBtn = perIconTabButtons[tabKey]
+            if activeBtn then
+                tabUnderline:ClearAllPoints()
+                tabUnderline:SetPoint("BOTTOMLEFT", activeBtn, "BOTTOMLEFT", 0, -2)
+                tabUnderline:SetPoint("BOTTOMRIGHT", activeBtn, "BOTTOMRIGHT", 0, -2)
+            end
+            -- Adjust content height based on active tab
+            local contentHeight
+            if tabKey == "settings" then
+                contentHeight = 340
+            elseif tabKey == "text" then
+                contentHeight = 440
+            elseif tabKey == "alerts" then
+                contentHeight = 840  -- two full alert blocks (onStart with timing, onEnd without)
+            else
+                contentHeight = 440
+            end
+            controlsPanel:SetHeight(contentHeight)
+            -- Resize container to fit content (34px for tab bar + padding)
+            local containerHeight = contentHeight + 38
+            controlsContainer:SetHeight(containerHeight)
+            -- Resize outer parent so the main tab scroll can reach everything
+            parent:SetHeight(math.abs(controlsStartY) + containerHeight + 10)
+        end
+        
+        -- Wire up tab button clicks
+        for key, btn in pairs(perIconTabButtons) do
+            btn:SetScript("OnClick", function() SelectPerIconTab(key) end)
+        end
+        
+        -- Select default tab
+        SelectPerIconTab("settings")
+        
         
         -- "No Selection" label (on container, not scroll child, so it stays centered)
         local noSelectionLabel = controlsContainer:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -6889,80 +7043,80 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         local controls = {}
         
         -- Slot header with icon preview
-        controls.header = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        controls.header = settingsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
         controls.header:SetPoint("TOPLEFT", 10, -8)
         controls.header:SetTextColor(1, 0.82, 0)
         controls.header:Hide()
         
-        controls.iconPreview = controlsPanel:CreateTexture(nil, "ARTWORK")
+        controls.iconPreview = settingsFrame:CreateTexture(nil, "ARTWORK")
         controls.iconPreview:SetPoint("LEFT", controls.header, "RIGHT", 8, 0)
         controls.iconPreview:SetSize(20, 20)
         controls.iconPreview:SetTexCoord(0.08, 0.92, 0.08, 0.92)
         controls.iconPreview:Hide()
         
         -- Enable checkbox
-        controls.enableCheck = CreateFrame("CheckButton", nil, controlsPanel, "UICheckButtonTemplate")
+        controls.enableCheck = CreateFrame("CheckButton", nil, settingsFrame, "UICheckButtonTemplate")
         controls.enableCheck:SetPoint("TOPLEFT", 10, -30)
         controls.enableCheck:SetSize(24, 24)
         controls.enableCheck:Hide()
         
-        controls.enableLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.enableLabel = settingsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         controls.enableLabel:SetPoint("LEFT", controls.enableCheck, "RIGHT", 2, 0)
         controls.enableLabel:SetText("Enable Individual Icon")
         controls.enableLabel:SetTextColor(0.9, 0.9, 0.9)
         controls.enableLabel:Hide()
         
         -- Hide in tracker checkbox (hide main tracker icon, keep highlight visible)
-        controls.hideCheck = CreateFrame("CheckButton", nil, controlsPanel, "UICheckButtonTemplate")
+        controls.hideCheck = CreateFrame("CheckButton", nil, settingsFrame, "UICheckButtonTemplate")
         controls.hideCheck:SetPoint("LEFT", controls.enableLabel, "RIGHT", 20, 0)
         controls.hideCheck:SetSize(24, 24)
         controls.hideCheck:Hide()
         
-        controls.hideLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.hideLabel = settingsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         controls.hideLabel:SetPoint("LEFT", controls.hideCheck, "RIGHT", 2, 0)
         controls.hideLabel:SetText("Hide in Tracker")
         controls.hideLabel:SetTextColor(0.9, 0.9, 0.9)
         controls.hideLabel:Hide()
         
         -- State tabs (Active / Inactive)
-        controls.stateLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.stateLabel = settingsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         controls.stateLabel:SetPoint("TOPLEFT", 10, -58)
         controls.stateLabel:SetText("Configure State:")
         controls.stateLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.stateLabel:Hide()
         
-        controls.activeBtn = CreateFrame("Button", nil, controlsPanel, "UIPanelButtonTemplate")
+        controls.activeBtn = CreateFrame("Button", nil, settingsFrame, "UIPanelButtonTemplate")
         controls.activeBtn:SetPoint("LEFT", controls.stateLabel, "RIGHT", 8, 0)
         controls.activeBtn:SetSize(70, 20)
         controls.activeBtn:SetText("Active")
         controls.activeBtn:Hide()
         
-        controls.inactiveBtn = CreateFrame("Button", nil, controlsPanel, "UIPanelButtonTemplate")
+        controls.inactiveBtn = CreateFrame("Button", nil, settingsFrame, "UIPanelButtonTemplate")
         controls.inactiveBtn:SetPoint("LEFT", controls.activeBtn, "RIGHT", 4, 0)
         controls.inactiveBtn:SetSize(70, 20)
         controls.inactiveBtn:SetText("Inactive")
         controls.inactiveBtn:Hide()
         
         -- Show when checkbox (for current state)
-        controls.showCheck = CreateFrame("CheckButton", nil, controlsPanel, "UICheckButtonTemplate")
+        controls.showCheck = CreateFrame("CheckButton", nil, settingsFrame, "UICheckButtonTemplate")
         controls.showCheck:SetPoint("TOPLEFT", 10, -85)
         controls.showCheck:SetSize(24, 24)
         controls.showCheck:Hide()
         
-        controls.showLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.showLabel = settingsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         controls.showLabel:SetPoint("LEFT", controls.showCheck, "RIGHT", 2, 0)
         controls.showLabel:SetText("Show when Active")
         controls.showLabel:SetTextColor(0.9, 0.9, 0.9)
         controls.showLabel:Hide()
         
         -- Size input
-        controls.sizeLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.sizeLabel = settingsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         controls.sizeLabel:SetPoint("TOPLEFT", 10, -115)
         controls.sizeLabel:SetText("Size:")
         controls.sizeLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.sizeLabel:Hide()
         
-        controls.sizeSlider = CreateFrame("EditBox", nil, controlsPanel, "InputBoxTemplate")
+        controls.sizeSlider = CreateFrame("EditBox", nil, settingsFrame, "InputBoxTemplate")
         controls.sizeSlider:SetPoint("LEFT", controls.sizeLabel, "RIGHT", 10, 0)
         controls.sizeSlider:SetSize(50, 18)
         controls.sizeSlider:SetAutoFocus(false)
@@ -6971,13 +7125,13 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.sizeSlider:Hide()
         
         -- Opacity slider
-        controls.opacityLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.opacityLabel = settingsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         controls.opacityLabel:SetPoint("TOPLEFT", 10, -145)
         controls.opacityLabel:SetText("Opacity:")
         controls.opacityLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.opacityLabel:Hide()
         
-        controls.opacitySlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
+        controls.opacitySlider = CreateFrame("Slider", nil, settingsFrame, "OptionsSliderTemplate")
         controls.opacitySlider:SetPoint("LEFT", controls.opacityLabel, "RIGHT", 5, 0)
         controls.opacitySlider:SetSize(90, 16)
         controls.opacitySlider:SetMinMaxValues(0.1, 1.0)
@@ -6988,30 +7142,30 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.opacitySlider.Text:SetText("")
         controls.opacitySlider:Hide()
         
-        controls.opacityValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.opacityValue = settingsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         controls.opacityValue:SetPoint("LEFT", controls.opacitySlider, "RIGHT", 8, 0)
         controls.opacityValue:SetTextColor(1, 1, 1)
         controls.opacityValue:Hide()
         
         -- Desaturate checkbox
-        controls.desatCheck = CreateFrame("CheckButton", nil, controlsPanel, "UICheckButtonTemplate")
+        controls.desatCheck = CreateFrame("CheckButton", nil, settingsFrame, "UICheckButtonTemplate")
         controls.desatCheck:SetPoint("TOPLEFT", 10, -175)
         controls.desatCheck:SetSize(24, 24)
         controls.desatCheck:Hide()
         
-        controls.desatLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.desatLabel = settingsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         controls.desatLabel:SetPoint("LEFT", controls.desatCheck, "RIGHT", 2, 0)
         controls.desatLabel:SetText("Desaturate (grayscale)")
         controls.desatLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.desatLabel:Hide()
         
         -- Proc glow checkbox
-        controls.procGlowCheck = CreateFrame("CheckButton", nil, controlsPanel, "UICheckButtonTemplate")
+        controls.procGlowCheck = CreateFrame("CheckButton", nil, settingsFrame, "UICheckButtonTemplate")
         controls.procGlowCheck:SetPoint("LEFT", controls.desatLabel, "RIGHT", 20, 0)
         controls.procGlowCheck:SetSize(24, 24)
         controls.procGlowCheck:Hide()
         
-        controls.procGlowLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.procGlowLabel = settingsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         controls.procGlowLabel:SetPoint("LEFT", controls.procGlowCheck, "RIGHT", 2, 0)
         controls.procGlowLabel:SetText("Show Proc Glow")
         controls.procGlowLabel:SetTextColor(0.8, 0.8, 0.8)
@@ -7021,19 +7175,19 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         -- =====================================================
         -- Dock Assignment
         -- =====================================================
-        controls.dockHeader = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        controls.dockHeader = settingsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
         controls.dockHeader:SetPoint("TOPLEFT", 10, -265)
         controls.dockHeader:SetText("Dock Assignment")
         controls.dockHeader:SetTextColor(1, 0.82, 0)
         controls.dockHeader:Hide()
         
-        controls.dockLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.dockLabel = settingsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         controls.dockLabel:SetPoint("TOPLEFT", 10, -285)
         controls.dockLabel:SetText("Assign to Dock:")
         controls.dockLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.dockLabel:Hide()
         
-        controls.dockDropdown = CreateFrame("Frame", nil, controlsPanel, "UIDropDownMenuTemplate")
+        controls.dockDropdown = CreateFrame("Frame", nil, settingsFrame, "UIDropDownMenuTemplate")
         controls.dockDropdown:SetPoint("TOPLEFT", 80, -278)
         UIDropDownMenu_SetWidth(controls.dockDropdown, 120)
         controls.dockDropdown:Hide()
@@ -7041,19 +7195,19 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         -- =====================================================
         -- Per-Icon Text Controls (Cooldown Timer)
         -- =====================================================
-        controls.cooldownTextHeader = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        controls.cooldownTextHeader:SetPoint("TOPLEFT", 10, -345)
+        controls.cooldownTextHeader = textFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        controls.cooldownTextHeader:SetPoint("TOPLEFT", 10, -8)
         controls.cooldownTextHeader:SetText("Cooldown Text")
         controls.cooldownTextHeader:SetTextColor(1, 0.82, 0)
         controls.cooldownTextHeader:Hide()
         
-        controls.cooldownTextScaleLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.cooldownTextScaleLabel:SetPoint("TOPLEFT", 10, -365)
+        controls.cooldownTextScaleLabel = textFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.cooldownTextScaleLabel:SetPoint("TOPLEFT", 10, -28)
         controls.cooldownTextScaleLabel:SetText("Scale:")
         controls.cooldownTextScaleLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.cooldownTextScaleLabel:Hide()
         
-        controls.cooldownTextSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
+        controls.cooldownTextSlider = CreateFrame("Slider", nil, textFrame, "OptionsSliderTemplate")
         controls.cooldownTextSlider:SetPoint("LEFT", controls.cooldownTextScaleLabel, "RIGHT", 10, 0)
         controls.cooldownTextSlider:SetSize(80, 16)
         controls.cooldownTextSlider:SetMinMaxValues(0.5, 2.0)
@@ -7064,18 +7218,18 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.cooldownTextSlider.Text:SetText("")
         controls.cooldownTextSlider:Hide()
         
-        controls.cooldownTextValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.cooldownTextValue = textFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         controls.cooldownTextValue:SetPoint("LEFT", controls.cooldownTextSlider, "RIGHT", 5, 0)
         controls.cooldownTextValue:SetTextColor(1, 1, 1)
         controls.cooldownTextValue:Hide()
         
-        controls.cooldownTextColorLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.cooldownTextColorLabel:SetPoint("TOPLEFT", 10, -390)
+        controls.cooldownTextColorLabel = textFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.cooldownTextColorLabel:SetPoint("TOPLEFT", 10, -53)
         controls.cooldownTextColorLabel:SetText("Color:")
         controls.cooldownTextColorLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.cooldownTextColorLabel:Hide()
         
-        controls.cooldownTextColorBtn = CreateFrame("Button", nil, controlsPanel, "BackdropTemplate")
+        controls.cooldownTextColorBtn = CreateFrame("Button", nil, textFrame, "BackdropTemplate")
         controls.cooldownTextColorBtn:SetPoint("LEFT", controls.cooldownTextColorLabel, "RIGHT", 10, 0)
         controls.cooldownTextColorBtn:SetSize(24, 16)
         controls.cooldownTextColorBtn:SetBackdrop({bgFile = "Interface\\Buttons\\WHITE8x8", edgeFile = "Interface\\Buttons\\WHITE8x8", edgeSize = 1})
@@ -7083,13 +7237,13 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.cooldownTextColorBtn:SetBackdropBorderColor(0.3, 0.3, 0.3, 1)
         controls.cooldownTextColorBtn:Hide()
         
-        controls.cooldownTextOffsetXLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.cooldownTextOffsetXLabel:SetPoint("TOPLEFT", 10, -415)
+        controls.cooldownTextOffsetXLabel = textFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.cooldownTextOffsetXLabel:SetPoint("TOPLEFT", 10, -78)
         controls.cooldownTextOffsetXLabel:SetText("Offset X:")
         controls.cooldownTextOffsetXLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.cooldownTextOffsetXLabel:Hide()
         
-        controls.cooldownTextOffsetXSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
+        controls.cooldownTextOffsetXSlider = CreateFrame("Slider", nil, textFrame, "OptionsSliderTemplate")
         controls.cooldownTextOffsetXSlider:SetPoint("LEFT", controls.cooldownTextOffsetXLabel, "RIGHT", 5, 0)
         controls.cooldownTextOffsetXSlider:SetSize(100, 16)
         controls.cooldownTextOffsetXSlider:SetMinMaxValues(-100, 100)
@@ -7100,18 +7254,18 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.cooldownTextOffsetXSlider.Text:SetText("")
         controls.cooldownTextOffsetXSlider:Hide()
         
-        controls.cooldownTextOffsetXValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.cooldownTextOffsetXValue = textFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         controls.cooldownTextOffsetXValue:SetPoint("LEFT", controls.cooldownTextOffsetXSlider, "RIGHT", 5, 0)
         controls.cooldownTextOffsetXValue:SetTextColor(1, 1, 1)
         controls.cooldownTextOffsetXValue:Hide()
         
-        controls.cooldownTextOffsetYLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.cooldownTextOffsetYLabel:SetPoint("TOPLEFT", 10, -440)
+        controls.cooldownTextOffsetYLabel = textFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.cooldownTextOffsetYLabel:SetPoint("TOPLEFT", 10, -103)
         controls.cooldownTextOffsetYLabel:SetText("Offset Y:")
         controls.cooldownTextOffsetYLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.cooldownTextOffsetYLabel:Hide()
         
-        controls.cooldownTextOffsetYSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
+        controls.cooldownTextOffsetYSlider = CreateFrame("Slider", nil, textFrame, "OptionsSliderTemplate")
         controls.cooldownTextOffsetYSlider:SetPoint("LEFT", controls.cooldownTextOffsetYLabel, "RIGHT", 5, 0)
         controls.cooldownTextOffsetYSlider:SetSize(100, 16)
         controls.cooldownTextOffsetYSlider:SetMinMaxValues(-100, 100)
@@ -7122,7 +7276,7 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.cooldownTextOffsetYSlider.Text:SetText("")
         controls.cooldownTextOffsetYSlider:Hide()
         
-        controls.cooldownTextOffsetYValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.cooldownTextOffsetYValue = textFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         controls.cooldownTextOffsetYValue:SetPoint("LEFT", controls.cooldownTextOffsetYSlider, "RIGHT", 5, 0)
         controls.cooldownTextOffsetYValue:SetTextColor(1, 1, 1)
         controls.cooldownTextOffsetYValue:Hide()
@@ -7130,19 +7284,19 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         -- =====================================================
         -- Per-Icon Text Controls (Count/Charge Text)
         -- =====================================================
-        controls.countTextHeader = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        controls.countTextHeader:SetPoint("TOPLEFT", 10, -470)
+        controls.countTextHeader = textFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        controls.countTextHeader:SetPoint("TOPLEFT", 10, -133)
         controls.countTextHeader:SetText("Count/Charge Text")
         controls.countTextHeader:SetTextColor(1, 0.82, 0)
         controls.countTextHeader:Hide()
         
-        controls.countTextScaleLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.countTextScaleLabel:SetPoint("TOPLEFT", 10, -490)
+        controls.countTextScaleLabel = textFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.countTextScaleLabel:SetPoint("TOPLEFT", 10, -153)
         controls.countTextScaleLabel:SetText("Scale:")
         controls.countTextScaleLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.countTextScaleLabel:Hide()
         
-        controls.countTextSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
+        controls.countTextSlider = CreateFrame("Slider", nil, textFrame, "OptionsSliderTemplate")
         controls.countTextSlider:SetPoint("LEFT", controls.countTextScaleLabel, "RIGHT", 10, 0)
         controls.countTextSlider:SetSize(80, 16)
         controls.countTextSlider:SetMinMaxValues(0.5, 2.0)
@@ -7153,18 +7307,18 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.countTextSlider.Text:SetText("")
         controls.countTextSlider:Hide()
         
-        controls.countTextValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.countTextValue = textFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         controls.countTextValue:SetPoint("LEFT", controls.countTextSlider, "RIGHT", 5, 0)
         controls.countTextValue:SetTextColor(1, 1, 1)
         controls.countTextValue:Hide()
         
-        controls.countTextColorLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.countTextColorLabel:SetPoint("TOPLEFT", 10, -515)
+        controls.countTextColorLabel = textFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.countTextColorLabel:SetPoint("TOPLEFT", 10, -178)
         controls.countTextColorLabel:SetText("Color:")
         controls.countTextColorLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.countTextColorLabel:Hide()
         
-        controls.countTextColorBtn = CreateFrame("Button", nil, controlsPanel, "BackdropTemplate")
+        controls.countTextColorBtn = CreateFrame("Button", nil, textFrame, "BackdropTemplate")
         controls.countTextColorBtn:SetPoint("LEFT", controls.countTextColorLabel, "RIGHT", 10, 0)
         controls.countTextColorBtn:SetSize(24, 16)
         controls.countTextColorBtn:SetBackdrop({bgFile = "Interface\\Buttons\\WHITE8x8", edgeFile = "Interface\\Buttons\\WHITE8x8", edgeSize = 1})
@@ -7172,13 +7326,13 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.countTextColorBtn:SetBackdropBorderColor(0.3, 0.3, 0.3, 1)
         controls.countTextColorBtn:Hide()
         
-        controls.countTextOffsetXLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.countTextOffsetXLabel:SetPoint("TOPLEFT", 10, -540)
+        controls.countTextOffsetXLabel = textFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.countTextOffsetXLabel:SetPoint("TOPLEFT", 10, -203)
         controls.countTextOffsetXLabel:SetText("Offset X:")
         controls.countTextOffsetXLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.countTextOffsetXLabel:Hide()
         
-        controls.countTextOffsetXSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
+        controls.countTextOffsetXSlider = CreateFrame("Slider", nil, textFrame, "OptionsSliderTemplate")
         controls.countTextOffsetXSlider:SetPoint("LEFT", controls.countTextOffsetXLabel, "RIGHT", 5, 0)
         controls.countTextOffsetXSlider:SetSize(100, 16)
         controls.countTextOffsetXSlider:SetMinMaxValues(-100, 100)
@@ -7189,18 +7343,18 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.countTextOffsetXSlider.Text:SetText("")
         controls.countTextOffsetXSlider:Hide()
         
-        controls.countTextOffsetXValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.countTextOffsetXValue = textFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         controls.countTextOffsetXValue:SetPoint("LEFT", controls.countTextOffsetXSlider, "RIGHT", 5, 0)
         controls.countTextOffsetXValue:SetTextColor(1, 1, 1)
         controls.countTextOffsetXValue:Hide()
         
-        controls.countTextOffsetYLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.countTextOffsetYLabel:SetPoint("TOPLEFT", 10, -565)
+        controls.countTextOffsetYLabel = textFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.countTextOffsetYLabel:SetPoint("TOPLEFT", 10, -228)
         controls.countTextOffsetYLabel:SetText("Offset Y:")
         controls.countTextOffsetYLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.countTextOffsetYLabel:Hide()
         
-        controls.countTextOffsetYSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
+        controls.countTextOffsetYSlider = CreateFrame("Slider", nil, textFrame, "OptionsSliderTemplate")
         controls.countTextOffsetYSlider:SetPoint("LEFT", controls.countTextOffsetYLabel, "RIGHT", 5, 0)
         controls.countTextOffsetYSlider:SetSize(100, 16)
         controls.countTextOffsetYSlider:SetMinMaxValues(-100, 100)
@@ -7211,7 +7365,7 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.countTextOffsetYSlider.Text:SetText("")
         controls.countTextOffsetYSlider:Hide()
         
-        controls.countTextOffsetYValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.countTextOffsetYValue = textFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         controls.countTextOffsetYValue:SetPoint("LEFT", controls.countTextOffsetYSlider, "RIGHT", 5, 0)
         controls.countTextOffsetYValue:SetTextColor(1, 1, 1)
         controls.countTextOffsetYValue:Hide()
@@ -7219,43 +7373,43 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         -- =====================================================
         -- Custom Label Controls (Accessibility feature)
         -- =====================================================
-        controls.labelHeader = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        controls.labelHeader:SetPoint("TOPLEFT", 10, -635)
+        controls.labelHeader = textFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        controls.labelHeader:SetPoint("TOPLEFT", 10, -298)
         controls.labelHeader:SetText("Custom Label (Accessibility)")
         controls.labelHeader:SetTextColor(1, 0.82, 0)
         controls.labelHeader:Hide()
         
-        controls.labelEnableCheck = CreateFrame("CheckButton", nil, controlsPanel, "UICheckButtonTemplate")
-        controls.labelEnableCheck:SetPoint("TOPLEFT", 10, -655)
+        controls.labelEnableCheck = CreateFrame("CheckButton", nil, textFrame, "UICheckButtonTemplate")
+        controls.labelEnableCheck:SetPoint("TOPLEFT", 10, -318)
         controls.labelEnableCheck:SetSize(24, 24)
         controls.labelEnableCheck:Hide()
         
-        controls.labelEnableLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.labelEnableLabel = textFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         controls.labelEnableLabel:SetPoint("LEFT", controls.labelEnableCheck, "RIGHT", 2, 0)
         controls.labelEnableLabel:SetText("Show Custom Label")
         controls.labelEnableLabel:SetTextColor(0.9, 0.9, 0.9)
         controls.labelEnableLabel:Hide()
         
-        controls.labelTextLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.labelTextLabel:SetPoint("TOPLEFT", 10, -685)
+        controls.labelTextLabel = textFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.labelTextLabel:SetPoint("TOPLEFT", 10, -348)
         controls.labelTextLabel:SetText("Text:")
         controls.labelTextLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.labelTextLabel:Hide()
         
-        controls.labelTextBox = CreateFrame("EditBox", nil, controlsPanel, "InputBoxTemplate")
+        controls.labelTextBox = CreateFrame("EditBox", nil, textFrame, "InputBoxTemplate")
         controls.labelTextBox:SetPoint("LEFT", controls.labelTextLabel, "RIGHT", 8, 0)
         controls.labelTextBox:SetSize(120, 18)
         controls.labelTextBox:SetAutoFocus(false)
         controls.labelTextBox:SetMaxLetters(20)
         controls.labelTextBox:Hide()
         
-        controls.labelSizeLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.labelSizeLabel = textFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         controls.labelSizeLabel:SetPoint("LEFT", controls.labelTextBox, "RIGHT", 15, 0)
         controls.labelSizeLabel:SetText("Size:")
         controls.labelSizeLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.labelSizeLabel:Hide()
         
-        controls.labelSizeSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
+        controls.labelSizeSlider = CreateFrame("Slider", nil, textFrame, "OptionsSliderTemplate")
         controls.labelSizeSlider:SetPoint("LEFT", controls.labelSizeLabel, "RIGHT", 5, 0)
         controls.labelSizeSlider:SetSize(60, 16)
         controls.labelSizeSlider:SetMinMaxValues(8, 32)
@@ -7266,18 +7420,18 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.labelSizeSlider.Text:SetText("")
         controls.labelSizeSlider:Hide()
         
-        controls.labelSizeValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.labelSizeValue = textFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         controls.labelSizeValue:SetPoint("LEFT", controls.labelSizeSlider, "RIGHT", 5, 0)
         controls.labelSizeValue:SetTextColor(1, 1, 1)
         controls.labelSizeValue:Hide()
         
-        controls.labelColorLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        controls.labelColorLabel:SetPoint("TOPLEFT", 10, -710)
+        controls.labelColorLabel = textFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.labelColorLabel:SetPoint("TOPLEFT", 10, -373)
         controls.labelColorLabel:SetText("Color:")
         controls.labelColorLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.labelColorLabel:Hide()
         
-        controls.labelColorBtn = CreateFrame("Button", nil, controlsPanel, "BackdropTemplate")
+        controls.labelColorBtn = CreateFrame("Button", nil, textFrame, "BackdropTemplate")
         controls.labelColorBtn:SetPoint("LEFT", controls.labelColorLabel, "RIGHT", 8, 0)
         controls.labelColorBtn:SetSize(20, 20)
         controls.labelColorBtn:SetBackdrop({ 
@@ -7289,13 +7443,13 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.labelColorBtn:SetBackdropBorderColor(0.3, 0.3, 0.3, 1)
         controls.labelColorBtn:Hide()
         
-        controls.labelOffsetLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.labelOffsetLabel = textFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         controls.labelOffsetLabel:SetPoint("LEFT", controls.labelColorBtn, "RIGHT", 15, 0)
         controls.labelOffsetLabel:SetText("X:")
         controls.labelOffsetLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.labelOffsetLabel:Hide()
         
-        controls.labelOffsetXSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
+        controls.labelOffsetXSlider = CreateFrame("Slider", nil, textFrame, "OptionsSliderTemplate")
         controls.labelOffsetXSlider:SetPoint("LEFT", controls.labelOffsetLabel, "RIGHT", 3, 0)
         controls.labelOffsetXSlider:SetSize(100, 16)
         controls.labelOffsetXSlider:SetMinMaxValues(-100, 100)
@@ -7306,18 +7460,18 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.labelOffsetXSlider.Text:SetText("")
         controls.labelOffsetXSlider:Hide()
         
-        controls.labelOffsetXValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.labelOffsetXValue = textFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         controls.labelOffsetXValue:SetPoint("LEFT", controls.labelOffsetXSlider, "RIGHT", 3, 0)
         controls.labelOffsetXValue:SetTextColor(1, 1, 1)
         controls.labelOffsetXValue:Hide()
         
-        controls.labelOffsetYLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.labelOffsetYLabel = textFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         controls.labelOffsetYLabel:SetPoint("LEFT", controls.labelOffsetXValue, "RIGHT", 8, 0)
         controls.labelOffsetYLabel:SetText("Y:")
         controls.labelOffsetYLabel:SetTextColor(0.8, 0.8, 0.8)
         controls.labelOffsetYLabel:Hide()
         
-        controls.labelOffsetYSlider = CreateFrame("Slider", nil, controlsPanel, "OptionsSliderTemplate")
+        controls.labelOffsetYSlider = CreateFrame("Slider", nil, textFrame, "OptionsSliderTemplate")
         controls.labelOffsetYSlider:SetPoint("LEFT", controls.labelOffsetYLabel, "RIGHT", 3, 0)
         controls.labelOffsetYSlider:SetSize(100, 16)
         controls.labelOffsetYSlider:SetMinMaxValues(-100, 100)
@@ -7328,19 +7482,643 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         controls.labelOffsetYSlider.Text:SetText("")
         controls.labelOffsetYSlider:Hide()
         
-        controls.labelOffsetYValue = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        controls.labelOffsetYValue = textFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         controls.labelOffsetYValue:SetPoint("LEFT", controls.labelOffsetYSlider, "RIGHT", 3, 0)
         controls.labelOffsetYValue:SetTextColor(1, 1, 1)
         controls.labelOffsetYValue:Hide()
         
-        -- Helper to show/hide all controls
+        -- ============================================================
+        -- ALERTS TAB CONTROLS (on alertsFrame)
+        -- ============================================================
+        local alertControls = {}
+        
+        -- Helper to build one alert section (glow + pulse) for per-icon alerts
+        local function BuildPerIconAlertBlock(parent, yStart, prefix, sectionLabel, descText, timingMin, timingMax, timingHint)
+            local ac = {}
+            local y = yStart
+            
+            -- Section: Glow
+            ac.glowHeader = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            ac.glowHeader:SetPoint("TOPLEFT", 10, y)
+            ac.glowHeader:SetText("|cffaaaaaa— " .. sectionLabel .. " Glow —|r")
+            y = y - 18
+            
+            ac.glowDesc = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            ac.glowDesc:SetPoint("TOPLEFT", 10, y)
+            ac.glowDesc:SetWidth(350)
+            ac.glowDesc:SetText("|cff888888" .. descText .. "|r")
+            ac.glowDesc:SetJustifyH("LEFT")
+            y = y - 18
+            
+            -- Enable Glow
+            ac.glowEnableCheck = CreateFrame("CheckButton", nil, parent, "InterfaceOptionsCheckButtonTemplate")
+            ac.glowEnableCheck:SetPoint("TOPLEFT", 25, y)
+            ac.glowEnableCheck.Text:SetText("Enable Glow")
+            ac.glowEnableCheck:SetScript("OnClick", function(self)
+                if currentAlertSpellID and BuffHighlights then
+                    BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "GlowEnabled", self:GetChecked())
+                end
+            end)
+            y = y - 28
+            
+            -- Glow Style dropdown
+            ac.glowStyleLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            ac.glowStyleLabel:SetPoint("TOPLEFT", 35, y)
+            ac.glowStyleLabel:SetText("Glow Style:")
+            
+            ac.glowStyleDropdown = CreateFrame("Frame", "TUICD_PIAlert_" .. prefix .. "GlowStyle", parent, "UIDropDownMenuTemplate")
+            ac.glowStyleDropdown:SetPoint("LEFT", ac.glowStyleLabel, "RIGHT", -10, -3)
+            UIDropDownMenu_SetWidth(ac.glowStyleDropdown, 120)
+            
+            local glowStyleOptions = {
+                { label = "Pixel Border", value = "pixel" },
+                { label = "Shine Flash", value = "shine" },
+                { label = "Spell Glow", value = "glow" },
+            }
+            
+            UIDropDownMenu_Initialize(ac.glowStyleDropdown, function(self, level)
+                for _, opt in ipairs(glowStyleOptions) do
+                    local info = UIDropDownMenu_CreateInfo()
+                    info.text = opt.label
+                    info.value = opt.value
+                    info.func = function()
+                        UIDropDownMenu_SetSelectedValue(ac.glowStyleDropdown, opt.value)
+                        UIDropDownMenu_SetText(ac.glowStyleDropdown, opt.label)
+                        if currentAlertSpellID and BuffHighlights then
+                            BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "GlowStyle", opt.value)
+                        end
+                        if ac.updateGreyState then ac.updateGreyState() end
+                    end
+                    UIDropDownMenu_AddButton(info, level)
+                end
+            end)
+            y = y - 32
+            
+            -- Glow Color
+            ac.glowColorLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            ac.glowColorLabel:SetPoint("TOPLEFT", 35, y)
+            ac.glowColorLabel:SetText("Glow Color:")
+            
+            ac.glowColorSwatch = CreateFrame("Button", nil, parent)
+            ac.glowColorSwatch:SetPoint("LEFT", ac.glowColorLabel, "RIGHT", 10, 0)
+            ac.glowColorSwatch:SetSize(24, 24)
+            
+            local glowBorder = ac.glowColorSwatch:CreateTexture(nil, "BACKGROUND")
+            glowBorder:SetPoint("TOPLEFT", -2, 2)
+            glowBorder:SetPoint("BOTTOMRIGHT", 2, -2)
+            glowBorder:SetColorTexture(0.5, 0.5, 0.5, 1)
+            
+            ac.glowColorTex = ac.glowColorSwatch:CreateTexture(nil, "ARTWORK")
+            ac.glowColorTex:SetAllPoints()
+            
+            ac.glowColorSwatch:SetScript("OnClick", function()
+                if not currentAlertSpellID or not BuffHighlights then return end
+                local cr = BuffHighlights:GetIconAlertSetting(currentAlertSpellID, prefix .. "GlowColorR") or 1.0
+                local cg = BuffHighlights:GetIconAlertSetting(currentAlertSpellID, prefix .. "GlowColorG") or 0.82
+                local cb = BuffHighlights:GetIconAlertSetting(currentAlertSpellID, prefix .. "GlowColorB") or 0.0
+                ColorPickerFrame:SetupColorPickerAndShow({
+                    r = cr, g = cg, b = cb,
+                    swatchFunc = function()
+                        local nr, ng, nb = ColorPickerFrame:GetColorRGB()
+                        BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "GlowColorR", nr)
+                        BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "GlowColorG", ng)
+                        BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "GlowColorB", nb)
+                        ac.glowColorTex:SetColorTexture(nr, ng, nb, 1)
+                    end,
+                    cancelFunc = function(prev)
+                        BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "GlowColorR", prev.r)
+                        BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "GlowColorG", prev.g)
+                        BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "GlowColorB", prev.b)
+                        ac.glowColorTex:SetColorTexture(prev.r, prev.g, prev.b, 1)
+                    end,
+                })
+            end)
+            y = y - 30
+            
+            -- Glow Intensity slider
+            ac.glowIntensityLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            ac.glowIntensityLabel:SetPoint("TOPLEFT", 35, y)
+            ac.glowIntensityLabel:SetText("Glow Intensity")
+            
+            ac.glowIntensitySlider = CreateFrame("Slider", nil, parent, "OptionsSliderTemplate")
+            ac.glowIntensitySlider:SetPoint("LEFT", ac.glowIntensityLabel, "RIGHT", 10, 0)
+            ac.glowIntensitySlider:SetWidth(120)
+            ac.glowIntensitySlider:SetHeight(17)
+            ac.glowIntensitySlider:SetMinMaxValues(0.1, 1.0)
+            ac.glowIntensitySlider:SetValueStep(0.05)
+            ac.glowIntensitySlider:SetObeyStepOnDrag(true)
+            ac.glowIntensitySlider.Low:SetText("") ac.glowIntensitySlider.High:SetText("") ac.glowIntensitySlider.Text:SetText("")
+            
+            ac.glowIntensityValue = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            ac.glowIntensityValue:SetPoint("LEFT", ac.glowIntensitySlider, "RIGHT", 5, 0)
+            ac.glowIntensityValue:SetTextColor(1, 1, 1)
+            
+            ac.glowIntensitySlider:SetScript("OnValueChanged", function(self, val)
+                ac.glowIntensityValue:SetText(string.format("%.2f", val))
+                if currentAlertSpellID and BuffHighlights then
+                    BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "GlowIntensity", val)
+                end
+            end)
+            y = y - 22
+            
+            -- Pulse Speed slider
+            ac.glowSpeedLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            ac.glowSpeedLabel:SetPoint("TOPLEFT", 35, y)
+            ac.glowSpeedLabel:SetText("Pulse Speed")
+            
+            ac.glowSpeedSlider = CreateFrame("Slider", nil, parent, "OptionsSliderTemplate")
+            ac.glowSpeedSlider:SetPoint("LEFT", ac.glowSpeedLabel, "RIGHT", 10, 0)
+            ac.glowSpeedSlider:SetWidth(120)
+            ac.glowSpeedSlider:SetHeight(17)
+            ac.glowSpeedSlider:SetMinMaxValues(0.1, 2.0)
+            ac.glowSpeedSlider:SetValueStep(0.1)
+            ac.glowSpeedSlider:SetObeyStepOnDrag(true)
+            ac.glowSpeedSlider.Low:SetText("") ac.glowSpeedSlider.High:SetText("") ac.glowSpeedSlider.Text:SetText("")
+            
+            ac.glowSpeedValue = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            ac.glowSpeedValue:SetPoint("LEFT", ac.glowSpeedSlider, "RIGHT", 5, 0)
+            ac.glowSpeedValue:SetTextColor(1, 1, 1)
+            
+            ac.glowSpeedSlider:SetScript("OnValueChanged", function(self, val)
+                ac.glowSpeedValue:SetText(string.format("%.1f", val))
+                if currentAlertSpellID and BuffHighlights then
+                    BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "GlowSpeed", val)
+                end
+            end)
+            y = y - 22
+            
+            -- Duration slider
+            ac.glowDurationLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            ac.glowDurationLabel:SetPoint("TOPLEFT", 35, y)
+            ac.glowDurationLabel:SetText("Duration")
+            
+            ac.glowDurationSlider = CreateFrame("Slider", nil, parent, "OptionsSliderTemplate")
+            ac.glowDurationSlider:SetPoint("LEFT", ac.glowDurationLabel, "RIGHT", 10, 0)
+            ac.glowDurationSlider:SetWidth(120)
+            ac.glowDurationSlider:SetHeight(17)
+            ac.glowDurationSlider:SetMinMaxValues(0.5, 10.0)
+            ac.glowDurationSlider:SetValueStep(0.5)
+            ac.glowDurationSlider:SetObeyStepOnDrag(true)
+            ac.glowDurationSlider.Low:SetText("") ac.glowDurationSlider.High:SetText("") ac.glowDurationSlider.Text:SetText("")
+            
+            ac.glowDurationValue = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            ac.glowDurationValue:SetPoint("LEFT", ac.glowDurationSlider, "RIGHT", 5, 0)
+            ac.glowDurationValue:SetTextColor(1, 1, 1)
+            
+            ac.glowDurationSlider:SetScript("OnValueChanged", function(self, val)
+                ac.glowDurationValue:SetText(string.format("%.1f", val))
+                if currentAlertSpellID and BuffHighlights then
+                    BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "GlowDuration", val)
+                end
+            end)
+            y = y - 22
+            
+            -- Border Thickness slider (pixel glow only)
+            ac.glowThicknessLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            ac.glowThicknessLabel:SetPoint("TOPLEFT", 35, y)
+            ac.glowThicknessLabel:SetText("Border Thickness")
+            
+            ac.glowThicknessSlider = CreateFrame("Slider", nil, parent, "OptionsSliderTemplate")
+            ac.glowThicknessSlider:SetPoint("LEFT", ac.glowThicknessLabel, "RIGHT", 10, 0)
+            ac.glowThicknessSlider:SetWidth(100)
+            ac.glowThicknessSlider:SetHeight(17)
+            ac.glowThicknessSlider:SetMinMaxValues(1, 6)
+            ac.glowThicknessSlider:SetValueStep(1)
+            ac.glowThicknessSlider:SetObeyStepOnDrag(true)
+            ac.glowThicknessSlider.Low:SetText("") ac.glowThicknessSlider.High:SetText("") ac.glowThicknessSlider.Text:SetText("")
+            
+            ac.glowThicknessValue = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            ac.glowThicknessValue:SetPoint("LEFT", ac.glowThicknessSlider, "RIGHT", 5, 0)
+            ac.glowThicknessValue:SetTextColor(1, 1, 1)
+            
+            ac.glowThicknessSlider:SetScript("OnValueChanged", function(self, val)
+                ac.glowThicknessValue:SetText(tostring(math.floor(val)))
+                if currentAlertSpellID and BuffHighlights then
+                    BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "GlowThickness", math.floor(val))
+                end
+            end)
+            y = y - 22
+            
+            -- Glow Scale slider (spell glow only)
+            ac.glowScaleLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            ac.glowScaleLabel:SetPoint("TOPLEFT", 35, y)
+            ac.glowScaleLabel:SetText("Glow Scale")
+            
+            ac.glowScaleSlider = CreateFrame("Slider", nil, parent, "OptionsSliderTemplate")
+            ac.glowScaleSlider:SetPoint("LEFT", ac.glowScaleLabel, "RIGHT", 10, 0)
+            ac.glowScaleSlider:SetWidth(120)
+            ac.glowScaleSlider:SetHeight(17)
+            ac.glowScaleSlider:SetMinMaxValues(0.5, 2.0)
+            ac.glowScaleSlider:SetValueStep(0.1)
+            ac.glowScaleSlider:SetObeyStepOnDrag(true)
+            ac.glowScaleSlider.Low:SetText("") ac.glowScaleSlider.High:SetText("") ac.glowScaleSlider.Text:SetText("")
+            
+            ac.glowScaleValue = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            ac.glowScaleValue:SetPoint("LEFT", ac.glowScaleSlider, "RIGHT", 5, 0)
+            ac.glowScaleValue:SetTextColor(1, 1, 1)
+            
+            ac.glowScaleSlider:SetScript("OnValueChanged", function(self, val)
+                ac.glowScaleValue:SetText(string.format("%.1f", val))
+                if currentAlertSpellID and BuffHighlights then
+                    BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "GlowScale", val)
+                end
+            end)
+            y = y - 22
+            
+            -- Grey state helper for thickness/scale
+            ac.updateGreyState = function()
+                if not currentAlertSpellID or not BuffHighlights then return end
+                local style = BuffHighlights:GetIconAlertSetting(currentAlertSpellID, prefix .. "GlowStyle") or "pixel"
+                local function ApplyGrey(ctrl, active)
+                    if not ctrl then return end
+                    if ctrl.SetAlpha then ctrl:SetAlpha(active and 1 or 0.4) end
+                    if ctrl.EnableMouse then ctrl:EnableMouse(active) end
+                end
+                ApplyGrey(ac.glowThicknessSlider, style == "pixel")
+                ApplyGrey(ac.glowThicknessLabel, style == "pixel")
+                ApplyGrey(ac.glowScaleSlider, style == "glow")
+                ApplyGrey(ac.glowScaleLabel, style == "glow")
+            end
+            
+            if timingMin then
+                -- Timing slider
+                ac.glowTimingLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                ac.glowTimingLabel:SetPoint("TOPLEFT", 35, y)
+                ac.glowTimingLabel:SetText("Timing")
+                
+                ac.glowTimingSlider = CreateFrame("Slider", nil, parent, "OptionsSliderTemplate")
+                ac.glowTimingSlider:SetPoint("LEFT", ac.glowTimingLabel, "RIGHT", 10, 0)
+                ac.glowTimingSlider:SetWidth(120)
+                ac.glowTimingSlider:SetHeight(17)
+                ac.glowTimingSlider:SetMinMaxValues(timingMin, timingMax)
+                ac.glowTimingSlider:SetValueStep(0.5)
+                ac.glowTimingSlider:SetObeyStepOnDrag(true)
+                ac.glowTimingSlider.Low:SetText("") ac.glowTimingSlider.High:SetText("") ac.glowTimingSlider.Text:SetText("")
+                
+                ac.glowTimingValue = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                ac.glowTimingValue:SetPoint("LEFT", ac.glowTimingSlider, "RIGHT", 5, 0)
+                ac.glowTimingValue:SetTextColor(1, 1, 1)
+                
+                ac.glowTimingSlider:SetScript("OnValueChanged", function(self, val)
+                    ac.glowTimingValue:SetText(string.format("%.1f", val))
+                    if currentAlertSpellID and BuffHighlights then
+                        BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "GlowTiming", val)
+                    end
+                end)
+                y = y - 18
+                
+                ac.glowTimingHint = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                ac.glowTimingHint:SetPoint("TOPLEFT", 35, y)
+                ac.glowTimingHint:SetWidth(350)
+                ac.glowTimingHint:SetText("|cff888888" .. timingHint .. "|r")
+                ac.glowTimingHint:SetJustifyH("LEFT")
+                y = y - 22
+            end
+            
+            -- Section: Pulse
+            ac.pulseHeader = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            ac.pulseHeader:SetPoint("TOPLEFT", 10, y)
+            ac.pulseHeader:SetText("|cffaaaaaa— " .. sectionLabel .. " Pulse —|r")
+            y = y - 18
+            
+            -- Enable Pulse
+            ac.pulseEnableCheck = CreateFrame("CheckButton", nil, parent, "InterfaceOptionsCheckButtonTemplate")
+            ac.pulseEnableCheck:SetPoint("TOPLEFT", 25, y)
+            ac.pulseEnableCheck.Text:SetText("Enable Pulse")
+            ac.pulseEnableCheck:SetScript("OnClick", function(self)
+                if currentAlertSpellID and BuffHighlights then
+                    BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "PulseEnabled", self:GetChecked())
+                end
+            end)
+            y = y - 28
+            
+            -- Pulse Scale slider
+            ac.pulseScaleLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            ac.pulseScaleLabel:SetPoint("TOPLEFT", 35, y)
+            ac.pulseScaleLabel:SetText("Pulse Scale")
+            
+            ac.pulseScaleSlider = CreateFrame("Slider", nil, parent, "OptionsSliderTemplate")
+            ac.pulseScaleSlider:SetPoint("LEFT", ac.pulseScaleLabel, "RIGHT", 10, 0)
+            ac.pulseScaleSlider:SetWidth(120)
+            ac.pulseScaleSlider:SetHeight(17)
+            ac.pulseScaleSlider:SetMinMaxValues(1.0, 2.0)
+            ac.pulseScaleSlider:SetValueStep(0.05)
+            ac.pulseScaleSlider:SetObeyStepOnDrag(true)
+            ac.pulseScaleSlider.Low:SetText("") ac.pulseScaleSlider.High:SetText("") ac.pulseScaleSlider.Text:SetText("")
+            
+            ac.pulseScaleValue = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            ac.pulseScaleValue:SetPoint("LEFT", ac.pulseScaleSlider, "RIGHT", 5, 0)
+            ac.pulseScaleValue:SetTextColor(1, 1, 1)
+            
+            ac.pulseScaleSlider:SetScript("OnValueChanged", function(self, val)
+                ac.pulseScaleValue:SetText(string.format("%.2f", val))
+                if currentAlertSpellID and BuffHighlights then
+                    BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "PulseScale", val)
+                end
+            end)
+            y = y - 22
+            
+            -- Pulse Duration slider
+            ac.pulseDurationLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            ac.pulseDurationLabel:SetPoint("TOPLEFT", 35, y)
+            ac.pulseDurationLabel:SetText("Pulse Duration")
+            
+            ac.pulseDurationSlider = CreateFrame("Slider", nil, parent, "OptionsSliderTemplate")
+            ac.pulseDurationSlider:SetPoint("LEFT", ac.pulseDurationLabel, "RIGHT", 10, 0)
+            ac.pulseDurationSlider:SetWidth(120)
+            ac.pulseDurationSlider:SetHeight(17)
+            ac.pulseDurationSlider:SetMinMaxValues(0.2, 2.0)
+            ac.pulseDurationSlider:SetValueStep(0.1)
+            ac.pulseDurationSlider:SetObeyStepOnDrag(true)
+            ac.pulseDurationSlider.Low:SetText("") ac.pulseDurationSlider.High:SetText("") ac.pulseDurationSlider.Text:SetText("")
+            
+            ac.pulseDurationValue = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            ac.pulseDurationValue:SetPoint("LEFT", ac.pulseDurationSlider, "RIGHT", 5, 0)
+            ac.pulseDurationValue:SetTextColor(1, 1, 1)
+            
+            ac.pulseDurationSlider:SetScript("OnValueChanged", function(self, val)
+                ac.pulseDurationValue:SetText(string.format("%.1f", val))
+                if currentAlertSpellID and BuffHighlights then
+                    BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "PulseDuration", val)
+                end
+            end)
+            y = y - 22
+            
+            -- Pulse Count slider
+            ac.pulseCountLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            ac.pulseCountLabel:SetPoint("TOPLEFT", 35, y)
+            ac.pulseCountLabel:SetText("Pulse Count")
+            
+            ac.pulseCountSlider = CreateFrame("Slider", nil, parent, "OptionsSliderTemplate")
+            ac.pulseCountSlider:SetPoint("LEFT", ac.pulseCountLabel, "RIGHT", 10, 0)
+            ac.pulseCountSlider:SetWidth(120)
+            ac.pulseCountSlider:SetHeight(17)
+            ac.pulseCountSlider:SetMinMaxValues(1, 10)
+            ac.pulseCountSlider:SetValueStep(1)
+            ac.pulseCountSlider:SetObeyStepOnDrag(true)
+            ac.pulseCountSlider.Low:SetText("") ac.pulseCountSlider.High:SetText("") ac.pulseCountSlider.Text:SetText("")
+            
+            ac.pulseCountValue = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            ac.pulseCountValue:SetPoint("LEFT", ac.pulseCountSlider, "RIGHT", 5, 0)
+            ac.pulseCountValue:SetTextColor(1, 1, 1)
+            
+            ac.pulseCountSlider:SetScript("OnValueChanged", function(self, val)
+                ac.pulseCountValue:SetText(tostring(math.floor(val)))
+                if currentAlertSpellID and BuffHighlights then
+                    BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "PulseCount", math.floor(val))
+                end
+            end)
+            y = y - 22
+            
+            if timingMin then
+                -- Pulse Timing slider
+                ac.pulseTimingLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                ac.pulseTimingLabel:SetPoint("TOPLEFT", 35, y)
+                ac.pulseTimingLabel:SetText("Timing")
+                
+                ac.pulseTimingSlider = CreateFrame("Slider", nil, parent, "OptionsSliderTemplate")
+                ac.pulseTimingSlider:SetPoint("LEFT", ac.pulseTimingLabel, "RIGHT", 10, 0)
+                ac.pulseTimingSlider:SetWidth(120)
+                ac.pulseTimingSlider:SetHeight(17)
+                ac.pulseTimingSlider:SetMinMaxValues(timingMin, timingMax)
+                ac.pulseTimingSlider:SetValueStep(0.5)
+                ac.pulseTimingSlider:SetObeyStepOnDrag(true)
+                ac.pulseTimingSlider.Low:SetText("") ac.pulseTimingSlider.High:SetText("") ac.pulseTimingSlider.Text:SetText("")
+                
+                ac.pulseTimingValue = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                ac.pulseTimingValue:SetPoint("LEFT", ac.pulseTimingSlider, "RIGHT", 5, 0)
+                ac.pulseTimingValue:SetTextColor(1, 1, 1)
+                
+                ac.pulseTimingSlider:SetScript("OnValueChanged", function(self, val)
+                    ac.pulseTimingValue:SetText(string.format("%.1f", val))
+                    if currentAlertSpellID and BuffHighlights then
+                        BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "PulseTiming", val)
+                    end
+                end)
+                y = y - 18
+                
+                ac.pulseTimingHint = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                ac.pulseTimingHint:SetPoint("TOPLEFT", 35, y)
+                ac.pulseTimingHint:SetWidth(350)
+                ac.pulseTimingHint:SetText("|cff888888" .. timingHint .. "|r")
+                ac.pulseTimingHint:SetJustifyH("LEFT")
+                y = y - 20
+            end
+            
+            return y, ac
+        end
+        
+        -- Build the two alert sections on alertsFrame
+        local alertY = -8
+        local onStartControls, onEndControls
+        
+        alertY, onStartControls = BuildPerIconAlertBlock(alertsFrame, alertY,
+            "onStart",
+            "On Buff Gained",
+            "Flash an effect on this icon when the buff is gained.",
+            0, 5,
+            "0 = on gain, positive = seconds after gain")
+        
+        alertY = alertY - 16  -- spacing between sections
+        
+        alertY, onEndControls = BuildPerIconAlertBlock(alertsFrame, alertY,
+            "onEnd",
+            "On Buff Expiring",
+            "Flash an effect on this icon when the buff expires.",
+            nil, nil,
+            nil)
+        
+        alertControls.onStart = onStartControls
+        alertControls.onEnd = onEndControls
+        
+        -- Function to update alert control values when slot changes
+        local function UpdateAlertControls()
+            if not currentAlertSpellID or not BuffHighlights then return end
+            
+            for _, prefix in ipairs({"onStart", "onEnd"}) do
+                local ac = alertControls[prefix]
+                if not ac then break end
+                
+                local function get(key)
+                    return BuffHighlights:GetIconAlertSetting(currentAlertSpellID, prefix .. key)
+                end
+                
+                -- Clear OnValueChanged before setting values
+                ac.glowIntensitySlider:SetScript("OnValueChanged", nil)
+                ac.glowSpeedSlider:SetScript("OnValueChanged", nil)
+                ac.glowDurationSlider:SetScript("OnValueChanged", nil)
+                ac.glowThicknessSlider:SetScript("OnValueChanged", nil)
+                ac.glowScaleSlider:SetScript("OnValueChanged", nil)
+                if ac.glowTimingSlider then ac.glowTimingSlider:SetScript("OnValueChanged", nil) end
+                ac.pulseScaleSlider:SetScript("OnValueChanged", nil)
+                ac.pulseDurationSlider:SetScript("OnValueChanged", nil)
+                ac.pulseCountSlider:SetScript("OnValueChanged", nil)
+                if ac.pulseTimingSlider then ac.pulseTimingSlider:SetScript("OnValueChanged", nil) end
+                
+                -- Set values
+                ac.glowEnableCheck:SetChecked(get("GlowEnabled") or false)
+                
+                local style = get("GlowStyle") or "pixel"
+                UIDropDownMenu_SetSelectedValue(ac.glowStyleDropdown, style)
+                local styleLabels = { pixel = "Pixel Border", shine = "Shine Flash", glow = "Spell Glow" }
+                UIDropDownMenu_SetText(ac.glowStyleDropdown, styleLabels[style] or "Pixel Border")
+                
+                local cr = get("GlowColorR") or 1.0
+                local cg = get("GlowColorG") or 0.82
+                local cb = get("GlowColorB") or 0.0
+                ac.glowColorTex:SetColorTexture(cr, cg, cb, 1)
+                
+                local intensity = get("GlowIntensity") or 0.8
+                ac.glowIntensitySlider:SetValue(intensity)
+                ac.glowIntensityValue:SetText(string.format("%.2f", intensity))
+                
+                local speed = get("GlowSpeed") or 0.6
+                ac.glowSpeedSlider:SetValue(speed)
+                ac.glowSpeedValue:SetText(string.format("%.1f", speed))
+                
+                local dur = get("GlowDuration") or 3.0
+                ac.glowDurationSlider:SetValue(dur)
+                ac.glowDurationValue:SetText(string.format("%.1f", dur))
+                
+                local thick = get("GlowThickness") or 2
+                ac.glowThicknessSlider:SetValue(thick)
+                ac.glowThicknessValue:SetText(tostring(math.floor(thick)))
+                
+                local scale = get("GlowScale") or 1.0
+                ac.glowScaleSlider:SetValue(scale)
+                ac.glowScaleValue:SetText(string.format("%.1f", scale))
+                
+                local glowTiming = get("GlowTiming") or 0
+                if ac.glowTimingSlider then
+                    ac.glowTimingSlider:SetValue(glowTiming)
+                    ac.glowTimingValue:SetText(string.format("%.1f", glowTiming))
+                end
+                
+                ac.pulseEnableCheck:SetChecked(get("PulseEnabled") or false)
+                
+                local pScale = get("PulseScale") or 1.3
+                ac.pulseScaleSlider:SetValue(pScale)
+                ac.pulseScaleValue:SetText(string.format("%.2f", pScale))
+                
+                local pDur = get("PulseDuration") or 0.4
+                ac.pulseDurationSlider:SetValue(pDur)
+                ac.pulseDurationValue:SetText(string.format("%.1f", pDur))
+                
+                local pCount = get("PulseCount") or 3
+                ac.pulseCountSlider:SetValue(pCount)
+                ac.pulseCountValue:SetText(tostring(math.floor(pCount)))
+                
+                local pTiming = get("PulseTiming") or 0
+                if ac.pulseTimingSlider then
+                    ac.pulseTimingSlider:SetValue(pTiming)
+                    ac.pulseTimingValue:SetText(string.format("%.1f", pTiming))
+                end
+                
+                -- Restore OnValueChanged scripts
+                ac.glowIntensitySlider:SetScript("OnValueChanged", function(self, val)
+                    ac.glowIntensityValue:SetText(string.format("%.2f", val))
+                    if currentAlertSpellID and BuffHighlights then
+                        BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "GlowIntensity", val)
+                    end
+                end)
+                ac.glowSpeedSlider:SetScript("OnValueChanged", function(self, val)
+                    ac.glowSpeedValue:SetText(string.format("%.1f", val))
+                    if currentAlertSpellID and BuffHighlights then
+                        BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "GlowSpeed", val)
+                    end
+                end)
+                ac.glowDurationSlider:SetScript("OnValueChanged", function(self, val)
+                    ac.glowDurationValue:SetText(string.format("%.1f", val))
+                    if currentAlertSpellID and BuffHighlights then
+                        BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "GlowDuration", val)
+                    end
+                end)
+                ac.glowThicknessSlider:SetScript("OnValueChanged", function(self, val)
+                    ac.glowThicknessValue:SetText(tostring(math.floor(val)))
+                    if currentAlertSpellID and BuffHighlights then
+                        BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "GlowThickness", math.floor(val))
+                    end
+                end)
+                ac.glowScaleSlider:SetScript("OnValueChanged", function(self, val)
+                    ac.glowScaleValue:SetText(string.format("%.1f", val))
+                    if currentAlertSpellID and BuffHighlights then
+                        BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "GlowScale", val)
+                    end
+                end)
+                if ac.glowTimingSlider then
+                    ac.glowTimingSlider:SetScript("OnValueChanged", function(self, val)
+                        ac.glowTimingValue:SetText(string.format("%.1f", val))
+                        if currentAlertSpellID and BuffHighlights then
+                            BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "GlowTiming", val)
+                        end
+                    end)
+                end
+                ac.pulseScaleSlider:SetScript("OnValueChanged", function(self, val)
+                    ac.pulseScaleValue:SetText(string.format("%.2f", val))
+                    if currentAlertSpellID and BuffHighlights then
+                        BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "PulseScale", val)
+                    end
+                end)
+                ac.pulseDurationSlider:SetScript("OnValueChanged", function(self, val)
+                    ac.pulseDurationValue:SetText(string.format("%.1f", val))
+                    if currentAlertSpellID and BuffHighlights then
+                        BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "PulseDuration", val)
+                    end
+                end)
+                ac.pulseCountSlider:SetScript("OnValueChanged", function(self, val)
+                    ac.pulseCountValue:SetText(tostring(math.floor(val)))
+                    if currentAlertSpellID and BuffHighlights then
+                        BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "PulseCount", math.floor(val))
+                    end
+                end)
+                if ac.pulseTimingSlider then
+                    ac.pulseTimingSlider:SetScript("OnValueChanged", function(self, val)
+                        ac.pulseTimingValue:SetText(string.format("%.1f", val))
+                        if currentAlertSpellID and BuffHighlights then
+                            BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "PulseTiming", val)
+                        end
+                    end)
+                end
+                
+                -- Update grey state for thickness/scale
+                if ac.updateGreyState then ac.updateGreyState() end
+            end
+        end
+        
+        -- Helper to show/hide all controls (tab-aware)
         local function ShowControls(show)
             noSelectionLabel:SetShown(not show)
-            for _, ctrl in pairs(controls) do
-                if ctrl.SetShown then ctrl:SetShown(show)
-                elseif ctrl.Show then
-                    if show then ctrl:Show() else ctrl:Hide() end
+            tabBarFrame:SetShown(show)
+            if show then
+                -- Show controls that belong to the active tab's container
+                for _, ctrl in pairs(controls) do
+                    if ctrl.SetShown then ctrl:SetShown(show)
+                    elseif ctrl.Show then
+                        if show then ctrl:Show() else ctrl:Hide() end
+                    end
                 end
+                -- Show only the active tab's container
+                for key, frame in pairs(perIconTabFrames) do
+                    frame:SetShown(key == activePerIconTab)
+                end
+                -- Update underline
+                local activeBtn = perIconTabButtons[activePerIconTab]
+                if activeBtn then
+                    tabUnderline:ClearAllPoints()
+                    tabUnderline:SetPoint("BOTTOMLEFT", activeBtn, "BOTTOMLEFT", 0, -2)
+                    tabUnderline:SetPoint("BOTTOMRIGHT", activeBtn, "BOTTOMRIGHT", 0, -2)
+                    tabUnderline:Show()
+                end
+            else
+                -- Hide all controls and containers
+                for _, ctrl in pairs(controls) do
+                    if ctrl.SetShown then ctrl:SetShown(false)
+                    elseif ctrl.Hide then ctrl:Hide() end
+                end
+                for _, frame in pairs(perIconTabFrames) do
+                    frame:Hide()
+                end
+                tabUnderline:Hide()
             end
         end
         
@@ -7382,11 +8160,21 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
                 end
             end
             
-            controls.header:SetText("Slot #" .. slotIndex)
+            -- Show spell name from Bridge if available, otherwise slot number
+            local bridgeSpellID = TUICD.BuffIdentityBridge and TUICD.BuffIdentityBridge:GetSpellIDForSlot(slotIndex)
+            local headerName = "Slot #" .. slotIndex
+            if bridgeSpellID then
+                local spellName = GetSpellName and GetSpellName(bridgeSpellID) or nil
+                if spellName then
+                    headerName = spellName
+                end
+            end
+            controls.header:SetText(headerName)
             
-            -- Get settings for current state
-            local db = TweaksUI_Cooldowns_CharDB and TweaksUI_Cooldowns_CharDB.buffHighlights
-            local isEnabled = db and db.enabled and db.enabled[slotIndex]
+            -- Set alert spellID for per-icon alert controls
+            currentAlertSpellID = bridgeSpellID
+            -- Get settings for current state (use public API - handles spellID keying)
+            local isEnabled = BuffHighlights:IsEnabled(slotIndex)
             local showState = BuffHighlights:GetShowState(slotIndex, currentState)
             local size = BuffHighlights:GetSize(slotIndex, currentState)
             local opacity = BuffHighlights:GetOpacity(slotIndex, currentState)
@@ -7431,13 +8219,13 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
             controls.cooldownTextOffsetYSlider:SetValue(cdTextOffsetY or 0)
             controls.cooldownTextOffsetYValue:SetText(tostring(cdTextOffsetY or 0))
             
-            local cntTextScale = BuffHighlights:GetCountTextScale(slotIndex)
-            local cntTextColor = BuffHighlights:GetCountTextColor(slotIndex)
-            local cntTextOffsetX = BuffHighlights:GetCountTextOffsetX(slotIndex)
-            local cntTextOffsetY = BuffHighlights:GetCountTextOffsetY(slotIndex)
+            local cntTextScale = BuffHighlights:GetCountTextScale(slotIndex) or 1.0
+            local cntTextColor = BuffHighlights:GetCountTextColor(slotIndex) or {1, 1, 1, 1}
+            local cntTextOffsetX = BuffHighlights:GetCountTextOffsetX(slotIndex) or 0
+            local cntTextOffsetY = BuffHighlights:GetCountTextOffsetY(slotIndex) or 0
             
-            controls.countTextSlider:SetValue(cntTextScale or 1.0)
-            controls.countTextValue:SetText(string.format("%.1f", cntTextScale or 1.0))
+            controls.countTextSlider:SetValue(cntTextScale)
+            controls.countTextValue:SetText(string.format("%.1f", cntTextScale))
             controls.countTextColorBtn:SetBackdropColor(cntTextColor[1] or 1, cntTextColor[2] or 1, cntTextColor[3] or 1, 1)
             controls.countTextOffsetXSlider:SetValue(cntTextOffsetX or 0)
             controls.countTextOffsetXValue:SetText(tostring(cntTextOffsetX or 0))
@@ -7714,6 +8502,9 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
                 BuffHighlights:SetCountTextOffsetY(slotIndex, value)
                 Cooldowns:SaveSettings()
             end)
+            
+            -- Update per-icon alert controls for new slot
+            UpdateAlertControls()
         end
         
         -- Refresh slot list
@@ -7779,10 +8570,34 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
                         pcall(function() iconPreview:SetTexture(textureObj:GetTexture()) end)
                     end
                     
-                    local isEnabled = db and db.enabled and db.enabled[slotIndex]
+                    local isEnabled = BuffHighlights and BuffHighlights:IsEnabled(slotIndex)
                     local enabledIndicator = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
                     enabledIndicator:SetPoint("LEFT", 45, 0)
                     enabledIndicator:SetText(isEnabled and "|cff00ff00On|r" or "|cff666666Off|r")
+                    
+                    -- Show spell name for identification (Bridge preferred, fallback to icon property)
+                    local spellName = nil
+                    local bridgeID = TUICD.BuffIdentityBridge and TUICD.BuffIdentityBridge:GetSpellIDForSlot(slotIndex)
+                    if bridgeID then
+                        pcall(function() spellName = GetSpellName(bridgeID) end)
+                    end
+                    if not spellName then
+                        pcall(function()
+                            local spellID = icon.spellID or icon.SpellID or icon.spellId
+                            if spellID and not (issecretvalue and issecretvalue(spellID)) then
+                                local info = SpellAPI:GetSpellInfo(spellID)
+                                if info then spellName = info.name end
+                            end
+                        end)
+                    end
+                    if spellName then
+                        local nameLabel = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                        nameLabel:SetPoint("LEFT", 72, 0)
+                        nameLabel:SetText("|cffaaaaaa" .. spellName .. "|r")
+                        nameLabel:SetWidth(200)
+                        nameLabel:SetJustifyH("LEFT")
+                        nameLabel:SetWordWrap(false)
+                    end
                     
                     row.slotIndex = slotIndex
                     row:SetScript("OnClick", function(self)
@@ -7826,30 +8641,60 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         -- Set the refresh button script (button created at top of tab)
         refreshBtn:SetScript("OnClick", function()
             selectedSlot = nil
+            -- Hard reset: clear ALL caches so the list rebuilds from actual Blizzard state
+            ClearIconOrderCache("buffs", true)  -- true = clear persistent too
+            ClearOriginalOrderCache("buffs")
+            -- Clear BuffIdentityBridge caches so it re-captures from CDM
+            if TUICD.BuffIdentityBridge then
+                TUICD.BuffIdentityBridge:WipeAll()
+            end
+            -- Re-apply layout so the actual tracker display matches the new order
+            local viewer = _G["BuffIconCooldownViewer"]
+            if viewer then
+                C_Timer.After(0.05, function()
+                    ApplyGridLayout(viewer, "buffs")
+                    -- Rebuild bridge slot map after layout settles
+                    if TUICD.BuffIdentityBridge then
+                        C_Timer.After(0.1, function()
+                            TUICD.BuffIdentityBridge:ForceRebuildSlotMap()
+                        end)
+                    end
+                end)
+            end
             RefreshSlotList()
+            TUICD:Print("Per-icon list reset for buffs")
         end)
         
         parent:SetHeight(math.abs(y) + 370)
     end
     
     -- ========================================
-    -- TAB: On Ready Effects
+    -- TAB: On Ready / Alerts
+    -- For buffs: On Buff Gained + On Buff Expiring
+    -- For cooldowns: On Ready (original behavior)
     -- ========================================
-    local function BuildOnReadyTab(parent)
-        local y = -10
+    
+    -- Helper: build a complete glow + pulse alert section for a given settings prefix
+    -- prefix: "onStart" or "onEnd"
+    -- sectionLabel: display header text
+    -- descText: description text under header
+    -- timingMin/Max: slider range for timing
+    -- timingHint: helper text under timing slider
+    local function BuildAlertSection(parent, yStart, prefix, sectionLabel, descText, timingMin, timingMax, timingHint)
+        local y = yStart
         
-        y = CreateHeader(parent, y, "On Ready Glow")
+        y = CreateHeader(parent, y, sectionLabel .. " Glow")
         
-        local glowHint = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        glowHint:SetPoint("TOPLEFT", 10, y)
-        glowHint:SetWidth(PANEL_WIDTH - 80)
-        glowHint:SetText("|cff888888Flash an effect when a cooldown finishes (or is about to finish).|r")
-        glowHint:SetJustifyH("LEFT")
+        local desc = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        desc:SetPoint("TOPLEFT", 10, y)
+        desc:SetWidth(PANEL_WIDTH - 80)
+        desc:SetText("|cff888888" .. descText .. "|r")
+        desc:SetJustifyH("LEFT")
         y = y - 18
         
-        y = CreateCheckbox(parent, y, "Enable On Ready Glow",
-            function() return GetSetting(trackerKey, "onReadyGlowEnabled") end,
-            function(v) SetSetting(trackerKey, "onReadyGlowEnabled", v) end)
+        y = CreateCheckbox(parent, y, "Enable Glow",
+            function() return GetSetting(trackerKey, prefix .. "GlowEnabled") end,
+            function(v) SetSetting(trackerKey, prefix .. "GlowEnabled", v) end)
         
         local glowStyleOptions = {
             { label = "Pixel Border", value = "pixel" },
@@ -7857,9 +8702,9 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
             { label = "Spell Glow", value = "glow" },
         }
         
-        local orThicknessSlider, orScaleSlider
-        local function UpdateOnReadyGlowGreyState()
-            local style = GetSetting(trackerKey, "onReadyGlowStyle") or "pixel"
+        local thicknessSlider, scaleSlider
+        local function UpdateGreyState()
+            local style = GetSetting(trackerKey, prefix .. "GlowStyle") or "pixel"
             local function ApplyGrey(ctrl, active)
                 if not ctrl then return end
                 if ctrl.SetAlpha then ctrl:SetAlpha(active and 1 or 0.4) end
@@ -7867,15 +8712,15 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
                 if ctrl.slider then ctrl.slider:EnableMouse(active) end
                 if ctrl.editBox then ctrl.editBox:EnableMouse(active) end
             end
-            ApplyGrey(orThicknessSlider, style == "pixel")
-            ApplyGrey(orScaleSlider, style == "glow")
+            ApplyGrey(thicknessSlider, style == "pixel")
+            ApplyGrey(scaleSlider, style == "glow")
         end
         
         y = CreateDropdown(parent, y, "Glow Style", glowStyleOptions,
-            function() return GetSetting(trackerKey, "onReadyGlowStyle") or "pixel" end,
+            function() return GetSetting(trackerKey, prefix .. "GlowStyle") or "pixel" end,
             function(v)
-                SetSetting(trackerKey, "onReadyGlowStyle", v)
-                UpdateOnReadyGlowGreyState()
+                SetSetting(trackerKey, prefix .. "GlowStyle", v)
+                UpdateGreyState()
             end)
         
         -- Glow color picker
@@ -7896,104 +8741,294 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         glowTex:SetAllPoints()
         glowColorSwatch.tex = glowTex
         
-        local function UpdateGlowSwatchColor()
-            local r = GetSetting(trackerKey, "onReadyGlowColorR") or 1.0
-            local g = GetSetting(trackerKey, "onReadyGlowColorG") or 0.82
-            local b = GetSetting(trackerKey, "onReadyGlowColorB") or 0.0
-            glowTex:SetColorTexture(r, g, b, 1)
+        local function UpdateSwatchColor()
+            local cr = GetSetting(trackerKey, prefix .. "GlowColorR") or 1.0
+            local cg = GetSetting(trackerKey, prefix .. "GlowColorG") or 0.82
+            local cb = GetSetting(trackerKey, prefix .. "GlowColorB") or 0.0
+            glowTex:SetColorTexture(cr, cg, cb, 1)
         end
-        UpdateGlowSwatchColor()
+        UpdateSwatchColor()
         
         glowColorSwatch:SetScript("OnClick", function()
-            local r = GetSetting(trackerKey, "onReadyGlowColorR") or 1.0
-            local g = GetSetting(trackerKey, "onReadyGlowColorG") or 0.82
-            local b = GetSetting(trackerKey, "onReadyGlowColorB") or 0.0
+            local cr = GetSetting(trackerKey, prefix .. "GlowColorR") or 1.0
+            local cg = GetSetting(trackerKey, prefix .. "GlowColorG") or 0.82
+            local cb = GetSetting(trackerKey, prefix .. "GlowColorB") or 0.0
             ColorPickerFrame:SetupColorPickerAndShow({
-                r = r, g = g, b = b,
+                r = cr, g = cg, b = cb,
                 swatchFunc = function()
                     local nr, ng, nb = ColorPickerFrame:GetColorRGB()
-                    SetSetting(trackerKey, "onReadyGlowColorR", nr)
-                    SetSetting(trackerKey, "onReadyGlowColorG", ng)
-                    SetSetting(trackerKey, "onReadyGlowColorB", nb)
-                    UpdateGlowSwatchColor()
+                    SetSetting(trackerKey, prefix .. "GlowColorR", nr)
+                    SetSetting(trackerKey, prefix .. "GlowColorG", ng)
+                    SetSetting(trackerKey, prefix .. "GlowColorB", nb)
+                    UpdateSwatchColor()
                 end,
                 cancelFunc = function(prev)
-                    SetSetting(trackerKey, "onReadyGlowColorR", prev.r)
-                    SetSetting(trackerKey, "onReadyGlowColorG", prev.g)
-                    SetSetting(trackerKey, "onReadyGlowColorB", prev.b)
-                    UpdateGlowSwatchColor()
+                    SetSetting(trackerKey, prefix .. "GlowColorR", prev.r)
+                    SetSetting(trackerKey, prefix .. "GlowColorG", prev.g)
+                    SetSetting(trackerKey, prefix .. "GlowColorB", prev.b)
+                    UpdateSwatchColor()
                 end,
             })
         end)
         y = y - 30
         
         y = CreateSlider(parent, y, "Glow Intensity", 0.1, 1.0, 0.05,
-            function() return GetSetting(trackerKey, "onReadyGlowIntensity") or 0.8 end,
-            function(v) SetSetting(trackerKey, "onReadyGlowIntensity", v) end)
+            function() return GetSetting(trackerKey, prefix .. "GlowIntensity") or 0.8 end,
+            function(v) SetSetting(trackerKey, prefix .. "GlowIntensity", v) end)
         
         y = CreateSlider(parent, y, "Pulse Speed", 0.1, 2.0, 0.1,
-            function() return GetSetting(trackerKey, "onReadyGlowSpeed") or 0.6 end,
-            function(v) SetSetting(trackerKey, "onReadyGlowSpeed", v) end)
+            function() return GetSetting(trackerKey, prefix .. "GlowSpeed") or 0.6 end,
+            function(v) SetSetting(trackerKey, prefix .. "GlowSpeed", v) end)
         
         y = CreateSlider(parent, y, "Duration", 0.5, 10.0, 0.5,
-            function() return GetSetting(trackerKey, "onReadyGlowDuration") or 3.0 end,
-            function(v) SetSetting(trackerKey, "onReadyGlowDuration", v) end)
+            function() return GetSetting(trackerKey, prefix .. "GlowDuration") or 3.0 end,
+            function(v) SetSetting(trackerKey, prefix .. "GlowDuration", v) end)
         
-        y, orThicknessSlider = CreateSlider(parent, y, "Border Thickness", 1, 6, 1,
-            function() return GetSetting(trackerKey, "onReadyGlowThickness") or 2 end,
-            function(v) SetSetting(trackerKey, "onReadyGlowThickness", v) end)
+        y, thicknessSlider = CreateSlider(parent, y, "Border Thickness", 1, 6, 1,
+            function() return GetSetting(trackerKey, prefix .. "GlowThickness") or 2 end,
+            function(v) SetSetting(trackerKey, prefix .. "GlowThickness", v) end)
         
-        y, orScaleSlider = CreateSlider(parent, y, "Glow Scale", 0.5, 2.0, 0.1,
-            function() return GetSetting(trackerKey, "onReadyGlowScale") or 1.0 end,
-            function(v) SetSetting(trackerKey, "onReadyGlowScale", v) end)
+        y, scaleSlider = CreateSlider(parent, y, "Glow Scale", 0.5, 2.0, 0.1,
+            function() return GetSetting(trackerKey, prefix .. "GlowScale") or 1.0 end,
+            function(v) SetSetting(trackerKey, prefix .. "GlowScale", v) end)
         
-        UpdateOnReadyGlowGreyState()
+        UpdateGreyState()
         
-        y = CreateSlider(parent, y, "Glow Timing", -5, 5, 0.5,
-            function() return GetSetting(trackerKey, "onReadyGlowTiming") or 0 end,
-            function(v) SetSetting(trackerKey, "onReadyGlowTiming", v) end)
+        if timingMin then
+            y = CreateSlider(parent, y, "Timing", timingMin, timingMax, 0.5,
+                function() return GetSetting(trackerKey, prefix .. "GlowTiming") or 0 end,
+                function(v) SetSetting(trackerKey, prefix .. "GlowTiming", v) end)
+            
+            local glowTimingHint = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            glowTimingHint:SetPoint("TOPLEFT", 35, y)
+            glowTimingHint:SetWidth(PANEL_WIDTH - 100)
+            glowTimingHint:SetText("|cff888888" .. timingHint .. "|r")
+            glowTimingHint:SetJustifyH("LEFT")
+            y = y - 18
+        end
         
-        local glowTimingHint = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        glowTimingHint:SetPoint("TOPLEFT", 35, y)
-        glowTimingHint:SetWidth(PANEL_WIDTH - 100)
-        glowTimingHint:SetText("|cff888888Negative = fire before ready, 0 = on ready, positive = after ready|r")
-        glowTimingHint:SetJustifyH("LEFT")
-        y = y - 18
-        
+        -- Pulse section
         y = y - 10
-        y = CreateHeader(parent, y, "On Ready Pulse")
+        y = CreateHeader(parent, y, sectionLabel .. " Pulse")
         
-        y = CreateCheckbox(parent, y, "Enable On Ready Pulse",
-            function() return GetSetting(trackerKey, "onReadyPulseEnabled") end,
-            function(v) SetSetting(trackerKey, "onReadyPulseEnabled", v) end)
+        y = CreateCheckbox(parent, y, "Enable Pulse",
+            function() return GetSetting(trackerKey, prefix .. "PulseEnabled") end,
+            function(v) SetSetting(trackerKey, prefix .. "PulseEnabled", v) end)
         
         y = CreateSlider(parent, y, "Pulse Scale", 1.0, 2.0, 0.05,
-            function() return GetSetting(trackerKey, "onReadyPulseScale") or 1.3 end,
-            function(v) SetSetting(trackerKey, "onReadyPulseScale", v) end)
+            function() return GetSetting(trackerKey, prefix .. "PulseScale") or 1.3 end,
+            function(v) SetSetting(trackerKey, prefix .. "PulseScale", v) end)
         
         y = CreateSlider(parent, y, "Pulse Duration", 0.2, 2.0, 0.1,
-            function() return GetSetting(trackerKey, "onReadyPulseDuration") or 0.4 end,
-            function(v) SetSetting(trackerKey, "onReadyPulseDuration", v) end)
+            function() return GetSetting(trackerKey, prefix .. "PulseDuration") or 0.4 end,
+            function(v) SetSetting(trackerKey, prefix .. "PulseDuration", v) end)
         
         y = CreateSlider(parent, y, "Pulse Count", 1, 10, 1,
-            function() return GetSetting(trackerKey, "onReadyPulseCount") or 3 end,
-            function(v) SetSetting(trackerKey, "onReadyPulseCount", v) end)
+            function() return GetSetting(trackerKey, prefix .. "PulseCount") or 3 end,
+            function(v) SetSetting(trackerKey, prefix .. "PulseCount", v) end)
         
-        y = CreateSlider(parent, y, "Pulse Timing", -5, 5, 0.5,
-            function() return GetSetting(trackerKey, "onReadyPulseTiming") or 0 end,
-            function(v) SetSetting(trackerKey, "onReadyPulseTiming", v) end)
+        if timingMin then
+            y = CreateSlider(parent, y, "Pulse Timing", timingMin, timingMax, 0.5,
+                function() return GetSetting(trackerKey, prefix .. "PulseTiming") or 0 end,
+                function(v) SetSetting(trackerKey, prefix .. "PulseTiming", v) end)
+            
+            local pulseTimingHint = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            pulseTimingHint:SetPoint("TOPLEFT", 35, y)
+            pulseTimingHint:SetWidth(PANEL_WIDTH - 100)
+            pulseTimingHint:SetText("|cff888888" .. timingHint .. "|r")
+            pulseTimingHint:SetJustifyH("LEFT")
+            y = y - 18
+        end
         
-        local pulseTimingHint = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        pulseTimingHint:SetPoint("TOPLEFT", 35, y)
-        pulseTimingHint:SetWidth(PANEL_WIDTH - 100)
-        pulseTimingHint:SetText("|cff888888Negative = fire before ready, 0 = on ready, positive = after ready|r")
-        pulseTimingHint:SetJustifyH("LEFT")
-        y = y - 18
-        
-        parent:SetHeight(math.abs(y) + 20)
+        return y
     end
-   
-    -- Build tab content builders
+    
+    local function BuildOnReadyTab(parent)
+        if trackerKey == "buffs" then
+            -- ============================================
+            -- BUFF ALERTS: On Gained + On Expiring
+            -- ============================================
+            local y = -10
+            
+            y = BuildAlertSection(parent, y,
+                "onStart",                                          -- settings prefix
+                "On Buff Gained",                                   -- section label
+                "Flash an effect when a tracked buff is gained.",   -- description
+                0, 5,                                               -- timing range (0-5, no negative for start)
+                "0 = on gain, positive = seconds after gain")       -- timing hint
+            
+            y = y - 16  -- extra spacing between sections
+            
+            y = BuildAlertSection(parent, y,
+                "onEnd",                                            -- settings prefix
+                "On Buff Expiring",                                 -- section label
+                "Flash an effect when a tracked buff expires.",
+                nil, nil,                                           -- no timing (secret values prevent pre-expiry alerts)
+                nil)
+            
+            parent:SetHeight(math.abs(y) + 20)
+        else
+            -- ============================================
+            -- COOLDOWN ON READY (Essential / Utility)
+            -- Original on-ready behavior for cooldown trackers
+            -- ============================================
+            local y = -10
+            
+            y = CreateHeader(parent, y, "On Ready Glow")
+            
+            local glowHint = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            glowHint:SetPoint("TOPLEFT", 10, y)
+            glowHint:SetWidth(PANEL_WIDTH - 80)
+            glowHint:SetText("|cff888888Flash an effect when a cooldown finishes (or is about to finish).|r")
+            glowHint:SetJustifyH("LEFT")
+            y = y - 18
+            
+            y = CreateCheckbox(parent, y, "Enable On Ready Glow",
+                function() return GetSetting(trackerKey, "onReadyGlowEnabled") end,
+                function(v) SetSetting(trackerKey, "onReadyGlowEnabled", v) end)
+            
+            local glowStyleOptions = {
+                { label = "Pixel Border", value = "pixel" },
+                { label = "Shine Flash", value = "shine" },
+                { label = "Spell Glow", value = "glow" },
+            }
+            
+            local orThicknessSlider, orScaleSlider
+            local function UpdateOnReadyGlowGreyState()
+                local style = GetSetting(trackerKey, "onReadyGlowStyle") or "pixel"
+                local function ApplyGrey(ctrl, active)
+                    if not ctrl then return end
+                    if ctrl.SetAlpha then ctrl:SetAlpha(active and 1 or 0.4) end
+                    if ctrl.EnableMouse then ctrl:EnableMouse(active) end
+                    if ctrl.slider then ctrl.slider:EnableMouse(active) end
+                    if ctrl.editBox then ctrl.editBox:EnableMouse(active) end
+                end
+                ApplyGrey(orThicknessSlider, style == "pixel")
+                ApplyGrey(orScaleSlider, style == "glow")
+            end
+            
+            y = CreateDropdown(parent, y, "Glow Style", glowStyleOptions,
+                function() return GetSetting(trackerKey, "onReadyGlowStyle") or "pixel" end,
+                function(v)
+                    SetSetting(trackerKey, "onReadyGlowStyle", v)
+                    UpdateOnReadyGlowGreyState()
+                end)
+            
+            -- Glow color picker
+            local glowColorLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            glowColorLabel:SetPoint("TOPLEFT", 35, y)
+            glowColorLabel:SetText("Glow Color:")
+            
+            local glowColorSwatch = CreateFrame("Button", nil, parent)
+            glowColorSwatch:SetPoint("LEFT", glowColorLabel, "RIGHT", 10, 0)
+            glowColorSwatch:SetSize(24, 24)
+            
+            local glowBorder = glowColorSwatch:CreateTexture(nil, "BACKGROUND")
+            glowBorder:SetPoint("TOPLEFT", -2, 2)
+            glowBorder:SetPoint("BOTTOMRIGHT", 2, -2)
+            glowBorder:SetColorTexture(0.5, 0.5, 0.5, 1)
+            
+            local glowTex = glowColorSwatch:CreateTexture(nil, "ARTWORK")
+            glowTex:SetAllPoints()
+            glowColorSwatch.tex = glowTex
+            
+            local function UpdateGlowSwatchColor()
+                local r = GetSetting(trackerKey, "onReadyGlowColorR") or 1.0
+                local g = GetSetting(trackerKey, "onReadyGlowColorG") or 0.82
+                local b = GetSetting(trackerKey, "onReadyGlowColorB") or 0.0
+                glowTex:SetColorTexture(r, g, b, 1)
+            end
+            UpdateGlowSwatchColor()
+            
+            glowColorSwatch:SetScript("OnClick", function()
+                local r = GetSetting(trackerKey, "onReadyGlowColorR") or 1.0
+                local g = GetSetting(trackerKey, "onReadyGlowColorG") or 0.82
+                local b = GetSetting(trackerKey, "onReadyGlowColorB") or 0.0
+                ColorPickerFrame:SetupColorPickerAndShow({
+                    r = r, g = g, b = b,
+                    swatchFunc = function()
+                        local nr, ng, nb = ColorPickerFrame:GetColorRGB()
+                        SetSetting(trackerKey, "onReadyGlowColorR", nr)
+                        SetSetting(trackerKey, "onReadyGlowColorG", ng)
+                        SetSetting(trackerKey, "onReadyGlowColorB", nb)
+                        UpdateGlowSwatchColor()
+                    end,
+                    cancelFunc = function(prev)
+                        SetSetting(trackerKey, "onReadyGlowColorR", prev.r)
+                        SetSetting(trackerKey, "onReadyGlowColorG", prev.g)
+                        SetSetting(trackerKey, "onReadyGlowColorB", prev.b)
+                        UpdateGlowSwatchColor()
+                    end,
+                })
+            end)
+            y = y - 30
+            
+            y = CreateSlider(parent, y, "Glow Intensity", 0.1, 1.0, 0.05,
+                function() return GetSetting(trackerKey, "onReadyGlowIntensity") or 0.8 end,
+                function(v) SetSetting(trackerKey, "onReadyGlowIntensity", v) end)
+            
+            y = CreateSlider(parent, y, "Pulse Speed", 0.1, 2.0, 0.1,
+                function() return GetSetting(trackerKey, "onReadyGlowSpeed") or 0.6 end,
+                function(v) SetSetting(trackerKey, "onReadyGlowSpeed", v) end)
+            
+            y = CreateSlider(parent, y, "Duration", 0.5, 10.0, 0.5,
+                function() return GetSetting(trackerKey, "onReadyGlowDuration") or 3.0 end,
+                function(v) SetSetting(trackerKey, "onReadyGlowDuration", v) end)
+            
+            y, orThicknessSlider = CreateSlider(parent, y, "Border Thickness", 1, 6, 1,
+                function() return GetSetting(trackerKey, "onReadyGlowThickness") or 2 end,
+                function(v) SetSetting(trackerKey, "onReadyGlowThickness", v) end)
+            
+            y, orScaleSlider = CreateSlider(parent, y, "Glow Scale", 0.5, 2.0, 0.1,
+                function() return GetSetting(trackerKey, "onReadyGlowScale") or 1.0 end,
+                function(v) SetSetting(trackerKey, "onReadyGlowScale", v) end)
+            
+            UpdateOnReadyGlowGreyState()
+            
+            y = CreateSlider(parent, y, "Glow Timing", -5, 5, 0.5,
+                function() return GetSetting(trackerKey, "onReadyGlowTiming") or 0 end,
+                function(v) SetSetting(trackerKey, "onReadyGlowTiming", v) end)
+            
+            local glowTimingHint = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            glowTimingHint:SetPoint("TOPLEFT", 35, y)
+            glowTimingHint:SetWidth(PANEL_WIDTH - 100)
+            glowTimingHint:SetText("|cff888888Negative = fire before ready, 0 = on ready, positive = after ready|r")
+            glowTimingHint:SetJustifyH("LEFT")
+            y = y - 18
+            
+            y = y - 10
+            y = CreateHeader(parent, y, "On Ready Pulse")
+            
+            y = CreateCheckbox(parent, y, "Enable On Ready Pulse",
+                function() return GetSetting(trackerKey, "onReadyPulseEnabled") end,
+                function(v) SetSetting(trackerKey, "onReadyPulseEnabled", v) end)
+            
+            y = CreateSlider(parent, y, "Pulse Scale", 1.0, 2.0, 0.05,
+                function() return GetSetting(trackerKey, "onReadyPulseScale") or 1.3 end,
+                function(v) SetSetting(trackerKey, "onReadyPulseScale", v) end)
+            
+            y = CreateSlider(parent, y, "Pulse Duration", 0.2, 2.0, 0.1,
+                function() return GetSetting(trackerKey, "onReadyPulseDuration") or 0.4 end,
+                function(v) SetSetting(trackerKey, "onReadyPulseDuration", v) end)
+            
+            y = CreateSlider(parent, y, "Pulse Count", 1, 10, 1,
+                function() return GetSetting(trackerKey, "onReadyPulseCount") or 3 end,
+                function(v) SetSetting(trackerKey, "onReadyPulseCount", v) end)
+            
+            y = CreateSlider(parent, y, "Pulse Timing", -5, 5, 0.5,
+                function() return GetSetting(trackerKey, "onReadyPulseTiming") or 0 end,
+                function(v) SetSetting(trackerKey, "onReadyPulseTiming", v) end)
+            
+            local pulseTimingHint = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            pulseTimingHint:SetPoint("TOPLEFT", 35, y)
+            pulseTimingHint:SetWidth(PANEL_WIDTH - 100)
+            pulseTimingHint:SetText("|cff888888Negative = fire before ready, 0 = on ready, positive = after ready|r")
+            pulseTimingHint:SetJustifyH("LEFT")
+            y = y - 18
+            
+            parent:SetHeight(math.abs(y) + 20)
+        end  -- if trackerKey == "buffs"
+    end  -- BuildOnReadyTab
     -- Capture trackerKey in local scope to avoid closure issue
     local capturedTrackerKey = trackerKey
     local tabBuilders = {
@@ -8008,7 +9043,6 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
     }
     
     -- Create content frames and tab buttons
-    local tabWidth = (PANEL_WIDTH - 20) / #tabs
     local scrollChildren = {}  -- Store scroll children for refresh
     
     for i, tab in ipairs(tabs) do
@@ -8022,10 +9056,14 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
             tabBuilders[tab.key](content.scrollChild)
         end
         
-        -- Create tab button
+        -- Create tab button - calculate row and column
+        local row = math.ceil(i / MAX_TABS_PER_ROW) - 1  -- 0-based row
+        local col = (i - 1) % MAX_TABS_PER_ROW            -- 0-based column
+        local tabWidth = (PANEL_WIDTH - 20) / MAX_TABS_PER_ROW
+        
         local tabBtn = CreateFrame("Button", nil, tabContainer)
         tabBtn:SetSize(tabWidth - 2, 26)
-        tabBtn:SetPoint("LEFT", (i - 1) * tabWidth, 0)
+        tabBtn:SetPoint("TOPLEFT", col * tabWidth, -(row * 28))
         
         tabBtn.bg = tabBtn:CreateTexture(nil, "BACKGROUND")
         tabBtn.bg:SetAllPoints()
@@ -8104,6 +9142,14 @@ function Cooldowns:BuildPerIconTab(parent, trackerType)
     refreshBtn:SetPoint("TOPRIGHT", -5, y)
     refreshBtn:SetSize(100, 20)
     refreshBtn:SetText("Refresh List")
+    refreshBtn:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Refresh Per-Icon List", 1, 0.82, 0)
+        GameTooltip:AddLine("Resets icon order caches and rebuilds the list from current Blizzard state.", 1, 1, 1, true)
+        GameTooltip:AddLine("Use if icons appear jumbled or mismatched.", 0.5, 0.5, 0.5, true)
+        GameTooltip:Show()
+    end)
+    refreshBtn:SetScript("OnLeave", GameTooltip_Hide)
     y = y - 26
     
     -- Description
@@ -8150,12 +9196,28 @@ function Cooldowns:BuildPerIconTab(parent, trackerType)
     -- Create scroll frame inside list container
     local scrollFrame = CreateFrame("ScrollFrame", "TweaksCD_" .. trackerType .. "_ScrollFrame", listContainer, "UIPanelScrollFrameTemplate")
     scrollFrame:SetPoint("TOPLEFT", 2, -2)
-    scrollFrame:SetPoint("BOTTOMRIGHT", -22, 2)
+    scrollFrame:SetPoint("BOTTOMRIGHT", -2, 2)
+    -- Hide the scrollbar, rely on mouse wheel
+    if scrollFrame.ScrollBar then
+        scrollFrame.ScrollBar:Hide()
+        scrollFrame.ScrollBar:SetAlpha(0)
+    end
     
     local scrollChild = CreateFrame("Frame", "TweaksCD_" .. trackerType .. "_ScrollChild", scrollFrame)
-    scrollChild:SetWidth(PANEL_WIDTH - 84)
+    scrollChild:SetWidth(PANEL_WIDTH - 64)
     scrollChild:SetHeight(1)  -- Will be updated dynamically
     scrollFrame:SetScrollChild(scrollChild)
+    
+    -- Mouse wheel scrolling for slot list
+    listContainer:EnableMouseWheel(true)
+    listContainer:SetScript("OnMouseWheel", function(self2, delta)
+        local current = scrollFrame:GetVerticalScroll()
+        local maxScroll = scrollChild:GetHeight() - scrollFrame:GetHeight()
+        if maxScroll < 0 then maxScroll = 0 end
+        local newScroll = current - (delta * 21)
+        newScroll = math.max(0, math.min(newScroll, maxScroll))
+        scrollFrame:SetVerticalScroll(newScroll)
+    end)
     
     y = y - 100
     
@@ -8201,9 +9263,49 @@ function Cooldowns:BuildPerIconTab(parent, trackerType)
     controls.iconPreview:Hide()
     --#endregion
     
+    -- =====================================================
+    -- Per-Icon Tab Bar (Settings / Text / Alerts)
+    -- =====================================================
+    local activePerIconTab = "settings"
+    local currentAlertSlotIndex = nil
+    
+    local tabBarFrame = CreateFrame("Frame", nil, controlsPanel)
+    tabBarFrame:SetPoint("TOPLEFT", controls.header, "BOTTOMLEFT", 0, -5)
+    tabBarFrame:SetSize(PANEL_WIDTH - 80, 25)
+    tabBarFrame:Hide()
+    
+    local cdPITabButtons = {}
+    local cdPITabUnderlines = {}
+    local cdPITabNames = {"Settings", "Text", "Alerts"}
+    local cdPITabKeys = {"settings", "text", "alerts"}
+    local piTabXOffset = 0
+    
+    for i, tabName in ipairs(cdPITabNames) do
+        local key = cdPITabKeys[i]
+        local btn = CreateFrame("Button", nil, tabBarFrame)
+        btn:SetPoint("LEFT", piTabXOffset, 0)
+        btn:SetHeight(20)
+        local text = btn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        text:SetPoint("CENTER")
+        text:SetText(tabName)
+        btn:SetFontString(text)
+        btn:SetWidth(text:GetStringWidth() + 16)
+        
+        local underline = btn:CreateTexture(nil, "ARTWORK")
+        underline:SetPoint("BOTTOMLEFT", 0, -2)
+        underline:SetPoint("BOTTOMRIGHT", 0, -2)
+        underline:SetHeight(2)
+        underline:SetColorTexture(1, 0.82, 0, 1)
+        underline:Hide()
+        
+        cdPITabButtons[key] = btn
+        cdPITabUnderlines[key] = underline
+        piTabXOffset = piTabXOffset + btn:GetWidth() + 10
+    end
+    
     --#region Enable Individual Icon
     controls.enableCheck = CreateFrame("CheckButton", "TweaksCD_" .. trackerType .. "_EnableCheck", controlsPanel, "UICheckButtonTemplate")
-    controls.enableCheck:SetPoint("TOPLEFT", controls.header, "BOTTOMLEFT", 0, -10)
+    controls.enableCheck:SetPoint("TOPLEFT", tabBarFrame, "BOTTOMLEFT", 0, -10)
     controls.enableCheck:SetSize(24, 24)
     controls.enableCheck:Hide()
     
@@ -8491,7 +9593,7 @@ function Cooldowns:BuildPerIconTab(parent, trackerType)
     -- Per-Icon Text Controls (Cooldown Timer)
     -- =====================================================
     controls.cooldownTextHeader = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    controls.cooldownTextHeader:SetPoint("TOPLEFT", controls.dockLabel, "BOTTOMLEFT", 0, -20)
+    controls.cooldownTextHeader:SetPoint("TOPLEFT", tabBarFrame, "BOTTOMLEFT", 0, -10)
     controls.cooldownTextHeader:SetText("Cooldown Text")
     controls.cooldownTextHeader:SetTextColor(1, 0.82, 0)
     controls.cooldownTextHeader:Hide()
@@ -8811,35 +9913,403 @@ function Cooldowns:BuildPerIconTab(parent, trackerType)
     controls.labelOffsetYValue:SetTextColor(1, 1, 1)
     controls.labelOffsetYValue:Hide()
     
-    -- Helper to show/hide all controls
-    local function ShowControls(show)
-        noSelectionLabel:SetShown(not show)
-        for _, ctrl in pairs(controls) do
-            if ctrl.SetShown then ctrl:SetShown(show)
-            elseif ctrl.Show then
-                if show then ctrl:Show() else ctrl:Hide() end
+    -- =====================================================
+    -- Control Group Definitions (for tab switching)
+    -- =====================================================
+    local settingsGroup = {
+        controls.enableCheck, controls.enableLabel,
+        controls.hideCheck, controls.hideLabel,
+        controls.stateLabel, controls.activeBtn, controls.inactiveBtn,
+        controls.showCheck, controls.showLabel,
+        controls.sizeLabel, controls.sizeSlider,
+        controls.opacityLabel, controls.opacitySlider, controls.opacityValue,
+        controls.desatCheck, controls.desatLabel,
+        controls.defaultSwipeCheck, controls.defaultSwipeLabel,
+        controls.RadialHeader, controls.radialDisplayLabel, controls.radialDisplayDropdown,
+        controls.radialTextureLabel, controls.radialTextureBox,
+        controls.radialColorLabel, controls.radialColorBtn,
+        controls.radialScaleLabel, controls.radialScaleBox,
+        controls.radialPositionLabel, controls.radialUpBtn, controls.radialDownBtn,
+        controls.radialLeftBtn, controls.radialRightBtn,
+        controls.radialRotationLabel, controls.radialRotationBox,
+        controls.iconTextureHeader, controls.iconTextureLabel, controls.iconTextureBox,
+        controls.iconColorLabel, controls.iconColorBtn,
+        controls.dockHeader, controls.dockLabel, controls.dockDropdown,
+    }
+    
+    local textGroup = {
+        controls.cooldownTextHeader, controls.cooldownTextScaleLabel, controls.cooldownTextSlider, controls.cooldownTextValue,
+        controls.cooldownTextAnchorLabel, controls.cooldownTextAnchorDropdown,
+        controls.cooldownTextColorLabel, controls.cooldownTextColorBtn,
+        controls.cooldownTextOffsetXLabel, controls.cooldownTextOffsetXSlider, controls.cooldownTextOffsetXValue,
+        controls.cooldownTextOffsetYLabel, controls.cooldownTextOffsetYSlider, controls.cooldownTextOffsetYValue,
+        controls.countTextHeader, controls.countTextScaleLabel, controls.countTextSlider, controls.countTextValue,
+        controls.countTextAnchorLabel, controls.countTextAnchorDropdown,
+        controls.countTextColorLabel, controls.countTextColorBtn,
+        controls.countTextOffsetXLabel, controls.countTextOffsetXSlider, controls.countTextOffsetXValue,
+        controls.countTextOffsetYLabel, controls.countTextOffsetYSlider, controls.countTextOffsetYValue,
+        controls.labelHeader, controls.labelEnableCheck, controls.labelEnableLabel,
+        controls.labelTextLabel, controls.labelTextBox,
+        controls.labelSizeLabel, controls.labelSizeSlider, controls.labelSizeValue,
+        controls.labelColorLabel, controls.labelColorBtn,
+        controls.labelAnchorLabel, controls.labelAnchorDropdown,
+        controls.labelOffsetXLabel, controls.labelOffsetXSlider, controls.labelOffsetXValue,
+        controls.labelOffsetYLabel, controls.labelOffsetYSlider, controls.labelOffsetYValue,
+    }
+    
+    -- =====================================================
+    -- Alerts Tab Controls
+    -- =====================================================
+    local alertControls = { onReady = {}, onCooldown = {} }
+    local alertsGroup = {}
+    
+    local function BuildCDAlertBlock(parentFrame, anchorTo, prefix, sectionLabel, descText, timingMin, timingMax, timingHint)
+        local block = {}
+        
+        -- Section header
+        block.sectionHeader = parentFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        block.sectionHeader:SetPoint("TOPLEFT", anchorTo, "BOTTOMLEFT", 0, -15)
+        block.sectionHeader:SetText("|cffffcc00" .. sectionLabel .. "|r")
+        block.sectionHeader:Hide()
+        alertsGroup[#alertsGroup + 1] = block.sectionHeader
+        
+        block.descLabel = parentFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        block.descLabel:SetPoint("TOPLEFT", block.sectionHeader, "BOTTOMLEFT", 0, -4)
+        block.descLabel:SetText("|cff888888" .. descText .. "|r")
+        block.descLabel:Hide()
+        alertsGroup[#alertsGroup + 1] = block.descLabel
+        
+        -- === GLOW SECTION ===
+        local glowHeader = parentFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        glowHeader:SetPoint("TOPLEFT", block.descLabel, "BOTTOMLEFT", 0, -10)
+        glowHeader:SetText("|cff00ccff— Glow —|r")
+        glowHeader:Hide()
+        alertsGroup[#alertsGroup + 1] = glowHeader
+        block.glowHeader = glowHeader
+        
+        block.enableGlow = CreateFrame("CheckButton", nil, parentFrame, "UICheckButtonTemplate")
+        block.enableGlow:SetPoint("TOPLEFT", glowHeader, "BOTTOMLEFT", 0, -4)
+        block.enableGlow:SetSize(24, 24)
+        block.enableGlow:Hide()
+        alertsGroup[#alertsGroup + 1] = block.enableGlow
+        
+        block.enableGlowLabel = parentFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        block.enableGlowLabel:SetPoint("LEFT", block.enableGlow, "RIGHT", 2, 0)
+        block.enableGlowLabel:SetText("Enable Glow")
+        block.enableGlowLabel:SetTextColor(0.9, 0.9, 0.9)
+        block.enableGlowLabel:Hide()
+        alertsGroup[#alertsGroup + 1] = block.enableGlowLabel
+        
+        -- Glow Style dropdown
+        block.glowStyleLabel = parentFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        block.glowStyleLabel:SetPoint("TOPLEFT", block.enableGlow, "BOTTOMLEFT", 0, -6)
+        block.glowStyleLabel:SetText("Glow Style:")
+        block.glowStyleLabel:SetTextColor(0.8, 0.8, 0.8)
+        block.glowStyleLabel:Hide()
+        alertsGroup[#alertsGroup + 1] = block.glowStyleLabel
+        
+        block.glowStyleDropdown = CreateFrame("Frame", nil, parentFrame, "UIDropDownMenuTemplate")
+        block.glowStyleDropdown:SetPoint("LEFT", block.glowStyleLabel, "RIGHT", -10, 0)
+        UIDropDownMenu_SetWidth(block.glowStyleDropdown, 120)
+        block.glowStyleDropdown:Hide()
+        alertsGroup[#alertsGroup + 1] = block.glowStyleDropdown
+        
+        -- Color
+        block.glowColorLabel = parentFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        block.glowColorLabel:SetPoint("TOPLEFT", block.glowStyleLabel, "BOTTOMLEFT", 0, -8)
+        block.glowColorLabel:SetText("Color:")
+        block.glowColorLabel:SetTextColor(0.8, 0.8, 0.8)
+        block.glowColorLabel:Hide()
+        alertsGroup[#alertsGroup + 1] = block.glowColorLabel
+        
+        block.glowColorBtn = CreateFrame("Button", nil, parentFrame, "BackdropTemplate")
+        block.glowColorBtn:SetPoint("LEFT", block.glowColorLabel, "RIGHT", 10, 0)
+        block.glowColorBtn:SetSize(24, 16)
+        block.glowColorBtn:SetBackdrop({bgFile = "Interface\\Buttons\\WHITE8x8", edgeFile = "Interface\\Buttons\\WHITE8x8", edgeSize = 1})
+        block.glowColorBtn:SetBackdropColor(1, 0.82, 0, 1)
+        block.glowColorBtn:SetBackdropBorderColor(0.3, 0.3, 0.3, 1)
+        block.glowColorBtn:Hide()
+        alertsGroup[#alertsGroup + 1] = block.glowColorBtn
+        
+        -- Duration slider
+        block.glowDurationLabel = parentFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        block.glowDurationLabel:SetPoint("TOPLEFT", block.glowColorLabel, "BOTTOMLEFT", 0, -8)
+        block.glowDurationLabel:SetText("Duration (sec):")
+        block.glowDurationLabel:SetTextColor(0.8, 0.8, 0.8)
+        block.glowDurationLabel:Hide()
+        alertsGroup[#alertsGroup + 1] = block.glowDurationLabel
+        
+        block.glowDurationSlider = CreateFrame("Slider", nil, parentFrame, "OptionsSliderTemplate")
+        block.glowDurationSlider:SetPoint("LEFT", block.glowDurationLabel, "RIGHT", 5, 0)
+        block.glowDurationSlider:SetSize(80, 16)
+        block.glowDurationSlider:SetMinMaxValues(0.5, 10.0)
+        block.glowDurationSlider:SetValueStep(0.5)
+        block.glowDurationSlider:SetObeyStepOnDrag(true)
+        block.glowDurationSlider.Low:SetText("") block.glowDurationSlider.High:SetText("") block.glowDurationSlider.Text:SetText("")
+        block.glowDurationSlider:Hide()
+        alertsGroup[#alertsGroup + 1] = block.glowDurationSlider
+        
+        block.glowDurationValue = parentFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        block.glowDurationValue:SetPoint("LEFT", block.glowDurationSlider, "RIGHT", 5, 0)
+        block.glowDurationValue:SetTextColor(1, 1, 1)
+        block.glowDurationValue:Hide()
+        alertsGroup[#alertsGroup + 1] = block.glowDurationValue
+        
+        -- Timing slider
+        block.glowTimingLabel = parentFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        block.glowTimingLabel:SetPoint("TOPLEFT", block.glowDurationLabel, "BOTTOMLEFT", 0, -8)
+        block.glowTimingLabel:SetText("Timing (sec):")
+        block.glowTimingLabel:SetTextColor(0.8, 0.8, 0.8)
+        block.glowTimingLabel:Hide()
+        alertsGroup[#alertsGroup + 1] = block.glowTimingLabel
+        
+        block.glowTimingSlider = CreateFrame("Slider", nil, parentFrame, "OptionsSliderTemplate")
+        block.glowTimingSlider:SetPoint("LEFT", block.glowTimingLabel, "RIGHT", 5, 0)
+        block.glowTimingSlider:SetSize(80, 16)
+        block.glowTimingSlider:SetMinMaxValues(timingMin, timingMax)
+        block.glowTimingSlider:SetValueStep(0.5)
+        block.glowTimingSlider:SetObeyStepOnDrag(true)
+        block.glowTimingSlider.Low:SetText("") block.glowTimingSlider.High:SetText("") block.glowTimingSlider.Text:SetText("")
+        block.glowTimingSlider:Hide()
+        alertsGroup[#alertsGroup + 1] = block.glowTimingSlider
+        
+        block.glowTimingValue = parentFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        block.glowTimingValue:SetPoint("LEFT", block.glowTimingSlider, "RIGHT", 5, 0)
+        block.glowTimingValue:SetTextColor(1, 1, 1)
+        block.glowTimingValue:Hide()
+        alertsGroup[#alertsGroup + 1] = block.glowTimingValue
+        
+        block.glowTimingHint = parentFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        block.glowTimingHint:SetPoint("TOPLEFT", block.glowTimingLabel, "BOTTOMLEFT", 0, -4)
+        block.glowTimingHint:SetText("|cff888888" .. timingHint .. "|r")
+        block.glowTimingHint:Hide()
+        alertsGroup[#alertsGroup + 1] = block.glowTimingHint
+        
+        -- === PULSE SECTION ===
+        local pulseHeader = parentFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        pulseHeader:SetPoint("TOPLEFT", block.glowTimingHint, "BOTTOMLEFT", 0, -12)
+        pulseHeader:SetText("|cff00ccff— Pulse —|r")
+        pulseHeader:Hide()
+        alertsGroup[#alertsGroup + 1] = pulseHeader
+        block.pulseHeader = pulseHeader
+        
+        block.enablePulse = CreateFrame("CheckButton", nil, parentFrame, "UICheckButtonTemplate")
+        block.enablePulse:SetPoint("TOPLEFT", pulseHeader, "BOTTOMLEFT", 0, -4)
+        block.enablePulse:SetSize(24, 24)
+        block.enablePulse:Hide()
+        alertsGroup[#alertsGroup + 1] = block.enablePulse
+        
+        block.enablePulseLabel = parentFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        block.enablePulseLabel:SetPoint("LEFT", block.enablePulse, "RIGHT", 2, 0)
+        block.enablePulseLabel:SetText("Enable Pulse")
+        block.enablePulseLabel:SetTextColor(0.9, 0.9, 0.9)
+        block.enablePulseLabel:Hide()
+        alertsGroup[#alertsGroup + 1] = block.enablePulseLabel
+        
+        -- Pulse Scale
+        block.pulseScaleLabel = parentFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        block.pulseScaleLabel:SetPoint("TOPLEFT", block.enablePulse, "BOTTOMLEFT", 0, -6)
+        block.pulseScaleLabel:SetText("Scale:")
+        block.pulseScaleLabel:SetTextColor(0.8, 0.8, 0.8)
+        block.pulseScaleLabel:Hide()
+        alertsGroup[#alertsGroup + 1] = block.pulseScaleLabel
+        
+        block.pulseScaleSlider = CreateFrame("Slider", nil, parentFrame, "OptionsSliderTemplate")
+        block.pulseScaleSlider:SetPoint("LEFT", block.pulseScaleLabel, "RIGHT", 10, 0)
+        block.pulseScaleSlider:SetSize(80, 16)
+        block.pulseScaleSlider:SetMinMaxValues(1.0, 2.0)
+        block.pulseScaleSlider:SetValueStep(0.05)
+        block.pulseScaleSlider:SetObeyStepOnDrag(true)
+        block.pulseScaleSlider.Low:SetText("") block.pulseScaleSlider.High:SetText("") block.pulseScaleSlider.Text:SetText("")
+        block.pulseScaleSlider:Hide()
+        alertsGroup[#alertsGroup + 1] = block.pulseScaleSlider
+        
+        block.pulseScaleValue = parentFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        block.pulseScaleValue:SetPoint("LEFT", block.pulseScaleSlider, "RIGHT", 5, 0)
+        block.pulseScaleValue:SetTextColor(1, 1, 1)
+        block.pulseScaleValue:Hide()
+        alertsGroup[#alertsGroup + 1] = block.pulseScaleValue
+        
+        -- Pulse Count
+        block.pulseCountLabel = parentFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        block.pulseCountLabel:SetPoint("TOPLEFT", block.pulseScaleLabel, "BOTTOMLEFT", 0, -8)
+        block.pulseCountLabel:SetText("Count:")
+        block.pulseCountLabel:SetTextColor(0.8, 0.8, 0.8)
+        block.pulseCountLabel:Hide()
+        alertsGroup[#alertsGroup + 1] = block.pulseCountLabel
+        
+        block.pulseCountSlider = CreateFrame("Slider", nil, parentFrame, "OptionsSliderTemplate")
+        block.pulseCountSlider:SetPoint("LEFT", block.pulseCountLabel, "RIGHT", 10, 0)
+        block.pulseCountSlider:SetSize(80, 16)
+        block.pulseCountSlider:SetMinMaxValues(1, 10)
+        block.pulseCountSlider:SetValueStep(1)
+        block.pulseCountSlider:SetObeyStepOnDrag(true)
+        block.pulseCountSlider.Low:SetText("") block.pulseCountSlider.High:SetText("") block.pulseCountSlider.Text:SetText("")
+        block.pulseCountSlider:Hide()
+        alertsGroup[#alertsGroup + 1] = block.pulseCountSlider
+        
+        block.pulseCountValue = parentFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        block.pulseCountValue:SetPoint("LEFT", block.pulseCountSlider, "RIGHT", 5, 0)
+        block.pulseCountValue:SetTextColor(1, 1, 1)
+        block.pulseCountValue:Hide()
+        alertsGroup[#alertsGroup + 1] = block.pulseCountValue
+        
+        -- Pulse Timing
+        block.pulseTimingLabel = parentFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        block.pulseTimingLabel:SetPoint("TOPLEFT", block.pulseCountLabel, "BOTTOMLEFT", 0, -8)
+        block.pulseTimingLabel:SetText("Timing (sec):")
+        block.pulseTimingLabel:SetTextColor(0.8, 0.8, 0.8)
+        block.pulseTimingLabel:Hide()
+        alertsGroup[#alertsGroup + 1] = block.pulseTimingLabel
+        
+        block.pulseTimingSlider = CreateFrame("Slider", nil, parentFrame, "OptionsSliderTemplate")
+        block.pulseTimingSlider:SetPoint("LEFT", block.pulseTimingLabel, "RIGHT", 5, 0)
+        block.pulseTimingSlider:SetSize(80, 16)
+        block.pulseTimingSlider:SetMinMaxValues(timingMin, timingMax)
+        block.pulseTimingSlider:SetValueStep(0.5)
+        block.pulseTimingSlider:SetObeyStepOnDrag(true)
+        block.pulseTimingSlider.Low:SetText("") block.pulseTimingSlider.High:SetText("") block.pulseTimingSlider.Text:SetText("")
+        block.pulseTimingSlider:Hide()
+        alertsGroup[#alertsGroup + 1] = block.pulseTimingSlider
+        
+        block.pulseTimingValue = parentFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        block.pulseTimingValue:SetPoint("LEFT", block.pulseTimingSlider, "RIGHT", 5, 0)
+        block.pulseTimingValue:SetTextColor(1, 1, 1)
+        block.pulseTimingValue:Hide()
+        alertsGroup[#alertsGroup + 1] = block.pulseTimingValue
+        
+        block.pulseTimingHint = parentFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        block.pulseTimingHint:SetPoint("TOPLEFT", block.pulseTimingLabel, "BOTTOMLEFT", 0, -4)
+        block.pulseTimingHint:SetText("|cff888888" .. timingHint .. "|r")
+        block.pulseTimingHint:Hide()
+        alertsGroup[#alertsGroup + 1] = block.pulseTimingHint
+        
+        return block
+    end
+    
+    -- Build "On Ready" alert block (anchored to tabBarFrame)
+    -- Create an anchor point for alerts tab
+    local alertsAnchor = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    alertsAnchor:SetPoint("TOPLEFT", tabBarFrame, "BOTTOMLEFT", 0, 0)
+    alertsAnchor:SetText("")
+    alertsAnchor:SetHeight(1)
+    alertsAnchor:Hide()
+    alertsGroup[#alertsGroup + 1] = alertsAnchor
+    
+    alertControls.onReady = BuildCDAlertBlock(controlsPanel, alertsAnchor,
+        "onReady", "On Ready (Cooldown Finished)",
+        "Trigger when the cooldown finishes and the spell becomes available.",
+        -5, 5, "Negative = before ready, 0 = on ready, Positive = after ready")
+    
+    alertControls.onCooldown = BuildCDAlertBlock(controlsPanel, alertControls.onReady.pulseTimingHint,
+        "onCooldown", "On Cooldown Start",
+        "Trigger when the spell goes on cooldown.",
+        0, 5, "0 = on cooldown start, Positive = seconds after")
+    
+    -- =====================================================
+    -- Tab Container Frames (same approach as buff panel)
+    -- =====================================================
+    local settingsContainer = CreateFrame("Frame", nil, controlsPanel)
+    settingsContainer:SetAllPoints()
+    settingsContainer:Hide()
+    
+    local textContainer = CreateFrame("Frame", nil, controlsPanel)
+    textContainer:SetAllPoints()
+    textContainer:Hide()
+    
+    local alertsContainer = CreateFrame("Frame", nil, controlsPanel)
+    alertsContainer:SetAllPoints()
+    alertsContainer:Hide()
+    
+    local cdPITabContainers = {
+        settings = settingsContainer,
+        text = textContainer,
+        alerts = alertsContainer,
+    }
+    
+    -- Reparent settings controls into settingsContainer
+    for _, ctrl in ipairs(settingsGroup) do
+        if ctrl and ctrl.SetParent then
+            ctrl:SetParent(settingsContainer)
+            ctrl:Show()
+        end
+    end
+    
+    -- Reparent text controls into textContainer
+    for _, ctrl in ipairs(textGroup) do
+        if ctrl and ctrl.SetParent then
+            ctrl:SetParent(textContainer)
+            ctrl:Show()
+        end
+    end
+    
+    -- Reparent alert controls into alertsContainer
+    for _, ctrl in ipairs(alertsGroup) do
+        if ctrl and ctrl.SetParent then
+            ctrl:SetParent(alertsContainer)
+            ctrl:Show()
+        end
+    end
+    
+    -- =====================================================
+    -- Tab Switching Logic
+    -- =====================================================
+    local function SelectPerIconTab(tabKey)
+        activePerIconTab = tabKey
+        -- Update tab button appearance
+        for key, ul in pairs(cdPITabUnderlines) do
+            ul:SetShown(key == tabKey)
+        end
+        for key, btn in pairs(cdPITabButtons) do
+            if key == tabKey then
+                btn:GetFontString():SetTextColor(1, 0.82, 0)
+            else
+                btn:GetFontString():SetTextColor(0.6, 0.6, 0.6)
             end
         end
+        -- Show/hide tab containers
+        for key, container in pairs(cdPITabContainers) do
+            container:SetShown(key == tabKey)
+        end
+        -- Update panel height
+        if tabKey == "settings" then
+            controlsPanel:SetHeight(900)
+        elseif tabKey == "text" then
+            controlsPanel:SetHeight(700)
+        elseif tabKey == "alerts" then
+            controlsPanel:SetHeight(800)
+        end
+    end
+    
+    -- Wire tab button clicks
+    for i, key in ipairs(cdPITabKeys) do
+        cdPITabButtons[key]:SetScript("OnClick", function()
+            SelectPerIconTab(key)
+        end)
+    end
+    
+    SelectPerIconTab("settings")
+    
+    -- =====================================================
+    -- ShowControls (simplified - containers handle tab content)
+    -- =====================================================
+    local function ShowControls(show)
+        noSelectionLabel:SetShown(not show)
+        controls.header:SetShown(show)
+        controls.iconPreview:SetShown(show)
+        tabBarFrame:SetShown(show)
         
-        -- Set panel height dynamically based on content
         if show then
-            -- The last control in the chain is labelOffsetYSlider
-            -- Add some padding below the last control
-            local lastControl = controls.labelOffsetYSlider
-            if lastControl and lastControl:GetTop() then
-                local panelTop = controlsPanel:GetTop()
-                local lastControlBottom = lastControl:GetBottom()
-                if panelTop and lastControlBottom then
-                    local contentHeight = panelTop - lastControlBottom + 20  -- 20px padding at bottom
-                    controlsPanel:SetHeight(contentHeight)
-                else
-                    controlsPanel:SetHeight(900)  -- Fallback height
-                end
-            else
-                controlsPanel:SetHeight(900)  -- Fallback height
+            -- Show active tab container (SelectPerIconTab already set visibility)
+            for key, container in pairs(cdPITabContainers) do
+                container:SetShown(key == activePerIconTab)
             end
         else
-            controlsPanel:SetHeight(400)  -- Smaller height when no selection
+            -- Hide all tab containers
+            for _, container in pairs(cdPITabContainers) do
+                container:Hide()
+            end
+            controlsPanel:SetHeight(400)
         end
     end
     
@@ -8865,6 +10335,7 @@ function Cooldowns:BuildPerIconTab(parent, trackerType)
         
         ShowControls(true)
         UpdateStateButtons()
+        currentAlertSlotIndex = slotIndex
         
         -- Get slot info for icon preview - use appropriate method based on tracker type
         local icons = {}
@@ -9616,6 +11087,162 @@ function Cooldowns:BuildPerIconTab(parent, trackerType)
             end
             ColorPickerFrame:SetupColorPickerAndShow(info)
         end)
+        
+        -- =====================================================
+        -- Update Alert Controls for current slot
+        -- =====================================================
+        local CooldownHighlightsRef = TUICD.CooldownHighlights
+        
+        local function UpdateOneAlertBlock(block, prefix)
+            if not CooldownHighlightsRef or not currentAlertSlotIndex then return end
+            
+            local function getAlert(key)
+                return CooldownHighlightsRef:GetIconAlertSetting(customTrackerKey, currentAlertSlotIndex, prefix .. "." .. key)
+            end
+            local function setAlert(key, val)
+                CooldownHighlightsRef:SetIconAlertSetting(customTrackerKey, currentAlertSlotIndex, prefix .. "." .. key, val)
+            end
+            
+            local GLOW_STYLES = {
+                { label = "Pixel Glow", value = "pixel" },
+                { label = "Proc Glow", value = "proc" },
+                { label = "AutoCast Shine", value = "autocast" },
+                { label = "Button Glow", value = "button" },
+            }
+            
+            -- Glow enable
+            local glowEnabled = getAlert("glowEnabled")
+            block.enableGlow:SetChecked(glowEnabled or false)
+            block.enableGlow:SetScript("OnClick", function(self) setAlert("glowEnabled", self:GetChecked()) end)
+            
+            -- Glow style dropdown
+            local curStyle = getAlert("glowStyle") or "pixel"
+            UIDropDownMenu_Initialize(block.glowStyleDropdown, function(self2, level)
+                for _, opt in ipairs(GLOW_STYLES) do
+                    local info = UIDropDownMenu_CreateInfo()
+                    info.text = opt.label
+                    info.value = opt.value
+                    info.func = function()
+                        setAlert("glowStyle", opt.value)
+                        UIDropDownMenu_SetText(block.glowStyleDropdown, opt.label)
+                    end
+                    info.checked = (opt.value == curStyle)
+                    UIDropDownMenu_AddButton(info, level)
+                end
+            end)
+            for _, opt in ipairs(GLOW_STYLES) do
+                if opt.value == curStyle then UIDropDownMenu_SetText(block.glowStyleDropdown, opt.label) break end
+            end
+            
+            -- Glow color
+            local gc = getAlert("glowColor") or {1, 0.82, 0, 1}
+            block.glowColorBtn:SetBackdropColor(gc[1] or 1, gc[2] or 0.82, gc[3] or 0, gc[4] or 1)
+            block.glowColorBtn:SetScript("OnClick", function()
+                local cr, cg, cb = block.glowColorBtn:GetBackdropColor()
+                ColorPickerFrame:SetupColorPickerAndShow({
+                    r = cr, g = cg, b = cb, hasOpacity = true, opacity = gc[4] or 1,
+                    swatchFunc = function()
+                        local nr, ng, nb = ColorPickerFrame:GetColorRGB()
+                        local na = ColorPickerFrame:GetColorAlpha() or 1
+                        block.glowColorBtn:SetBackdropColor(nr, ng, nb, 1)
+                        setAlert("glowColor", {nr, ng, nb, na})
+                    end,
+                    opacityFunc = function()
+                        local nr, ng, nb = ColorPickerFrame:GetColorRGB()
+                        local na = ColorPickerFrame:GetColorAlpha() or 1
+                        block.glowColorBtn:SetBackdropColor(nr, ng, nb, 1)
+                        setAlert("glowColor", {nr, ng, nb, na})
+                    end,
+                    cancelFunc = function(prev)
+                        block.glowColorBtn:SetBackdropColor(prev.r, prev.g, prev.b, 1)
+                        setAlert("glowColor", {prev.r, prev.g, prev.b, prev.a or 1})
+                    end,
+                })
+            end)
+            
+            -- Glow duration
+            local gd = getAlert("glowDuration") or 3.0
+            block.glowDurationSlider:SetValue(gd)
+            block.glowDurationValue:SetText(string.format("%.1f", gd))
+            block.glowDurationSlider:SetScript("OnValueChanged", function(self2, val)
+                val = math.floor(val * 2 + 0.5) / 2
+                block.glowDurationValue:SetText(string.format("%.1f", val))
+                setAlert("glowDuration", val)
+            end)
+            
+            -- Glow timing
+            local gt = getAlert("glowTiming") or 0
+            block.glowTimingSlider:SetValue(gt)
+            block.glowTimingValue:SetText(string.format("%.1f", gt))
+            block.glowTimingSlider:SetScript("OnValueChanged", function(self2, val)
+                val = math.floor(val * 2 + 0.5) / 2
+                block.glowTimingValue:SetText(string.format("%.1f", val))
+                setAlert("glowTiming", val)
+            end)
+            
+            -- Pulse enable
+            local pulseEnabled = getAlert("pulseEnabled")
+            block.enablePulse:SetChecked(pulseEnabled or false)
+            block.enablePulse:SetScript("OnClick", function(self2) setAlert("pulseEnabled", self2:GetChecked()) end)
+            
+            -- Pulse scale
+            local ps = getAlert("pulseScale") or 1.3
+            block.pulseScaleSlider:SetValue(ps)
+            block.pulseScaleValue:SetText(string.format("%.2f", ps))
+            block.pulseScaleSlider:SetScript("OnValueChanged", function(self2, val)
+                val = math.floor(val * 20 + 0.5) / 20
+                block.pulseScaleValue:SetText(string.format("%.2f", val))
+                setAlert("pulseScale", val)
+            end)
+            
+            -- Pulse count
+            local pc = getAlert("pulseCount") or 3
+            block.pulseCountSlider:SetValue(pc)
+            block.pulseCountValue:SetText(tostring(math.floor(pc)))
+            block.pulseCountSlider:SetScript("OnValueChanged", function(self2, val)
+                val = math.floor(val)
+                block.pulseCountValue:SetText(tostring(val))
+                setAlert("pulseCount", val)
+            end)
+            
+            -- Pulse timing
+            local pt = getAlert("pulseTiming") or 0
+            block.pulseTimingSlider:SetValue(pt)
+            block.pulseTimingValue:SetText(string.format("%.1f", pt))
+            block.pulseTimingSlider:SetScript("OnValueChanged", function(self2, val)
+                val = math.floor(val * 2 + 0.5) / 2
+                block.pulseTimingValue:SetText(string.format("%.1f", val))
+                setAlert("pulseTiming", val)
+            end)
+            
+            -- Grey out controls when parent is disabled
+            local glowAlpha = glowEnabled and 1.0 or 0.4
+            block.glowStyleLabel:SetAlpha(glowAlpha)
+            block.glowStyleDropdown:SetAlpha(glowAlpha)
+            block.glowColorLabel:SetAlpha(glowAlpha)
+            block.glowColorBtn:SetAlpha(glowAlpha)
+            block.glowDurationLabel:SetAlpha(glowAlpha)
+            block.glowDurationSlider:SetAlpha(glowAlpha)
+            block.glowDurationValue:SetAlpha(glowAlpha)
+            block.glowTimingLabel:SetAlpha(glowAlpha)
+            block.glowTimingSlider:SetAlpha(glowAlpha)
+            block.glowTimingValue:SetAlpha(glowAlpha)
+            
+            local pulseAlpha = pulseEnabled and 1.0 or 0.4
+            block.pulseScaleLabel:SetAlpha(pulseAlpha)
+            block.pulseScaleSlider:SetAlpha(pulseAlpha)
+            block.pulseScaleValue:SetAlpha(pulseAlpha)
+            block.pulseCountLabel:SetAlpha(pulseAlpha)
+            block.pulseCountSlider:SetAlpha(pulseAlpha)
+            block.pulseCountValue:SetAlpha(pulseAlpha)
+            block.pulseTimingLabel:SetAlpha(pulseAlpha)
+            block.pulseTimingSlider:SetAlpha(pulseAlpha)
+            block.pulseTimingValue:SetAlpha(pulseAlpha)
+        end
+        
+        -- Update both alert blocks
+        UpdateOneAlertBlock(alertControls.onReady, "onReady")
+        UpdateOneAlertBlock(alertControls.onCooldown, "onCooldown")
     end
     
     local function RefreshSlotList()
@@ -9688,10 +11315,15 @@ function Cooldowns:BuildPerIconTab(parent, trackerType)
             return
         end
         
-        -- Sort by listIndex to match layout order
-        table.sort(icons, function(a, b)
-            return (a.listIndex or 0) < (b.listIndex or 0)
-        end)
+        -- Sort by listIndex ONLY for custom/multiCustom trackers (which have listIndex set)
+        -- CDM trackers (essential/utility) never have listIndex - sorting them is unstable
+        -- and scrambles the order returned by GetOrderedIcons, causing per-icon settings
+        -- to map to the wrong abilities
+        if customTrackerKey == "customTrackers" or string.match(customTrackerKey, "^multiCustom") then
+            table.sort(icons, function(a, b)
+                return (a.listIndex or 0) < (b.listIndex or 0)
+            end)
+        end
         
         local rowY = -3
         local rowHeight = 21
@@ -9726,6 +11358,24 @@ function Cooldowns:BuildPerIconTab(parent, trackerType)
                 local enabledIndicator = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
                 enabledIndicator:SetPoint("LEFT", 45, 0)
                 enabledIndicator:SetText(isEnabled and "|cff00ff00On|r" or "|cff666666Off|r")
+                
+                -- Show spell name for identification (helps confirm correct mapping)
+                local spellName = nil
+                pcall(function()
+                    local spellID = icon.spellID or icon.SpellID or icon.spellId
+                    if spellID and not (issecretvalue and issecretvalue(spellID)) then
+                        local info = SpellAPI:GetSpellInfo(spellID)
+                        if info then spellName = info.name end
+                    end
+                end)
+                if spellName then
+                    local nameLabel = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                    nameLabel:SetPoint("LEFT", 72, 0)
+                    nameLabel:SetText("|cffaaaaaa" .. spellName .. "|r")
+                    nameLabel:SetWidth(200)
+                    nameLabel:SetJustifyH("LEFT")
+                    nameLabel:SetWordWrap(false)
+                end
                 
                 row.slotIndex = slotIndex
                 row:SetScript("OnClick", function(self)
@@ -9769,7 +11419,28 @@ function Cooldowns:BuildPerIconTab(parent, trackerType)
     -- Set the refresh button script (button created at top of tab)
     refreshBtn:SetScript("OnClick", function()
         selectedSlot = nil
+        -- Hard reset: clear ALL caches so the list rebuilds from actual Blizzard state
+        -- 1. Session cache (iconOrderCache)
+        -- 2. Persistent saved order (savedIconOrder in DB)
+        -- 3. Original Blizzard capture (originalBlizzardOrder)
+        -- 4. SpellID cache for per-icon settings mapping
+        ClearIconOrderCache(customTrackerKey, true)  -- true = clear persistent too
+        ClearOriginalOrderCache(customTrackerKey)
+        if TUICD.CooldownHighlights and TUICD.CooldownHighlights.RefreshSpellIDCache then
+            TUICD.CooldownHighlights:RefreshSpellIDCache(customTrackerKey)
+        end
+        -- Re-apply layout so the actual tracker display matches the new order
+        local trackerInfo = GetTrackerInfo(customTrackerKey)
+        if trackerInfo then
+            local viewer = _G[trackerInfo.name]
+            if viewer then
+                C_Timer.After(0.05, function()
+                    ApplyGridLayout(viewer, customTrackerKey)
+                end)
+            end
+        end
         RefreshSlotList()
+        TUICD:Print("Per-icon list reset for " .. (customTrackerKey or "tracker"))
     end)
     
     parent:SetHeight(math.abs(y) + 370)
@@ -10097,10 +11768,13 @@ function Cooldowns:CreateCustomTrackersPanel()
         { name = "Individual Icons", key = "pericon" },
     }
     
+    local MAX_TABS_PER_ROW = 5
+    local customTabRows = math.ceil(#tabs / MAX_TABS_PER_ROW)
+    
     local tabContainer = CreateFrame("Frame", nil, panel)
     tabContainer:SetPoint("TOPLEFT", 10, -95)  -- Moved down for dropdown + second row buttons
     tabContainer:SetPoint("TOPRIGHT", -10, -95)
-    tabContainer:SetHeight(28)
+    tabContainer:SetHeight(customTabRows * 28)
     
     local contentContainer = CreateFrame("Frame", nil, panel)
     contentContainer:SetPoint("TOPLEFT", tabContainer, "BOTTOMLEFT", 0, -4)
@@ -12192,8 +13866,6 @@ function Cooldowns:CreateCustomTrackersPanel()
     panel.UpdateDeleteButtonState()
     
     -- Create content frames and tab buttons
-    local tabWidth = (PANEL_WIDTH - 20) / #tabs
-    
     for i, tab in ipairs(tabs) do
         -- Create content frame
         local content = CreateTabContent()
@@ -12204,10 +13876,14 @@ function Cooldowns:CreateCustomTrackersPanel()
             tabBuilders[tab.key](content.scrollChild)
         end
         
-        -- Create tab button
+        -- Create tab button - calculate row and column
+        local row = math.ceil(i / MAX_TABS_PER_ROW) - 1
+        local col = (i - 1) % MAX_TABS_PER_ROW
+        local tabWidth = (PANEL_WIDTH - 20) / MAX_TABS_PER_ROW
+        
         local tabBtn = CreateFrame("Button", nil, tabContainer)
         tabBtn:SetSize(tabWidth - 2, 26)
-        tabBtn:SetPoint("LEFT", (i - 1) * tabWidth, 0)
+        tabBtn:SetPoint("TOPLEFT", col * tabWidth, -(row * 28))
         
         tabBtn.bg = tabBtn:CreateTexture(nil, "BACKGROUND")
         tabBtn.bg:SetAllPoints()

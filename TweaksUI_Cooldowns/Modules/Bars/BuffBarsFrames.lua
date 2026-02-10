@@ -231,7 +231,11 @@ local function CreateBarFrame(barKey)
     if not config then return nil end
 
     local data = GetData()
-    local slotIndex = data and data.ParseBarKey(barKey)
+    local slotIndex = data and data.GetSlotIndexForBarKey(barKey)
+    if not slotIndex then
+        local id = data and data.ParseBarKey(barKey)
+        slotIndex = (id and id <= 100) and id or nil
+    end
     local safeKey = barKey:gsub("[^%w]", "_")
     local frameName = "TUICD_BuffBar_" .. safeKey
 
@@ -704,7 +708,8 @@ local function RestorePosition(barKey, frame)
         frame:SetPoint(pos.point or "CENTER", UIParent, pos.point or "CENTER", pos.x or 0, pos.y or 0)
     else
         -- Default position: stagger bars vertically
-        local slotIndex = data.ParseBarKey(barKey) or 1
+        local slotIndex = data.GetSlotIndexForBarKey(barKey) or data.ParseBarKey(barKey) or 1
+        if slotIndex > 20 then slotIndex = 1 end  -- Safety: spellID fallback
         frame:ClearAllPoints()
         frame:SetPoint("CENTER", UIParent, "CENTER", 0, 100 - (slotIndex - 1) * 28)
     end

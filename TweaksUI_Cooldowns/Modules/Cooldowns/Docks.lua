@@ -1884,21 +1884,32 @@ function Docks:CleanupOrphans(specificDock)
     local buffDB = TweaksUI_Cooldowns_CharDB and TweaksUI_Cooldowns_CharDB.buffHighlights
     if buffDB and buffDB.dockAssignment then
         local toRemove = {}
-        for slotIndex, dockIndex in pairs(buffDB.dockAssignment) do
+        local Bridge = TUICD.BuffIdentityBridge
+        for settingsKey, dockIndex in pairs(buffDB.dockAssignment) do
             if dockIndex and (not specificDock or dockIndex == specificDock) then
                 checkedCount = checkedCount + 1
-                if not IsValidDockedIcon("buffs", slotIndex) then
-                    table.insert(toRemove, slotIndex)
-                    print(string.format("  |cffff8888Orphan found:|r buffs slot %d in dock %d", slotIndex, dockIndex))
+                -- Resolve spellID key to current slot
+                local resolvedSlot = settingsKey
+                if type(settingsKey) == "number" and settingsKey > 100 and Bridge then
+                    resolvedSlot = Bridge:GetSlotForSpellID(settingsKey)
+                end
+                if not resolvedSlot or not IsValidDockedIcon("buffs", resolvedSlot) then
+                    table.insert(toRemove, settingsKey)
+                    print(string.format("  |cffff8888Orphan found:|r buffs key %s (slot %s) in dock %d", tostring(settingsKey), tostring(resolvedSlot), dockIndex))
                 end
             end
         end
-        for _, slotIndex in ipairs(toRemove) do
-            local dockIndex = buffDB.dockAssignment[slotIndex]
-            buffDB.dockAssignment[slotIndex] = nil
+        for _, key in ipairs(toRemove) do
+            local dockIndex = buffDB.dockAssignment[key]
+            buffDB.dockAssignment[key] = nil
             -- Also remove from runtime state
             if dockIndex then
-                local iconKey = MakeIconKey("buffs", slotIndex)
+                -- For runtime state, we need the resolved slot for the icon key
+                local resolvedSlot = key
+                if type(key) == "number" and key > 100 and Bridge then
+                    resolvedSlot = Bridge:GetSlotForSpellID(key) or key
+                end
+                local iconKey = MakeIconKey("buffs", resolvedSlot)
                 if dockedIcons[dockIndex] then
                     dockedIcons[dockIndex][iconKey] = nil
                 end
@@ -2019,12 +2030,20 @@ function Docks:RestoreAllAssignments()
     if TUICD.Modules and TUICD.Modules.BuffHighlights then
         local db = TweaksUI_Cooldowns_CharDB and TweaksUI_Cooldowns_CharDB.buffHighlights
         if db and db.dockAssignment then
-            for slotIndex, dockIndex in pairs(db.dockAssignment) do
+            local Bridge = TUICD.BuffIdentityBridge
+            for settingsKey, dockIndex in pairs(db.dockAssignment) do
                 if dockIndex then
-                    local frame = TUICD.Modules.BuffHighlights:GetFrame(slotIndex)
-                    if frame then
-                        dprint("Restoring buff slot", slotIndex, "-> dock", dockIndex)
-                        self:AssignIcon(dockIndex, "buffs", slotIndex)
+                    -- Settings keys are spellIDs after migration; resolve to current slot
+                    local resolvedSlot = settingsKey
+                    if type(settingsKey) == "number" and settingsKey > 100 and Bridge then
+                        resolvedSlot = Bridge:GetSlotForSpellID(settingsKey)
+                    end
+                    if resolvedSlot then
+                        local frame = TUICD.Modules.BuffHighlights:GetFrame(resolvedSlot)
+                        if frame then
+                            dprint("Restoring buff key", settingsKey, "slot", resolvedSlot, "-> dock", dockIndex)
+                            self:AssignIcon(dockIndex, "buffs", resolvedSlot)
+                        end
                     end
                 end
             end
