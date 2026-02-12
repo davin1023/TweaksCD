@@ -1285,8 +1285,8 @@ local function HasAnyPerIconAlert(spellID)
     if not db.iconAlerts then return false end
     local entry = db.iconAlerts[spellID]
     if not entry then return false end
-    return entry["onStartGlowEnabled"] or entry["onStartPulseEnabled"]
-        or entry["onEndGlowEnabled"] or entry["onEndPulseEnabled"]
+    return entry["onStartGlowEnabled"] or entry["onStartPulseEnabled"] or entry["onStartSoundEnabled"]
+        or entry["onEndGlowEnabled"] or entry["onEndPulseEnabled"] or entry["onEndSoundEnabled"]
         or false
 end
 
@@ -1550,6 +1550,28 @@ end
 -- Transition handlers
 -- ---------------------------------------------------------------------------
 
+-- Schedule an alert sound with optional delay
+local function ScheduleAlertSound(frame, prefix, delay, remaining, timerKey, getSetting)
+    local soundName = getSetting(prefix .. "SoundName")
+    if not soundName or soundName == "" or soundName == "None" then return end
+    if not TUICD.Media then return end
+    
+    local effectiveDelay = delay or 0
+    if remaining and delay and delay < 0 then
+        effectiveDelay = remaining + delay  -- e.g., 10 + (-3) = fire at 7s
+        if effectiveDelay < 0 then effectiveDelay = 0 end
+    end
+    
+    if effectiveDelay <= 0 then
+        TUICD.Media:PlayAlertSound(soundName)
+    else
+        local timer = C_Timer.After(effectiveDelay, function()
+            TUICD.Media:PlayAlertSound(soundName)
+        end)
+        if timerKey then frame[timerKey] = timer end
+    end
+end
+
 -- Called when a buff is GAINED (inactive → active)
 -- getSetting: function(key) returning setting value (allows tracker-level or per-icon)
 local function OnBuffGained(frame, slotIndex, auraInstanceID, getSetting)
@@ -1570,6 +1592,11 @@ local function OnBuffGained(frame, slotIndex, auraInstanceID, getSetting)
         if timing < 0 then timing = 0 end
         ScheduleAlertPulse(frame, "onStart", timing, nil, "_onStartPulseTimer", getSetting)
     end
+    if getSetting("onStartSoundEnabled") then
+        local timing = getSetting("onStartGlowTiming") or 0  -- share glow timing
+        if timing < 0 then timing = 0 end
+        ScheduleAlertSound(frame, "onStart", timing, nil, "_onStartSoundTimer", getSetting)
+    end
 
     -- ── On End effects with NEGATIVE timing (early warning before expiry) ──
     -- Schedule now using remaining duration so timer fires before buff drops.
@@ -1587,6 +1614,12 @@ local function OnBuffGained(frame, slotIndex, auraInstanceID, getSetting)
                 ScheduleAlertPulse(frame, "onEnd", timing, remaining, "_onEndPulseTimer", getSetting)
             end
         end
+        if getSetting("onEndSoundEnabled") then
+            local timing = getSetting("onEndGlowTiming") or 0  -- share glow timing
+            if timing < 0 then
+                ScheduleAlertSound(frame, "onEnd", timing, remaining, "_onEndSoundTimer", getSetting)
+            end
+        end
     end
 end
 
@@ -1596,6 +1629,7 @@ local function OnBuffLost(frame, slotIndex, getSetting)
     -- Cancel any pending early-warning timers (they're no longer relevant)
     if frame._onEndGlowTimer then frame._onEndGlowTimer:Cancel(); frame._onEndGlowTimer = nil end
     if frame._onEndPulseTimer then frame._onEndPulseTimer:Cancel(); frame._onEndPulseTimer = nil end
+    if frame._onEndSoundTimer then frame._onEndSoundTimer:Cancel(); frame._onEndSoundTimer = nil end
 
     -- ── On End effects ──
     -- Always fire when the buff actually drops:
@@ -1619,6 +1653,11 @@ local function OnBuffLost(frame, slotIndex, getSetting)
         local pulseDur = (getSetting("onEndPulseDuration") or 0.4) * (getSetting("onEndPulseCount") or 3) + effectiveDelay
         if pulseDur > maxDuration then maxDuration = pulseDur end
         ScheduleAlertPulse(frame, "onEnd", effectiveDelay, nil, "_onEndPulseTimer", getSetting)
+    end
+    if getSetting("onEndSoundEnabled") then
+        hasOnEnd = true
+        -- Sound uses glow timing (On Buff Expiring has no timing slider, so fire immediately)
+        ScheduleAlertSound(frame, "onEnd", 0, nil, "_onEndSoundTimer", getSetting)
     end
     -- Keep the frame alive so On End effects are visible even if inactive state is hidden
     if hasOnEnd and maxDuration > 0 then

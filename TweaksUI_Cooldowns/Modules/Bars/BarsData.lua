@@ -462,45 +462,11 @@ function BarsData:GetSpellState(barKey)
 end
 
 -- ============================================================================
--- COOLDOWN DETECTION: CooldownFrame Sensor (same pattern as Cooldowns module)
+-- COOLDOWN DETECTION: isOnGCD + Duration Object pass-through
 --
--- Feed Duration Object into a hidden CooldownFrame, then read back via
--- GetCooldownTimes() which returns NON-SECRET milliseconds.
--- Check duration > 3000ms to filter GCD (~1500ms).
---
--- This is the proven approach from CooldownHighlights.lua.
--- ============================================================================
-
--- GCD is ~1500ms; anything over 3000ms is a real cooldown
-local GCD_THRESHOLD_MS = 3000
-
--- Hidden CooldownFrame used purely as a sensor to convert secret Duration
--- Objects into readable millisecond values via GetCooldownTimes()
-local sensorParent = CreateFrame("Frame", nil, UIParent)
-sensorParent:SetSize(1, 1)
-sensorParent:SetPoint("TOPLEFT", UIParent, "TOPLEFT", -100, 100)
-sensorParent:Hide()
-
-local cdSensor = CreateFrame("Cooldown", "TUICD_BarsCDSensor", sensorParent, "CooldownFrameTemplate")
-cdSensor:SetAllPoints()
-cdSensor:SetAlpha(0)
--- Midnight CooldownFrameTemplate uses alpha (not shown state) to display,
--- so we must also disable all visual components to prevent rendering
-pcall(function() cdSensor:SetDrawSwipe(false) end)
-pcall(function() cdSensor:SetDrawBling(false) end)
-pcall(function() cdSensor:SetDrawEdge(false) end)
-
--- ============================================================================
--- ============================================================================
--- CORE STATE UPDATE
---
--- Simple algorithm using CooldownFrame sensor (matches Cooldowns module):
---   1) Get Duration Object for the spell.
---   2) Feed it into the hidden CooldownFrame sensor.
---   3) Read back GetCooldownTimes() -> non-secret milliseconds.
---   4) If duration > 3000ms (GCD threshold), it is a real cooldown.
---
--- FireUpdate only on state transitions (wasActive ~= isOnCD).
+-- Uses C_Spell.GetSpellCooldown().isOnGCD (non-secret boolean) for GCD filter.
+-- Duration Object passed straight to frames for display.
+-- No sensor, no arithmetic on secret values.
 -- ============================================================================
 
 function BarsData:UpdateCooldownState(barKey)
@@ -519,49 +485,18 @@ function BarsData:UpdateCooldownState(barKey)
     local wasActive = state.isActive
     local isOnCD = false
     local durationObj = nil
-    local cdStartMs, cdDurationMs  -- hoisted for color-by-time caching
 
-    -- Step 1: Get Duration Object
-    if C_Spell and C_Spell.GetSpellCooldownDuration then
-        local ok, dObj = pcall(C_Spell.GetSpellCooldownDuration, numID)
-        if ok and dObj then
+    local DurationAPI = TUICD.DurationAPI
+    if DurationAPI and DurationAPI.IsRealCooldownActive then
+        local onCD, dObj = DurationAPI:IsRealCooldownActive(numID)
+        if onCD and dObj then
+            isOnCD = true
             durationObj = dObj
-
-            -- Step 2: Feed into hidden CooldownFrame sensor
-            pcall(function()
-                cdSensor:SetCooldownFromDurationObject(dObj, true)
-            end)
-
-            -- Step 3: Read back non-secret milliseconds
-            pcall(function()
-                if cdSensor.GetCooldownTimes then
-                    local start, duration = cdSensor:GetCooldownTimes()
-                    if start and duration
-                       and type(start) == "number"
-                       and type(duration) == "number" then
-                        -- Step 4: Only real cooldowns (> 3 sec), not GCD (~1.5 sec)
-                        if duration > GCD_THRESHOLD_MS then
-                            local startSec = start / 1000
-                            local durationSec = duration / 1000
-                            local remaining = (startSec + durationSec) - GetTime()
-                            if remaining > 0.1 then
-                                isOnCD = true
-                                cdStartMs = start
-                                cdDurationMs = duration
-                            end
-                        end
-                    end
-                end
-            end)
         end
     end
 
-    -- Update state and fire callback on transitions only
     state.isActive = isOnCD
-    state.durationObj = isOnCD and durationObj or nil
-    -- Cache non-secret ms values from sensor for color-by-time
-    state.cdStartMs = isOnCD and cdStartMs or nil
-    state.cdDurationMs = isOnCD and cdDurationMs or nil
+    state.durationObj = durationObj
     if wasActive ~= isOnCD then self:FireUpdate(barKey) end
 end
 

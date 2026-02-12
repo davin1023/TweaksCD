@@ -1,18 +1,16 @@
 -- ============================================================================
 -- TUICD: Buff Timer Bars - Data Layer
 -- Discovers buff slots from Blizzard's Cooldown Manager (BuffIconCooldownViewer)
--- Tracks active/inactive state via BuffIdentityBridge (combat-safe, no secret math)
+-- Tracks active/inactive state via auraInstanceID (combat-safe, no secret math)
 -- Provides Duration Objects for self-updating timer bars
 --
--- KEY SYSTEM (v3.2.0): SpellID-based barKeys in format "buff:SPELLID"
---   e.g. "buff:203819" for Demon Spikes
---   Legacy "buff:N" (slotIndex) keys migrated automatically on first load
+-- KEY SYSTEM: Slot-based barKeys in format "buff:N" where N is CDM icon index
 --
--- DETECTION PATTERN:
---   Priority 1: BuffIdentityBridge (combat-safe, never secret)
---   Priority 2: C_UnitAuras.GetPlayerAuraBySpellID (direct API, outside combat)
---   Priority 3: icon.auraInstanceID from CDM frame (frame property)
---   Duration:   C_UnitAuras.GetAuraDataByAuraInstanceID for timing
+-- DETECTION PATTERN (proven in BuffHighlights.lua):
+--   Priority 1: C_UnitAuras.GetPlayerAuraBySpellID(spellID)  [direct API]
+--   Priority 2: icon.auraInstanceID from CDM frame            [frame property]
+--   Duration:   C_UnitAuras.GetUnitAuraDuration("player", auraInstanceID)
+--   Stacks:     Deferred to BuffBarsFrames (GetAuraApplicationDisplayCount)
 -- ============================================================================
 
 local ADDON_NAME, TUICD = ...
@@ -40,52 +38,22 @@ BuffBarsData.ICON_ASPECTS = {
 }
 
 -- ============================================================================
--- KEY HELPERS (v3.2.0: spellID-based keys)
+-- KEY HELPERS
 -- ============================================================================
 
--- Create bar key from spellID (preferred) or slotIndex (legacy fallback)
--- Format: "buff:203819" (spellID) or "buff:3" (legacy slotIndex)
-function BuffBarsData.MakeBarKey(identifier)
-    return "buff:" .. tostring(identifier)
-end
-
--- Create bar key from a slotIndex, resolving through Bridge to get spellID
-function BuffBarsData.MakeBarKeyFromSlot(slotIndex)
-    local Bridge = TUICD.BuffIdentityBridge
-    if Bridge then
-        local spellID = Bridge:GetSpellIDForSlot(slotIndex)
-        if spellID then return "buff:" .. tostring(spellID) end
-    end
+-- Create bar key from slot index: "buff:3"
+function BuffBarsData.MakeBarKey(slotIndex)
     return "buff:" .. tostring(slotIndex)
 end
 
--- Parse bar key -> the numeric identifier (spellID or legacy slotIndex)
+-- Parse bar key -> slotIndex (number), or nil if invalid
 function BuffBarsData.ParseBarKey(barKey)
     if not barKey then return nil end
     local idx = barKey:match("^buff:(%d+)$")
     return idx and tonumber(idx) or nil
 end
 
--- Check if a barKey contains a spellID (> 100) vs a legacy slotIndex (1-20)
-function BuffBarsData.IsSpellIDBarKey(barKey)
-    local id = BuffBarsData.ParseBarKey(barKey)
-    return id and id > 100
-end
-
--- Get slotIndex for a barKey (resolves spellID keys through Bridge)
-function BuffBarsData.GetSlotIndexForBarKey(barKey)
-    local id = BuffBarsData.ParseBarKey(barKey)
-    if not id then return nil end
-    if id <= 100 then return id end  -- Already a slotIndex
-    -- It's a spellID — resolve to current slot via Bridge
-    local Bridge = TUICD.BuffIdentityBridge
-    if Bridge then
-        return Bridge:GetSlotForSpellID(id)
-    end
-    return nil
-end
-
--- Sanitize key for frame naming (e.g. "buff:203819" -> "buff_203819")
+-- Sanitize key for frame naming (e.g. "buff:3" -> "buff_3")
 function BuffBarsData.SanitizeKey(barKey)
     return barKey:gsub("[^%w]", "_")
 end
@@ -172,71 +140,72 @@ function BuffBarsData:DiscoverSlots()
     wipe(cdmIcons)
     wipe(discoveredSlots)
 
-    local Bridge = TUICD.BuffIdentityBridge
-
     for i, icon in ipairs(icons) do
         cdmIcons[i] = icon
 
+        -- Read static properties (non-secret at config time outside combat)
         local spellID, spellName, texture
-        local isActive = false
-        local auraInstanceID = nil
 
-        -- PRIORITY 1: Use BuffIdentityBridge (combat-safe, always non-secret)
-        if Bridge then
-            spellID = Bridge:GetSpellIDForSlot(i)
-            if spellID then
-                local bridgeInfo = Bridge:GetBuffInfo(spellID)
-                if bridgeInfo then
-                    spellName = bridgeInfo.name
-                    texture = bridgeInfo.icon
+        -- Try direct property (Essential/Utility CDM icons have this)
+        pcall(function()
+            spellID = icon.spellID or icon.SpellID or icon.spellId
+        end)
+
+        -- Try GetSpellID method (some CDM icons expose this)
+        if not spellID and icon.GetSpellID then
+            pcall(function() spellID = icon:GetSpellID() end)
+        end
+
+        pcall(function()
+            local texObj = icon.Icon or icon.icon
+            if texObj then texture = texObj:GetTexture() end
+        end)
+
+        -- Determine initial active state via auraInstanceID from icon frame
+        local isActive, auraInstanceID = false, nil
+        pcall(function()
+            auraInstanceID = icon.auraInstanceID
+            isActive = (auraInstanceID ~= nil)
+        end)
+
+        -- If we have an auraInstanceID, resolve spellID from aura API
+        -- This is the primary path for buff icons (which lack .spellID property)
+        if auraInstanceID and not spellID and C_UnitAuras and C_UnitAuras.GetAuraDataByAuraInstanceID then
+            pcall(function()
+                local auraData = C_UnitAuras.GetAuraDataByAuraInstanceID("player", auraInstanceID)
+                if auraData then
+                    spellID = auraData.spellId
+                    if auraData.name then spellName = auraData.name end
+                    if auraData.icon then texture = texture or auraData.icon end
                 end
-                isActive = Bridge:IsBuffActive(spellID) or false
-                auraInstanceID = Bridge:GetAuraIDForSpellID(spellID)
-            end
-        end
-
-        -- PRIORITY 2: Fallback - read icon properties directly (outside combat only)
-        if not spellID then
-            pcall(function()
-                spellID = icon.spellID or icon.SpellID or icon.spellId
-            end)
-            if not spellID and icon.GetSpellID then
-                pcall(function() spellID = icon:GetSpellID() end)
-            end
-        end
-
-        -- Get texture from icon frame if Bridge didn't provide it
-        if not texture then
-            pcall(function()
-                local texObj = icon.Icon or icon.icon
-                if texObj then texture = texObj:GetTexture() end
             end)
         end
 
-        -- Fallback active state from icon frame
-        if not isActive and not Bridge then
+        -- Also try GetPlayerAuraBySpellID if we resolved a spellID
+        if spellID and not isActive and C_UnitAuras and C_UnitAuras.GetPlayerAuraBySpellID then
             pcall(function()
-                auraInstanceID = icon.auraInstanceID
-                isActive = (auraInstanceID ~= nil)
+                local auraData = C_UnitAuras.GetPlayerAuraBySpellID(spellID)
+                if auraData then
+                    isActive = true
+                    auraInstanceID = auraData.auraInstanceID
+                end
             end)
         end
 
         -- Look up spell name via SpellAPI if still missing
-        if spellID and not issecretvalue(spellID) then
-            if not spellName and SpellAPI then
-                local info = SpellAPI:GetSpellInfo(spellID)
-                if info then spellName = info.name end
-            end
-            if not texture and SpellAPI then
+        if spellID and not spellName and SpellAPI then
+            local info = SpellAPI:GetSpellInfo(spellID)
+            if info then spellName = info.name end
+            if not texture then
                 texture = SpellAPI:GetSpellTexture(spellID)
             end
         end
 
         discoveredSlots[i] = {
             slotIndex = i,
-            spellID = (spellID and not issecretvalue(spellID)) and spellID or nil,
-            name = (spellName and not issecretvalue(spellName)) and spellName or ("Buff Slot " .. i),
-            texture = (texture and not issecretvalue(texture)) and texture or nil,
+            spellID = spellID,
+            name = spellName or ("Buff Slot " .. i),
+            texture = texture,
             isActive = isActive,
             auraInstanceID = auraInstanceID,
         }
@@ -250,43 +219,25 @@ function BuffBarsData:DiscoverSlots()
 
     -- Update existing entries with fresh discovery info
     for barKey, config in pairs(db.spells) do
-        local id = BuffBarsData.ParseBarKey(barKey)
-        if id then
-            -- Find matching discovered slot (by spellID match or legacy slotIndex match)
-            local slotInfo
-            if BuffBarsData.IsSpellIDBarKey(barKey) then
-                -- SpellID-keyed: find the slot that has this spellID
-                for _, info in pairs(discoveredSlots) do
-                    if info.spellID == id then slotInfo = info; break end
-                end
-            else
-                -- Legacy slotIndex-keyed: direct lookup
-                slotInfo = discoveredSlots[id]
+        local slotIdx = BuffBarsData.ParseBarKey(barKey)
+        local slotInfo = slotIdx and discoveredSlots[slotIdx]
+        if slotInfo then
+            if slotInfo.name and (not config.name or config.name:match("^Buff Slot %d")) then
+                config.name = slotInfo.name
             end
-            if slotInfo then
-                if slotInfo.name and (not config.name or config.name:match("^Buff Slot %d")) then
-                    config.name = slotInfo.name
-                end
-                if slotInfo.texture then
-                    config.texture = slotInfo.texture
-                    config.iconID = slotInfo.texture
-                end
-                if slotInfo.spellID then
-                    config.cachedSpellID = slotInfo.spellID
-                end
-                config.slotIndex = slotInfo.slotIndex  -- Keep current slot position
+            if slotInfo.texture then
+                config.texture = slotInfo.texture
+                config.iconID = slotInfo.texture
+            end
+            if slotInfo.spellID then
+                config.cachedSpellID = slotInfo.spellID
             end
         end
     end
 
-    -- Persist newly discovered slots using spellID-based keys
+    -- Persist newly discovered slots (enabled=false) so they survive reloads
     for slotIndex, slotInfo in pairs(discoveredSlots) do
-        local barKey
-        if slotInfo.spellID then
-            barKey = BuffBarsData.MakeBarKey(slotInfo.spellID)
-        else
-            barKey = BuffBarsData.MakeBarKey(slotIndex)  -- Legacy fallback
-        end
+        local barKey = BuffBarsData.MakeBarKey(slotIndex)
         if not db.spells[barKey] then
             db.spells[barKey] = {
                 enabled = false,
@@ -309,42 +260,66 @@ function BuffBarsData:DiscoverSlots()
     return #icons
 end
 
--- Re-discover slots after talent change / spec change / CDM layout update
--- With spellID-based keys, no remapping is needed — "buff:203819" stays correct
--- regardless of which slot position that spell occupies.
+-- Re-discover and remap existing configs if slots shifted (e.g. talent change)
 function BuffBarsData:RediscoverSlots()
-    -- Run lazy migration for any remaining legacy slotIndex-keyed entries
+    -- Remember old spellID -> slotIndex mapping
+    local oldMapping = {}
+    for idx, info in pairs(discoveredSlots) do
+        if info.spellID then
+            oldMapping[info.spellID] = idx
+        end
+    end
+
+    local count = self:DiscoverSlots()
+
+    -- Check for remapping needs
     local db = self:GetDB()
-    if db and db.spells then
-        local Bridge = TUICD.BuffIdentityBridge
-        if Bridge then
-            local toMigrate = {}
-            for barKey, config in pairs(db.spells) do
-                if not BuffBarsData.IsSpellIDBarKey(barKey) then
-                    local slotIdx = BuffBarsData.ParseBarKey(barKey)
-                    if slotIdx then
-                        -- Try to resolve spellID from bridge or cached value
-                        local spellID = Bridge:GetSpellIDForSlot(slotIdx) or config.cachedSpellID
-                        if spellID then
-                            toMigrate[barKey] = { spellID = spellID, config = config }
-                        end
-                    end
-                end
-            end
-            for oldKey, data in pairs(toMigrate) do
-                local newKey = BuffBarsData.MakeBarKey(data.spellID)
-                if not db.spells[newKey] then
-                    data.config.cachedSpellID = data.spellID
-                    db.spells[newKey] = data.config
-                    db.spells[oldKey] = nil
-                    TUICD:PrintDebug("BuffBarsData: Migrated " .. oldKey .. " -> " .. newKey)
-                end
+    if not db or not db.spells then return count end
+
+    local remaps = {}
+    for newIdx, info in pairs(discoveredSlots) do
+        if info.spellID and oldMapping[info.spellID] then
+            local oldIdx = oldMapping[info.spellID]
+            if oldIdx ~= newIdx then
+                remaps[oldIdx] = newIdx
             end
         end
     end
 
-    -- Re-run discovery to refresh slot positions and sync DB
-    local count = self:DiscoverSlots()
+    -- Apply remaps to saved config
+    if next(remaps) then
+        local newSpells = {}
+        for barKey, config in pairs(db.spells) do
+            local oldSlot = BuffBarsData.ParseBarKey(barKey)
+            if oldSlot and remaps[oldSlot] then
+                local newKey = BuffBarsData.MakeBarKey(remaps[oldSlot])
+                config.slotIndex = remaps[oldSlot]
+                newSpells[newKey] = config
+                TUICD:PrintDebug("BuffBarsData: Remapped " .. barKey .. " -> " .. newKey)
+            else
+                newSpells[barKey] = config
+            end
+        end
+        db.spells = newSpells
+    end
+
+    -- Sync name/texture from discovery into saved entries (fixes stale "Buff Slot N" names)
+    for barKey, config in pairs(db.spells) do
+        local slotIdx = BuffBarsData.ParseBarKey(barKey)
+        local slotInfo = slotIdx and discoveredSlots[slotIdx]
+        if slotInfo then
+            if slotInfo.name and (not config.name or config.name:match("^Buff Slot %d")) then
+                config.name = slotInfo.name
+            end
+            if slotInfo.texture and not config.texture then
+                config.texture = slotInfo.texture
+                config.iconID = slotInfo.texture
+            end
+            if slotInfo.spellID and not config.cachedSpellID then
+                config.cachedSpellID = slotInfo.spellID
+            end
+        end
+    end
 
     return count
 end
@@ -369,12 +344,6 @@ function BuffBarsData:GetCDMIcon(slotIndex)
     return cdmIcons[slotIndex]
 end
 
--- Get CDM icon reference from a barKey (resolves spellID keys through Bridge)
-function BuffBarsData:GetCDMIconForBarKey(barKey)
-    local slotIndex = BuffBarsData.GetSlotIndexForBarKey(barKey)
-    return slotIndex and cdmIcons[slotIndex]
-end
-
 -- ============================================================================
 -- DATABASE
 -- ============================================================================
@@ -385,57 +354,37 @@ local DB_DEFAULTS = {
     dockSettings = {
         direction = "DOWN",
         spacing = 2,
-        justify = "CENTER",       -- "START", "CENTER", "END" (arrival order placement)
-        sortMode = "arrival",     -- "arrival" (FIFO center-out) or "list" (spell list order)
-        -- Visibility settings
-        visibilityEnabled = false,  -- Master toggle (false = always show)
-        showInCombat = true,
-        showOutOfCombat = true,
-        showSolo = true,
-        showInParty = true,
-        showInRaid = true,
-        showInDungeon = true,
-        showInDelve = true,
-        showInArena = true,
-        showInBattleground = true,
-        showHasTarget = true,
-        showNoTarget = true,
-        showMounted = true,
-        showNotMounted = true,
-        -- Override system: when enabled, dock settings override individual bar settings
-        overrideBarSettings = false,
-        barOverrides = {
-            -- Bar dimensions
-            width = 200,
-            height = 20,
-            -- Appearance
-            barTexture = "Blizzard",
-            barColor = { r = 0.2, g = 0.8, b = 0.2, a = 1.0 },
-            backgroundColor = { r = 0.1, g = 0.1, b = 0.1, a = 0.8 },
-            borderColor = { r = 0.0, g = 0.0, b = 0.0, a = 1.0 },
-            showBorder = true,
-            -- Icon
-            showIcon = true,
-            iconPosition = "LEFT",
-            iconSizeMode = "auto",
-            iconSize = 20,
-            iconAspect = "1:1",
-            -- Text
-            showName = true,
-            showTime = true,
-            font = nil,
-            nameFontSize = 11,
-            timeFontSize = 11,
-            nameOffsetX = 0,
-            nameOffsetY = 0,
-            timeOffsetX = 0,
-            timeOffsetY = 0,
-            -- Behavior
-            showWhenReady = false,
-            showWhenInactive = false,
-            fillMode = "drain",
-            barDirection = "RIGHT",
-        },
+        barWidth = 200,
+        barHeight = 20,
+        barTexture = nil,
+        barColor = { r = 0.2, g = 0.8, b = 0.2, a = 1.0 },
+        backgroundColor = { r = 0.1, g = 0.1, b = 0.1, a = 0.8 },
+        borderColor = { r = 0, g = 0, b = 0, a = 1 },
+        showBorder = true,
+        showIcon = true,
+        iconPosition = "LEFT",
+        iconAspect = "1:1",
+        iconSizeMode = "auto",
+        iconSize = 20,
+        showName = true,
+        showTime = true,
+        nameFontSize = 11,
+        timeFontSize = 11,
+        font = nil,
+        barDirection = "RIGHT",
+        fillMode = "drain",
+        showWhenReady = false,
+        showWhenInactive = false,
+        colorByTime = false,
+        colorHighSeconds = 10,
+        colorMedSeconds = 5,
+        colorHigh = { r = 0.2, g = 0.8, b = 0.2 },
+        colorMed = { r = 1.0, g = 0.8, b = 0.0 },
+        colorLow = { r = 1.0, g = 0.2, b = 0.2 },
+        nameOffsetX = 0,
+        nameOffsetY = 0,
+        timeOffsetX = 0,
+        timeOffsetY = 0,
     },
     containerPosition = nil,  -- dock frame position
     positions = {},           -- [barKey] = { point, x, y } for standalone mode
@@ -467,57 +416,6 @@ function BuffBarsData:GetDB()
 
     local db = TweaksUI_Cooldowns_CharDB.buffBars
     MergeDefaults(db, DB_DEFAULTS)
-    
-    -- =========================================================================
-    -- v3.2.0 MIGRATION: slotIndex barKeys → spellID barKeys
-    -- "buff:1" → "buff:203819" using cachedSpellID from saved configs
-    -- Run once per character, lazy migration handles anything missed
-    -- =========================================================================
-    if db.spells and not db._migratedToSpellID then
-        local migrated = {}
-        local anyMigrated = false
-        for barKey, config in pairs(db.spells) do
-            if not BuffBarsData.IsSpellIDBarKey(barKey) and config.cachedSpellID then
-                local newKey = BuffBarsData.MakeBarKey(config.cachedSpellID)
-                if not db.spells[newKey] then
-                    migrated[barKey] = newKey
-                    anyMigrated = true
-                end
-            end
-        end
-        for oldKey, newKey in pairs(migrated) do
-            db.spells[newKey] = db.spells[oldKey]
-            db.spells[oldKey] = nil
-        end
-        -- Also migrate spell positions
-        if db.spellPositions then
-            local posMigrated = {}
-            for barKey, pos in pairs(db.spellPositions) do
-                if not BuffBarsData.IsSpellIDBarKey(barKey) then
-                    local slotIdx = BuffBarsData.ParseBarKey(barKey)
-                    local config = slotIdx and db.spells["buff:" .. slotIdx]
-                    -- Check if the old key still exists (wasn't migrated) and has a cachedSpellID
-                    if not config then
-                        -- Key was migrated, find by cachedSpellID
-                        for newKey, cfg in pairs(db.spells) do
-                            if cfg.slotIndex == slotIdx and cfg.cachedSpellID then
-                                posMigrated[barKey] = BuffBarsData.MakeBarKey(cfg.cachedSpellID)
-                                break
-                            end
-                        end
-                    end
-                end
-            end
-            for oldKey, newKey in pairs(posMigrated) do
-                if not db.spellPositions[newKey] then
-                    db.spellPositions[newKey] = db.spellPositions[oldKey]
-                end
-                db.spellPositions[oldKey] = nil
-            end
-        end
-        db._migratedToSpellID = true
-    end
-    
     return db
 end
 
@@ -536,117 +434,60 @@ function BuffBarsData:GetSpellConfig(barKey)
     if saved then return saved end
 
     -- Fallback: return discovered slot info (not yet saved)
-    local id = BuffBarsData.ParseBarKey(barKey)
-    if id then
-        local slot
-        if BuffBarsData.IsSpellIDBarKey(barKey) then
-            -- SpellID key: find discovered slot by spellID match
-            for _, info in pairs(discoveredSlots) do
-                if info.spellID == id then slot = info; break end
-            end
-        else
-            -- Legacy slotIndex key: direct lookup
-            slot = discoveredSlots[id]
-        end
-        if slot then
-            return {
-                enabled = false,
-                name = slot.name,
-                texture = slot.texture,
-                iconID = slot.texture,
-                type = BuffBarsData.TYPE_BUFF,
-                slotIndex = slot.slotIndex,
-                cachedSpellID = slot.spellID,
-            }
-        end
+    local slotIndex = BuffBarsData.ParseBarKey(barKey)
+    if slotIndex and discoveredSlots[slotIndex] then
+        local slot = discoveredSlots[slotIndex]
+        return {
+            enabled = false,
+            name = slot.name,
+            texture = slot.texture,
+            iconID = slot.texture,
+            type = BuffBarsData.TYPE_BUFF,
+            slotIndex = slotIndex,
+            cachedSpellID = slot.spellID,
+        }
     end
     return nil
 end
 
--- Get effective config: handles both normal mode and override mode
--- Normal mode: dock settings are base, per-spell values override
--- Override mode: dock barOverrides replace per-spell visual settings
+-- Get effective config: per-spell overrides merged over dock defaults
+-- Dock settings are the base, per-spell values override where set
 function BuffBarsData:GetEffectiveConfig(barKey)
     local config = self:GetSpellConfig(barKey)
     if not config then return nil end
 
     local db = self:GetDB()
-    local dockSettings = db.dockSettings or {}
-    
-    -- Check if override mode is enabled
-    if dockSettings.overrideBarSettings and dockSettings.barOverrides then
-        -- OVERRIDE MODE: Start with spell config, apply dock barOverrides on top
-        local effective = {}
-        for k, v in pairs(config) do 
-            if type(v) == "table" then
-                effective[k] = {}
-                for k2, v2 in pairs(v) do effective[k][k2] = v2 end
-            else
-                effective[k] = v
-            end
-        end
-        
-        -- Apply visual overrides from dock
-        local overrides = dockSettings.barOverrides
-        local VISUAL_KEYS = {
-            "width", "height", "barTexture", "barColor", "backgroundColor", "borderColor",
-            "showBorder", "showIcon", "iconPosition", "iconSizeMode", "iconSize", "iconAspect",
-            "showName", "showTime", "font", "nameFontSize", "timeFontSize",
-            "nameOffsetX", "nameOffsetY", "timeOffsetX", "timeOffsetY",
-            "showWhenReady", "showWhenInactive", "fillMode", "barDirection",
-            "colorByTime", "colorHigh", "colorMed", "colorLow",
-        }
-        for _, k in ipairs(VISUAL_KEYS) do
-            if overrides[k] ~= nil then
-                if type(overrides[k]) == "table" then
-                    effective[k] = {}
-                    for k2, v2 in pairs(overrides[k]) do effective[k][k2] = v2 end
-                else
-                    effective[k] = overrides[k]
-                end
-            end
-        end
-        return effective
-    else
-        -- NORMAL MODE: Start with dock defaults, overlay per-spell config
-        local merged = {}
-        
-        -- Start with dock defaults (deep copy tables)
-        for k, v in pairs(dockSettings) do
-            if k ~= "barOverrides" and k ~= "overrideBarSettings" then
-                if type(v) == "table" then
-                    merged[k] = {}
-                    for k2, v2 in pairs(v) do merged[k][k2] = v2 end
-                else
-                    merged[k] = v
-                end
-            end
-        end
+    local dock = db.dockSettings or {}
+    local merged = {}
 
-        -- Overlay per-spell overrides
-        for k, v in pairs(config) do
-            if v ~= nil then
-                if type(v) == "table" then
-                    merged[k] = {}
-                    for k2, v2 in pairs(v) do merged[k][k2] = v2 end
-                else
-                    merged[k] = v
-                end
-            end
+    -- Start with dock defaults (deep copy tables)
+    for k, v in pairs(dock) do
+        if type(v) == "table" then
+            merged[k] = {}
+            for k2, v2 in pairs(v) do merged[k][k2] = v2 end
+        else
+            merged[k] = v
         end
-
-        return merged
     end
+
+    -- Overlay per-spell overrides (only keys that exist in config)
+    for k, v in pairs(config) do
+        if v ~= nil then
+            if type(v) == "table" then
+                merged[k] = {}
+                for k2, v2 in pairs(v) do merged[k][k2] = v2 end
+            else
+                merged[k] = v
+            end
+        end
+    end
+
+    return merged
 end
 
--- Enable a discovered slot for bar display (accepts slotIndex)
+-- Enable a discovered slot for bar display
 function BuffBarsData:EnableSlot(slotIndex, enabled)
-    local barKey = BuffBarsData.MakeBarKeyFromSlot(slotIndex)
-    return self:EnableByBarKey(barKey, slotIndex, enabled)
-end
-
--- Enable/disable a bar by its barKey directly (used by UI when barKey is already known)
-function BuffBarsData:EnableByBarKey(barKey, slotIndex, enabled)
+    local barKey = BuffBarsData.MakeBarKey(slotIndex)
     local db = self:GetDB()
     db.spells = db.spells or {}
 
@@ -656,16 +497,7 @@ function BuffBarsData:EnableByBarKey(barKey, slotIndex, enabled)
             db.spells[barKey].enabled = true
         else
             -- Need discovery info to create new entry
-            local slotInfo = slotIndex and discoveredSlots[slotIndex]
-            if not slotInfo then
-                -- Try to find by spellID
-                local id = BuffBarsData.ParseBarKey(barKey)
-                if id and BuffBarsData.IsSpellIDBarKey(barKey) then
-                    for _, info in pairs(discoveredSlots) do
-                        if info.spellID == id then slotInfo = info; break end
-                    end
-                end
-            end
+            local slotInfo = discoveredSlots[slotIndex]
             if not slotInfo then return nil end
             db.spells[barKey] = {
                 enabled = true,
@@ -673,7 +505,7 @@ function BuffBarsData:EnableByBarKey(barKey, slotIndex, enabled)
                 texture = slotInfo.texture,
                 iconID = slotInfo.texture,
                 type = BuffBarsData.TYPE_BUFF,
-                slotIndex = slotInfo.slotIndex,
+                slotIndex = slotIndex,
                 cachedSpellID = slotInfo.spellID,
             }
         end
@@ -703,24 +535,6 @@ function BuffBarsData:RemoveSlot(barKey)
     end
     spellStates[barKey] = nil
     self:FireUpdate(barKey)
-end
-
-function BuffBarsData:RemoveAllSlots()
-    local db = self:GetDB()
-    local count = 0
-    if db.spells then
-        for k in pairs(db.spells) do
-            count = count + 1
-        end
-        wipe(db.spells)
-    end
-    if db.positions then
-        wipe(db.positions)
-    end
-    if spellStates then
-        wipe(spellStates)
-    end
-    return count
 end
 
 -- Set per-spell setting override
@@ -787,41 +601,6 @@ function BuffBarsData:SetDockSetting(key, value)
 end
 
 -- ============================================================================
--- DOCK BAR OVERRIDES
--- ============================================================================
-
--- Dock bar override accessors
-function BuffBarsData:GetDockOverrides()
-    local dockSettings = self:GetDockSettings()
-    return dockSettings.barOverrides or {}
-end
-
-function BuffBarsData:SetDockOverride(key, value)
-    local db = self:GetDB()
-    db.dockSettings = db.dockSettings or {}
-    db.dockSettings.barOverrides = db.dockSettings.barOverrides or {}
-    db.dockSettings.barOverrides[key] = value
-    
-    -- Fire event to refresh all bars when a dock override changes
-    if TUICD.Events and TUICD.EVENTS and TUICD.EVENTS.BUFFBARS_DATA_UPDATED then
-        TUICD.Events:Fire(TUICD.EVENTS.BUFFBARS_DATA_UPDATED, nil, "dock_override")
-    end
-end
-
-function BuffBarsData:IsOverrideEnabled()
-    local dockSettings = self:GetDockSettings()
-    return dockSettings.overrideBarSettings == true
-end
-
-function BuffBarsData:SetOverrideEnabled(enabled)
-    self:SetDockSetting("overrideBarSettings", enabled)
-    -- Fire event to refresh all bars
-    if TUICD.Events and TUICD.EVENTS and TUICD.EVENTS.BUFFBARS_DATA_UPDATED then
-        TUICD.Events:Fire(TUICD.EVENTS.BUFFBARS_DATA_UPDATED, nil, "dock_override")
-    end
-end
-
--- ============================================================================
 -- POSITION PERSISTENCE
 -- ============================================================================
 
@@ -843,51 +622,29 @@ end
 function BuffBarsData:GetSpellList()
     local list = {}
     local db = self:GetDB()
-    local seenSlots = {}   -- [slotIndex] = true
-    local seenSpells = {}  -- [spellID] = true
+    local seen = {}
 
     -- First: entries already in saved config
     for barKey, config in pairs(db.spells or {}) do
-        local id = BuffBarsData.ParseBarKey(barKey)
-        local slotIndex, spellID
-        if BuffBarsData.IsSpellIDBarKey(barKey) then
-            spellID = id
-            slotIndex = BuffBarsData.GetSlotIndexForBarKey(barKey) or config.slotIndex
-        else
-            slotIndex = id
-            spellID = config.cachedSpellID
-        end
-        if slotIndex then seenSlots[slotIndex] = true end
-        if spellID then seenSpells[spellID] = true end
-        
-        -- Use discovery name if available (more current than saved name)
-        local discoveryInfo = slotIndex and discoveredSlots[slotIndex]
-        local currentName = discoveryInfo and discoveryInfo.name or config.name or ("Buff Slot " .. (slotIndex or "?"))
-        local currentTexture = discoveryInfo and discoveryInfo.texture or config.texture or config.iconID
-        
+        local slotIndex = BuffBarsData.ParseBarKey(barKey)
+        seen[slotIndex] = true
         list[#list + 1] = {
             barKey = barKey,
-            slotIndex = slotIndex or 999,  -- Sort unknown slots to end
-            name = currentName,
-            displayName = currentName .. " " .. BuffBarsData.TypeLabel(),
+            slotIndex = slotIndex,
+            name = config.name or ("Buff Slot " .. (slotIndex or "?")),
+            displayName = (config.name or ("Buff Slot " .. (slotIndex or "?")))
+                          .. " " .. BuffBarsData.TypeLabel(),
             enabled = config.enabled,
-            texture = currentTexture,
-            cachedSpellID = spellID or (discoveryInfo and discoveryInfo.spellID) or config.cachedSpellID,
+            texture = config.texture or config.iconID,
+            cachedSpellID = config.cachedSpellID,
         }
     end
 
     -- Second: discovered slots not yet saved (show as disabled)
     for slotIndex, slotInfo in pairs(discoveredSlots) do
-        local alreadySeen = seenSlots[slotIndex] or (slotInfo.spellID and seenSpells[slotInfo.spellID])
-        if not alreadySeen then
-            local barKey
-            if slotInfo.spellID then
-                barKey = BuffBarsData.MakeBarKey(slotInfo.spellID)
-            else
-                barKey = BuffBarsData.MakeBarKey(slotIndex)
-            end
+        if not seen[slotIndex] then
             list[#list + 1] = {
-                barKey = barKey,
+                barKey = BuffBarsData.MakeBarKey(slotIndex),
                 slotIndex = slotIndex,
                 name = slotInfo.name or ("Buff Slot " .. slotIndex),
                 displayName = (slotInfo.name or ("Buff Slot " .. slotIndex))
@@ -935,21 +692,17 @@ function BuffBarsData:UpdateSlotState(barKey)
     local config = self:GetSpellConfig(barKey)
     if not config or not config.enabled then return false end
 
-    local id = BuffBarsData.ParseBarKey(barKey)
-    if not id then return false end
+    local slotIndex = BuffBarsData.ParseBarKey(barKey)
+    if not slotIndex then return false end
 
-    -- Resolve slotIndex (for CDM icon access) and spellID (for state queries)
-    local slotIndex, spellID
-    if BuffBarsData.IsSpellIDBarKey(barKey) then
-        spellID = id
-        slotIndex = BuffBarsData.GetSlotIndexForBarKey(barKey)
-    else
-        slotIndex = id
-        spellID = config.cachedSpellID
+    local sourceIcon = cdmIcons[slotIndex]
+    
+    -- Debug output when debugMode is on
+    local debug = TUICD.debugMode
+    if debug then
+        print(string.format("[BuffBar] UpdateSlotState %s: slotIndex=%d, sourceIcon=%s, cachedSpellID=%s",
+            barKey, slotIndex, tostring(sourceIcon ~= nil), tostring(config.cachedSpellID)))
     end
-
-    local sourceIcon = slotIndex and cdmIcons[slotIndex]
-    local Bridge = TUICD.BuffIdentityBridge
 
     local state = spellStates[barKey]
     if not state then
@@ -961,78 +714,112 @@ function BuffBarsData:UpdateSlotState(barKey)
     local prevAuraID = state.auraInstanceID
     local isActive = false
     local auraInstanceID = nil
+    local durationObj = nil
 
-    -- Priority 1: BuffIdentityBridge (combat-safe, never secret)
-    if spellID and Bridge then
-        isActive = Bridge:IsBuffActive(spellID) or false
-        auraInstanceID = Bridge:GetAuraIDForSpellID(spellID)
-    end
-
-    -- Priority 2: Direct aura API (works outside combat, blocked when secret)
-    if not isActive and spellID and C_UnitAuras and C_UnitAuras.GetPlayerAuraBySpellID then
+    -- Priority 1: Query aura API directly by spellID (bypasses frame lag)
+    local spellID = config.cachedSpellID
+    if spellID and C_UnitAuras and C_UnitAuras.GetPlayerAuraBySpellID then
         pcall(function()
             local auraData = C_UnitAuras.GetPlayerAuraBySpellID(spellID)
             if auraData then
                 isActive = true
                 auraInstanceID = auraData.auraInstanceID
+                if debug then
+                    print(string.format("[BuffBar]   Priority1 HIT: spellID=%d, auraInstanceID=%s", spellID, tostring(auraInstanceID)))
+                end
+            elseif debug then
+                print(string.format("[BuffBar]   Priority1 MISS: spellID=%d not active", spellID))
             end
         end)
+    elseif debug then
+        print("[BuffBar]   Priority1 SKIP: no cachedSpellID or API missing")
     end
 
-    -- Priority 3: Fallback to CDM icon auraInstanceID
+    -- Priority 2: Fallback to CDM icon auraInstanceID
     if not isActive and sourceIcon then
         pcall(function()
             auraInstanceID = sourceIcon.auraInstanceID
             isActive = (auraInstanceID ~= nil)
+            if debug then
+                print(string.format("[BuffBar]   Priority2: sourceIcon.auraInstanceID=%s, isActive=%s",
+                    tostring(auraInstanceID), tostring(isActive)))
+            end
         end)
+    elseif not isActive and debug then
+        print("[BuffBar]   Priority2 SKIP: no sourceIcon")
     end
 
-    -- Get timing data for bar rendering (duration in seconds, expirationTime in GetTime format)
-    local duration, expirationTime
-    if isActive and auraInstanceID then
-        -- Method 1: Aura API (most reliable - returns seconds directly)
+    -- If active with auraInstanceID but no cached spellID, resolve it now
+    -- CDM buff icons don't store .spellID, so we resolve lazily from aura data
+    if isActive and auraInstanceID and not spellID then
         if C_UnitAuras and C_UnitAuras.GetAuraDataByAuraInstanceID then
             pcall(function()
                 local auraData = C_UnitAuras.GetAuraDataByAuraInstanceID("player", auraInstanceID)
                 if auraData then
-                    if auraData.duration and auraData.duration > 0 then
-                        duration = auraData.duration
+                    if auraData.spellId then
+                        config.cachedSpellID = auraData.spellId
+                        -- Also update display name if we only had "Buff Slot N"
+                        if auraData.name and config.name and config.name:match("^Buff Slot %d+$") then
+                            config.name = auraData.name
+                            -- Update discovered slot info too
+                            local slotInfo = discoveredSlots[slotIndex]
+                            if slotInfo then
+                                slotInfo.spellID = auraData.spellId
+                                slotInfo.name = auraData.name
+                            end
+                        end
                     end
-                    if auraData.expirationTime and auraData.expirationTime > 0 then
-                        expirationTime = auraData.expirationTime
+                    if auraData.icon and (not config.texture or config.texture == nil) then
+                        config.texture = auraData.icon
+                        config.iconID = auraData.icon
                     end
                 end
             end)
         end
+    end
 
-        -- Method 2: CDM cooldown frame (fallback - returns milliseconds)
-        if not duration and sourceIcon then
+    -- Get timing data for bar rendering
+    -- PRIORITY: GetCooldownTimes() first (returns non-secret milliseconds usable in combat)
+    -- FALLBACK: Aura API (may return secrets in combat)
+    local duration, expirationTime
+    local durationMs, startMs  -- non-secret milliseconds for color-by-time
+    
+    if isActive then
+        -- Method 1: CDM cooldown frame GetCooldownTimes() - returns non-secret milliseconds
+        -- This is the ONLY reliable source for color-by-time in combat
+        if sourceIcon then
             local sourceCooldown = sourceIcon.Cooldown or sourceIcon.cooldown
             if sourceCooldown and sourceCooldown.GetCooldownTimes then
                 pcall(function()
-                    local startMs, durMs = sourceCooldown:GetCooldownTimes()
-                    if durMs and durMs > 0 then
-                        duration = durMs / 1000
-                        expirationTime = (startMs + durMs) / 1000
+                    local sMs, dMs = sourceCooldown:GetCooldownTimes()
+                    if dMs and type(dMs) == "number" and dMs > 0 then
+                        startMs = sMs
+                        durationMs = dMs
+                        duration = dMs / 1000
+                        expirationTime = (sMs + dMs) / 1000
                     end
                 end)
             end
         end
-    end
-    
-    -- COLOR-BY-TIME: Capture non-secret milliseconds from CDM cooldown frame
-    -- This is the primary source for color-by-time since Duration Objects are secret
-    local cdStartMs, cdDurationMs
-    if isActive and sourceIcon then
-        local sourceCooldown = sourceIcon.Cooldown or sourceIcon.cooldown
-        if sourceCooldown and sourceCooldown.GetCooldownTimes then
-            pcall(function()
-                local startMs, durMs = sourceCooldown:GetCooldownTimes()
-                if startMs and durMs and durMs > 0 then
-                    cdStartMs = startMs
-                    cdDurationMs = durMs
-                end
-            end)
+        
+        -- Method 2: Aura API fallback (for buffs without CDM icons, or if Method 1 failed)
+        if not duration and auraInstanceID then
+            if C_UnitAuras and C_UnitAuras.GetAuraDataByAuraInstanceID then
+                pcall(function()
+                    local auraData = C_UnitAuras.GetAuraDataByAuraInstanceID("player", auraInstanceID)
+                    if auraData then
+                        -- Only use if we get actual numbers (not secrets)
+                        if auraData.duration and type(auraData.duration) == "number" and auraData.duration > 0 then
+                            duration = auraData.duration
+                            durationMs = auraData.duration * 1000
+                        end
+                        if auraData.expirationTime and type(auraData.expirationTime) == "number" and auraData.expirationTime > 0 then
+                            expirationTime = auraData.expirationTime
+                            startMs = (auraData.expirationTime - auraData.duration) * 1000
+                        end
+                    end
+                end)
+            end
         end
     end
 
@@ -1056,9 +843,11 @@ function BuffBarsData:UpdateSlotState(barKey)
     
     -- Detect expirationTime change (buff refresh) - only if both values are numbers
     if isActive and expirationTime and prevExpiration then
+        -- If expiration jumped forward by more than 0.5s, it's a refresh
         if type(expirationTime) == "number" and type(prevExpiration) == "number" then
             if expirationTime > prevExpiration + 0.5 then
                 expirationChanged = true
+                print("[BuffBar] Buff refresh detected: " .. tostring(barKey) .. " expiration " .. tostring(prevExpiration) .. " -> " .. tostring(expirationTime))
             end
         end
     end
@@ -1069,8 +858,9 @@ function BuffBarsData:UpdateSlotState(barKey)
     state.duration = duration
     state.expirationTime = expirationTime
     state.auraInstanceID = auraInstanceID
-    state.cdStartMs = isActive and cdStartMs or nil
-    state.cdDurationMs = isActive and cdDurationMs or nil
+    -- Store non-secret milliseconds for color-by-time (like Bars module does)
+    state.startMs = isActive and startMs or nil
+    state.durationMs = isActive and durationMs or nil
 
     return stateChanged
 end
@@ -1136,7 +926,7 @@ HookCDMBuffCooldowns = function()
                 hooksecurefunc(sourceCooldown, "SetCooldownFromDurationObject", function(self)
                     local slot = self._TUICD_BuffBar_SlotIndex
                     if slot then
-                        BuffBarsData:UpdateAndFire(BuffBarsData.MakeBarKeyFromSlot(slot))
+                        BuffBarsData:UpdateAndFire(BuffBarsData.MakeBarKey(slot))
                     end
                 end)
             end
@@ -1145,7 +935,7 @@ HookCDMBuffCooldowns = function()
             hooksecurefunc(sourceCooldown, "SetCooldown", function(self)
                 local slot = self._TUICD_BuffBar_SlotIndex
                 if slot then
-                    BuffBarsData:UpdateAndFire(BuffBarsData.MakeBarKeyFromSlot(slot))
+                    BuffBarsData:UpdateAndFire(BuffBarsData.MakeBarKey(slot))
                 end
             end)
 
@@ -1153,7 +943,7 @@ HookCDMBuffCooldowns = function()
             hooksecurefunc(sourceCooldown, "Clear", function(self)
                 local slot = self._TUICD_BuffBar_SlotIndex
                 if slot then
-                    BuffBarsData:UpdateAndFire(BuffBarsData.MakeBarKeyFromSlot(slot))
+                    BuffBarsData:UpdateAndFire(BuffBarsData.MakeBarKey(slot))
                 end
             end)
         else
@@ -1271,6 +1061,85 @@ function BuffBarsData:UnregisterEvents()
     self:StopPoll()
 end
 
+-- Initialize the data layer (called from BuffBars:OnInitialize)
+function BuffBarsData:Initialize()
+    -- Nothing critical here - discovery happens via PLAYER_ENTERING_WORLD
+    -- But we can do early setup
+    TUICD:PrintDebug("BuffBarsData:Initialize() called")
+end
+
+-- Immediate startup when module is enabled after player is already logged in
+-- This bypasses waiting for PLAYER_ENTERING_WORLD which has already fired
+function BuffBarsData:ImmediateStartup()
+    TUICD:PrintDebug("BuffBarsData:ImmediateStartup() - player already in world")
+    
+    -- Discovery: find CDM buff icons
+    self:DiscoverSlots()
+    
+    -- Setup hooks for instant updates
+    SetupViewerHook()
+    HookCDMBuffCooldowns()
+    
+    -- Initial state update
+    self:UpdateAll()
+    
+    -- Fire updates for all enabled bars
+    for barKey, config in pairs(self:GetTrackedSpells()) do
+        if config.enabled then
+            self:FireUpdate(barKey)
+        end
+    end
+    
+    -- Start poll if we have enabled bars
+    if self:GetSpellCount() > 0 then
+        self:StartPoll()
+    end
+end
+
+-- Debug: Force a full refresh (useful for testing)
+function BuffBarsData:ForceRefresh()
+    TUICD:Print("[BuffBarsData] Force refresh:")
+    TUICD:Print("  cdmIcons count: " .. tostring(#cdmIcons > 0 and #cdmIcons or "0 (using pairs)"))
+    local iconCount = 0
+    for _ in pairs(cdmIcons) do iconCount = iconCount + 1 end
+    TUICD:Print("  cdmIcons actual: " .. iconCount)
+    
+    -- Do discovery
+    local discovered = self:DiscoverSlots()
+    TUICD:Print("  Discovered slots: " .. discovered)
+    
+    -- Setup hooks
+    SetupViewerHook()
+    HookCDMBuffCooldowns()
+    
+    -- Update all
+    for barKey, config in pairs(self:GetTrackedSpells()) do
+        if config.enabled then
+            TUICD:Print("  Updating bar: " .. barKey)
+            self:UpdateSlotState(barKey)
+            self:FireUpdate(barKey)
+        end
+    end
+    
+    -- Report state
+    for barKey, config in pairs(self:GetTrackedSpells()) do
+        if config.enabled then
+            local state = self:GetSpellState(barKey)
+            local status = state and state.isActive and "|cff00ff00ACTIVE|r" or "|cffff0000inactive|r"
+            local auraID = state and state.auraInstanceID or "nil"
+            TUICD:Print(string.format("  %s: %s (auraID=%s)", barKey, status, tostring(auraID)))
+        end
+    end
+    
+    -- Start poll if needed
+    if not self:IsPollRunning() then
+        self:StartPoll()
+        TUICD:Print("  Started poll")
+    else
+        TUICD:Print("  Poll already running")
+    end
+end
+
 -- ============================================================================
 -- SLASH COMMAND HELPERS (for testing/debugging)
 -- ============================================================================
@@ -1309,32 +1178,10 @@ function BuffBarsData:HandleSlashCommand(args)
                     and "|cff00ff00ACTIVE|r" or "|cff888888inactive|r"
                 local enabled = entry.enabled
                     and "|cff00ff00ON|r" or "|cffff0000OFF|r"
-                print(string.format("  %s [%s] slot=%d name='%s' tex=%s - %s",
-                    enabled, entry.barKey, entry.slotIndex or -1, entry.name or "?", 
-                    tostring(entry.texture), status
+                print(string.format("  %s [%s] %s - %s",
+                    enabled, entry.barKey, entry.name, status
                 ))
             end
-        end
-        
-    elseif cmd == "debug" then
-        -- Debug: show saved config vs discovery
-        local db = self:GetDB()
-        TUICD:Print("=== DEBUG: Saved Config ===")
-        for barKey, config in pairs(db.spells or {}) do
-            local slotIdx = BuffBarsData.ParseBarKey(barKey)
-            print(string.format("  %s (slot %d): saved_name='%s' saved_tex=%s spell=%s",
-                barKey, slotIdx or -1, config.name or "?", tostring(config.texture), tostring(config.cachedSpellID)))
-        end
-        TUICD:Print("=== DEBUG: Discovered Slots ===")
-        for idx, info in pairs(discoveredSlots) do
-            print(string.format("  slot %d: disc_name='%s' disc_tex=%s spell=%s",
-                idx, info.name or "?", tostring(info.texture), tostring(info.spellID)))
-        end
-        TUICD:Print("=== DEBUG: GetSpellList() output ===")
-        local list = self:GetSpellList()
-        for i, entry in ipairs(list) do
-            print(string.format("  row %d: barKey=%s slot=%d name='%s' tex=%s",
-                i, entry.barKey, entry.slotIndex or -1, entry.name or "?", tostring(entry.texture)))
         end
 
     elseif cmd == "enable" then
@@ -1475,25 +1322,23 @@ function BuffBarsData:HandleSlashCommand(args)
             TUICD:Print("Poll: |cff888888STOPPED|r")
         end
 
-    elseif cmd == "reset" then
-        -- Clear all saved buff bar data and rediscover
+    elseif cmd == "colortime" or cmd == "colorbytime" then
+        -- Toggle colorByTime setting
         local db = self:GetDB()
-        if db then
-            -- Clear saved spells (keeps dock settings)
-            db.spells = {}
-            wipe(discoveredSlots)
-            wipe(spellStates)
-            wipe(cdmIcons)
-            discoveryDone = false
-            
-            -- Rediscover
-            C_Timer.After(0.5, function()
-                local count = self:DiscoverSlots()
-                TUICD:Print("Reset complete. Rediscovered " .. count .. " buff slot(s).")
-                TUICD:Print("Use '/tuicd buffbars list' to see slots, then '/tuicd buffbars enable N' to enable.")
-            end)
+        local settings = db.dockSettings
+        settings.colorByTime = not settings.colorByTime
+        TUICD:Print("Color by time: " .. (settings.colorByTime and "|cff00ff00ON|r" or "|cffff0000OFF|r"))
+        TUICD:Print("  High: " .. (settings.colorHighSeconds or 10) .. "s (green)")
+        TUICD:Print("  Med:  " .. (settings.colorMedSeconds or 5) .. "s (yellow)")
+        TUICD:Print("  Below med = red")
+        -- Clear curve cache so new colors take effect
+        if TUICD.BuffBarsFrames and TUICD.BuffBarsFrames.ClearColorCurveCache then
+            TUICD.BuffBarsFrames.ClearColorCurveCache()
         end
-        TUICD:Print("Clearing saved buff bar data...")
+        -- Force refresh all bars
+        for barKey in pairs(spellStates) do
+            self:FireUpdate(barKey)
+        end
 
     elseif cmd == "layout" or cmd == "show" or cmd == "hide" then
         -- Forward to BuffBarsFrames
@@ -1513,7 +1358,6 @@ function BuffBarsData:HandleSlashCommand(args)
         print("  state     - Show current bar states")
         print("  probe N   - Deep diagnostic for slot N")
         print("  poll      - Show poll status")
-        print("  reset     - Clear saved data and rediscover")
         print("  colortime - Toggle color-by-time (green->yellow->red)")
         print("  layout    - Toggle layout/drag mode")
         print("  show      - Force show all bars (debug)")

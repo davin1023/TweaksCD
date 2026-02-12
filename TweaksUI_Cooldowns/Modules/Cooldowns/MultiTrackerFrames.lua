@@ -1147,6 +1147,16 @@ local function OnCooldownStarted(iconFrame, remaining)
             SchedulePulseEffect(iconFrame, timing, remaining)
         end
     end
+    if MultiTracker:GetSetting(trackerKey, "onReadySoundEnabled") then
+        local soundName = MultiTracker:GetSetting(trackerKey, "onReadySoundName")
+        local timing = MultiTracker:GetSetting(trackerKey, "onReadyGlowTiming") or 0
+        if timing < 0 and soundName and soundName ~= "None" and TUICD.Media then
+            local delay = remaining + timing
+            if delay > 0 then
+                C_Timer.After(delay, function() TUICD.Media:PlayAlertSound(soundName) end)
+            end
+        end
+    end
 end
 
 -- Called when a real cooldown ends on an icon (transition: on CD → off CD)
@@ -1167,48 +1177,79 @@ local function OnCooldownEnded(iconFrame)
             SchedulePulseEffect(iconFrame, timing, nil)
         end
     end
-end
-
--- GCD threshold for on-ready detection (milliseconds, matching dock system)
-local OR_GCD_THRESHOLD = 3000
-
--- Check if icon is on a real cooldown (not GCD) using GetCooldownTimes
--- Same approach as dock reappearance system
-local function IsOnRealCooldown(iconFrame)
-    local isOnCD = false
-    pcall(function()
-        local cd = iconFrame.cooldown or iconFrame.Cooldown
-        if cd and cd.GetCooldownTimes then
-            local start, duration = cd:GetCooldownTimes()
-            if start and duration and type(duration) == "number" and duration > OR_GCD_THRESHOLD then
-                local startSec = start / 1000
-                local durationSec = duration / 1000
-                local remaining = (startSec + durationSec) - GetTime()
-                if remaining > 0.1 then
-                    isOnCD = true
-                end
+    if MultiTracker:GetSetting(trackerKey, "onReadySoundEnabled") then
+        local soundName = MultiTracker:GetSetting(trackerKey, "onReadySoundName")
+        local timing = MultiTracker:GetSetting(trackerKey, "onReadyGlowTiming") or 0
+        if timing >= 0 and soundName and soundName ~= "None" and TUICD.Media then
+            if timing <= 0 then
+                TUICD.Media:PlayAlertSound(soundName)
+            else
+                C_Timer.After(timing, function() TUICD.Media:PlayAlertSound(soundName) end)
             end
         end
-    end)
-    return isOnCD
+    end
+end
+
+-- Extract spellID from icon frame (multiple possible locations)
+local function ExtractSpellID(iconFrame)
+    local spellID = iconFrame._spellID
+    if not spellID then
+        spellID = iconFrame.spellID or iconFrame.SpellID or iconFrame.spellId
+    end
+    if not spellID and iconFrame.trackType == "spell" then
+        spellID = iconFrame.trackID
+    end
+    if not spellID and iconFrame.GetSpellID then
+        pcall(function() spellID = iconFrame:GetSpellID() end)
+    end
+    if spellID and issecretvalue and issecretvalue(spellID) then
+        return nil
+    end
+    return spellID
+end
+
+-- Check if icon is on a real cooldown (not GCD), handling secret values.
+-- Uses C_Spell.GetSpellCooldown().isOnGCD (non-secret boolean) for GCD filter.
+local function IsOnRealCooldown(iconFrame)
+    local spellID = ExtractSpellID(iconFrame)
+    if not spellID then return false end
+
+    local DurationAPI = TUICD.DurationAPI
+    if DurationAPI and DurationAPI.IsRealCooldownActive then
+        local onCD = DurationAPI:IsRealCooldownActive(spellID)
+        return onCD
+    end
+
+    return false
 end
 
 -- Get remaining cooldown time in seconds (for scheduling early triggers)
+-- Returns 0 when values are secret (no early/late timing in combat)
 local function GetRealCooldownRemaining(iconFrame)
-    local remaining = 0
-    pcall(function()
-        local cd = iconFrame.cooldown or iconFrame.Cooldown
-        if cd and cd.GetCooldownTimes then
-            local start, duration = cd:GetCooldownTimes()
-            if start and duration and type(duration) == "number" and duration > OR_GCD_THRESHOLD then
-                local startSec = start / 1000
-                local durationSec = duration / 1000
-                remaining = (startSec + durationSec) - GetTime()
+    local spellID = ExtractSpellID(iconFrame)
+    if not spellID or not C_Spell then return 0 end
+
+    -- Try Duration Object remaining (non-secret when out of combat)
+    if C_Spell.GetSpellCooldownDuration then
+        local ok, dObj = pcall(C_Spell.GetSpellCooldownDuration, spellID)
+        if ok and dObj then
+            local rok, remaining = pcall(function() return dObj:GetRemainingDuration() end)
+            if rok and remaining and type(remaining) == "number" then
+                if issecretvalue and issecretvalue(remaining) then
+                    return 0  -- Secret: can't calculate
+                end
+                return remaining
             end
         end
-    end)
-    return remaining
+    end
+
+    return 0
 end
+
+-- Minimum time a spell must be "on CD" before on-ready transition fires.
+-- Prevents GCD cycles (~1.5s) from triggering false on-ready alerts.
+-- Belt-and-suspenders with DurationAPI debounce.
+local MIN_CD_DURATION_FOR_READY = 2.0
 
 -- Detect on-ready transitions for an icon frame (called from UpdateIconCooldown)
 local function CheckOnReadyTransition(iconFrame)
@@ -1217,11 +1258,17 @@ local function CheckOnReadyTransition(iconFrame)
     
     if isOnCD and not wasOnCD then
         -- Transition: off CD → on CD (cooldown started)
+        iconFrame._cdDetectedAt = GetTime()
         local remaining = GetRealCooldownRemaining(iconFrame)
         OnCooldownStarted(iconFrame, remaining)
     elseif wasOnCD and not isOnCD then
         -- Transition: on CD → off CD (cooldown ended)
-        OnCooldownEnded(iconFrame)
+        -- Only fire on-ready if the CD lasted longer than GCD
+        local cdDuration = GetTime() - (iconFrame._cdDetectedAt or 0)
+        if cdDuration >= MIN_CD_DURATION_FOR_READY then
+            OnCooldownEnded(iconFrame)
+        end
+        iconFrame._cdDetectedAt = nil
     end
     
     iconFrame._orWasOnRealCD = isOnCD
@@ -1687,8 +1734,10 @@ local function UpdateIconCooldown(iconFrame)
     UpdateIconUsabilityState(iconFrame)
     UpdateIconRangeState(iconFrame)
     
-    -- Check for on-ready effect transitions (uses GetCooldownTimes like dock system)
-    CheckOnReadyTransition(iconFrame)
+    -- Tracker-level on-ready detection DISABLED: unreliable with secret values
+    -- (every GCD pulse makes Duration Objects briefly active, causing false transitions)
+    -- Per-icon alerts in CooldownHighlights handle on-ready correctly with min-duration guard.
+    -- CheckOnReadyTransition(iconFrame)
 end
 
 -- ============================================================================
@@ -2646,6 +2695,8 @@ function MultiTrackerFrames:OnSettingsChanged(trackerKey, setting, value)
         -- On-Ready pulse (reads fresh each trigger)
         onReadyPulseEnabled = true, onReadyPulseScale = true,
         onReadyPulseDuration = true, onReadyPulseCount = true, onReadyPulseTiming = true,
+        -- On-Ready sound (reads fresh each trigger)
+        onReadySoundEnabled = true, onReadySoundName = true,
         -- Position (handled by drag, not rebuild)
         point = true, x = true, y = true,
     }

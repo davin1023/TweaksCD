@@ -45,15 +45,6 @@ local cdTimingCache = {}
 -- { [spellID] = durationSeconds }
 local knownFullDurations = {}
 
--- Combat first-seen timestamps for GCD debounce filtering.
--- When a Duration Object becomes active in combat, we record GetTime().
--- Only after 2s (longer than any GCD) do we treat it as a real CD.
--- { [spellID] = GetTime() when first detected active }
-local combatFirstSeen = {}
-
--- How long to wait before confirming a combat CD is real (not GCD)
-local COMBAT_DEBOUNCE_SEC = 2.0
-
 -- Callbacks for state changes
 local stateCallbacks = {}
 
@@ -222,153 +213,97 @@ end
 -- ============================================================================
 
 function TimelineData:GetCooldownState(spellID)
-    local DurationAPI = TUICD.DurationAPI
-    local IsSecret = issecretvalue or function() return false end
+    if not C_Spell then
+        return self:ExtrapolateFromCache(spellID)
+    end
     
-    -- =====================================================================
-    -- OUT OF COMBAT: Full detection with real (non-secret) values.
-    -- Cache absolute timing + learn spell durations for combat use.
-    -- =====================================================================
-    if not InCombatLockdown() then
-        -- Clear combat debounce tracking
-        combatFirstSeen[spellID] = nil
-        
-        if not C_Spell then
-            return self:ExtrapolateFromCache(spellID)
-        end
-        
-        -- GCD filter (non-secret out of combat)
-        if C_Spell.GetSpellCooldown then
-            local ok, cdInfo = pcall(C_Spell.GetSpellCooldown, spellID)
-            if ok and cdInfo and cdInfo.isOnGCD then
-                return false, 0, 0
-            end
-        end
-        
-        -- Get Duration Object
-        local dObj
-        if C_Spell.GetSpellCooldownDuration then
-            local ok, d = pcall(C_Spell.GetSpellCooldownDuration, spellID)
-            if ok then dObj = d end
-        end
-        
-        if not dObj then
-            cdTimingCache[spellID] = nil
-            return false, 0, 0
-        end
-        
-        -- Read timing directly (non-secret out of combat)
-        local total, remaining
+    -- Step 1: Check isOnGCD (non-secret boolean) — replaces sensor threshold
+    local isOnGCD = false
+    if C_Spell.GetSpellCooldown then
         pcall(function()
-            total = dObj:GetTotalDuration()
-            remaining = dObj:GetRemainingDuration()
+            local cdInfo = C_Spell.GetSpellCooldown(spellID)
+            if cdInfo and cdInfo.isOnGCD then
+                isOnGCD = true
+            end
         end)
-        
-        if not total or not remaining
-           or type(total) ~= "number" or type(remaining) ~= "number"
-           or total <= 2.0 or remaining <= MIN_REMAINING_SEC then
-            cdTimingCache[spellID] = nil
-            return false, 0, 0
-        end
-        
-        -- Cache absolute timing for combat extrapolation
-        local now = GetTime()
-        cdTimingCache[spellID] = {
-            cdStart = now - (total - remaining),
-            cdDuration = total,
-        }
-        knownFullDurations[spellID] = total
-        
-        return true, remaining, total
     end
     
-    -- =====================================================================
-    -- IN COMBAT: Two-phase approach
-    -- Phase 1: Extrapolate from existing cache (already-tracked CDs)
-    -- Phase 2: Detect NEW cooldowns via IsActive + debounce + known durations
-    -- =====================================================================
-    
-    -- Phase 1: If we already have a cache entry, extrapolate from it
-    local cached = cdTimingCache[spellID]
-    if cached then
-        local remaining = (cached.cdStart + cached.cdDuration) - GetTime()
-        if remaining > MIN_REMAINING_SEC then
-            return true, remaining, cached.cdDuration
-        else
-            -- Expired — clean up
-            cdTimingCache[spellID] = nil
-            combatFirstSeen[spellID] = nil
-            return false, 0, 0
-        end
-    end
-    
-    -- Phase 2: No cache. Check if Duration Object just became active (new CD used)
-    if not DurationAPI or not C_Spell or not C_Spell.GetSpellCooldownDuration then
+    -- If GCD only, not a real cooldown
+    if isOnGCD then
         return false, 0, 0
     end
     
+    -- Step 2: Get Duration Object
     local dObj
-    local ok, d = pcall(C_Spell.GetSpellCooldownDuration, spellID)
-    if ok then dObj = d end
+    if C_Spell.GetSpellCooldownDuration then
+        local ok, d = pcall(C_Spell.GetSpellCooldownDuration, spellID)
+        if ok then dObj = d end
+    end
     
     if not dObj then
-        combatFirstSeen[spellID] = nil
-        return false, 0, 0
+        return self:ExtrapolateFromCache(spellID)
     end
     
-    -- Check if anything is active (secret-safe via TruncateWhenZero)
-    local isActive = false
-    if DurationAPI.IsActive then
+    -- Step 3: Is it active? (secret-safe)
+    local DurationAPI = TUICD.DurationAPI
+    local dObjIsActive = false
+    if DurationAPI and DurationAPI.IsActive then
         local aOk, aResult = pcall(DurationAPI.IsActive, DurationAPI, dObj)
-        isActive = aOk and aResult
+        dObjIsActive = aOk and aResult
     end
     
-    if not isActive then
-        -- Nothing running — GCD expired or spell is ready
-        combatFirstSeen[spellID] = nil
+    if not dObjIsActive then
+        cdTimingCache[spellID] = nil
         return false, 0, 0
     end
     
-    -- Something IS active. Could be GCD (~1.5s) or a real CD.
-    -- Use debounce: only confirm as real CD after COMBAT_DEBOUNCE_SEC
-    local now = GetTime()
-    if not combatFirstSeen[spellID] then
-        combatFirstSeen[spellID] = now
-        return false, 0, 0  -- Don't show yet, wait for debounce
-    end
-    
-    local elapsed = now - combatFirstSeen[spellID]
-    if elapsed < COMBAT_DEBOUNCE_SEC then
-        return false, 0, 0  -- Still in debounce window, might be GCD
-    end
-    
-    -- Debounce passed! This is a real cooldown.
-    -- Try to read actual duration (might be non-secret for whitelisted spells)
-    local realDur = nil
+    -- Step 4: Try to read non-secret remaining/duration from Duration Object
+    -- GetTotalDuration() and GetRemainingDuration() return secret values in combat
+    local gotTiming = false
     pcall(function()
-        local t = dObj:GetTotalDuration()
-        if t and type(t) == "number" and not IsSecret(t) and t > 2.0 then
-            realDur = t
-            knownFullDurations[spellID] = t  -- Learn it for future
+        local total = dObj:GetTotalDuration()
+        local remaining = dObj:GetRemainingDuration()
+        if total and remaining
+           and type(total) == "number"
+           and type(remaining) == "number"
+           and not (issecretvalue and issecretvalue(total))
+           and not (issecretvalue and issecretvalue(remaining)) then
+            -- Non-secret: we can use these directly and cache for combat
+            if remaining > MIN_REMAINING_SEC then
+                gotTiming = true
+                local now = GetTime()
+                cdTimingCache[spellID] = {
+                    cdStart = now - (total - remaining),
+                    cdDuration = total,
+                }
+                knownFullDurations[spellID] = total
+            end
         end
     end)
     
-    local useDur = realDur or knownFullDurations[spellID]
-    if not useDur or useDur <= 2.0 then
-        -- Never seen this spell on CD out of combat and can't read duration now
-        -- Will learn it when combat ends and CD is still active
-        return false, 0, 0
+    if gotTiming then
+        local cached = cdTimingCache[spellID]
+        local remaining = (cached.cdStart + cached.cdDuration) - GetTime()
+        return true, remaining, cached.cdDuration
     end
     
-    -- Create cache entry: started when we first saw it active
-    cdTimingCache[spellID] = {
-        cdStart = combatFirstSeen[spellID],
-        cdDuration = useDur,
-    }
-    combatFirstSeen[spellID] = nil  -- Done debouncing
+    -- Step 5: Secret fallback — try cache extrapolation
+    local extraOK, extraRem, extraDur = self:ExtrapolateFromCache(spellID)
+    if extraOK then return extraOK, extraRem, extraDur end
     
-    local remaining = (cdTimingCache[spellID].cdStart + useDur) - now
-    return true, remaining, useDur
+    -- Step 6: No cache but active — estimate using known duration
+    if knownFullDurations[spellID] then
+        local fullDur = knownFullDurations[spellID]
+        local now = GetTime()
+        cdTimingCache[spellID] = {
+            cdStart = now,
+            cdDuration = fullDur,
+        }
+        return true, fullDur, fullDur
+    end
+    
+    -- Last resort: active but no timing data
+    return true, 0, 0
 end
 
 -- Extrapolate cooldown state from cached absolute timing
@@ -491,53 +426,20 @@ function TimelineData:GetActiveCooldowns()
     -- Get TimelineUI reference for enabled check
     local TimelineUI = TUICD.TimelineUI
     
-    -- During combat, also check ALL tracked spells for debounce completion
-    -- (combatFirstSeen entries that may have matured since last UpdateAllStates)
-    local inCombat = InCombatLockdown()
-    
     for spellID, state in pairs(cooldownStates) do
-        -- Check spells already known to be on CD
         if state.isOnCD then
             local spellData = trackedSpells[spellID]
             if spellData then
+                -- Check if spell is enabled in UI settings
                 local isEnabled = true
                 if TimelineUI and TimelineUI.IsSpellEnabled then
                     isEnabled = TimelineUI:IsSpellEnabled(spellID)
                 end
                 
                 if isEnabled then
+                    -- Recalculate remaining time (may have changed since last update)
                     local isOnCD, remaining, duration = self:GetCooldownState(spellID)
-                    if isOnCD and remaining > 0 and duration > 0 then
-                        active[spellID] = {
-                            spellID = spellID,
-                            name = spellData.name,
-                            icon = spellData.icon,
-                            source = spellData.source,
-                            trackerKey = spellData.trackerKey,
-                            remaining = remaining,
-                            duration = duration
-                        }
-                    end
-                end
-            end
-        -- During combat, check debouncing spells (not yet isOnCD)
-        elseif inCombat and combatFirstSeen[spellID] then
-            local spellData = trackedSpells[spellID]
-            if spellData then
-                local isOnCD, remaining, duration = self:GetCooldownState(spellID)
-                if isOnCD and remaining > 0 and duration > 0 then
-                    -- Debounce completed! Update cooldownStates
-                    cooldownStates[spellID] = {
-                        isOnCD = true,
-                        remaining = remaining,
-                        duration = duration,
-                        lastUpdate = GetTime()
-                    }
-                    local isEnabled = true
-                    if TimelineUI and TimelineUI.IsSpellEnabled then
-                        isEnabled = TimelineUI:IsSpellEnabled(spellID)
-                    end
-                    if isEnabled then
+                    if isOnCD then
                         active[spellID] = {
                             spellID = spellID,
                             name = spellData.name,
@@ -681,121 +583,6 @@ function TimelineData:TestGCDFilter()
         
         print(string.format("  %s: %s - remaining: %.1fs, duration: %.1fs",
             data.name, status, remaining, duration))
-    end
-end
-
--- ============================================================================
--- FULL PIPELINE DEBUG (slash command: /tldbg)
--- Traces every step from tracked spells → cache → GetCooldownState → GetActiveCooldowns
--- ============================================================================
-
-function TimelineData:DebugFullPipeline()
-    local p = function(msg) print("|cff00ccff[TL-DBG]|r " .. msg) end
-    
-    p("========== TIMELINE DEBUG DUMP ==========")
-    p(string.format("InCombatLockdown: %s", tostring(InCombatLockdown())))
-    
-    -- 1. Tracked spells
-    local trackCount = 0
-    for _ in pairs(trackedSpells) do trackCount = trackCount + 1 end
-    p(string.format("trackedSpells: %d entries", trackCount))
-    
-    -- 2. cooldownStates
-    local stateOnCD, stateReady = 0, 0
-    for spellID, state in pairs(cooldownStates) do
-        if state.isOnCD then stateOnCD = stateOnCD + 1 else stateReady = stateReady + 1 end
-    end
-    p(string.format("cooldownStates: %d onCD, %d ready", stateOnCD, stateReady))
-    
-    -- 3. cdTimingCache
-    local cacheCount = 0
-    for spellID, cached in pairs(cdTimingCache) do
-        cacheCount = cacheCount + 1
-        local remaining = (cached.cdStart + cached.cdDuration) - GetTime()
-        local spellData = trackedSpells[spellID]
-        local name = spellData and spellData.name or "?"
-        p(string.format("  CACHE: %s (%d) rem=%.1fs dur=%.1fs", name, spellID, remaining, cached.cdDuration))
-    end
-    p(string.format("cdTimingCache: %d entries", cacheCount))
-    
-    -- 3b. knownFullDurations
-    local knownCount = 0
-    for spellID, dur in pairs(knownFullDurations) do
-        knownCount = knownCount + 1
-        local spellData = trackedSpells[spellID]
-        local name = spellData and spellData.name or "?"
-        p(string.format("  KNOWN DUR: %s (%d) = %.1fs", name, spellID, dur))
-    end
-    p(string.format("knownFullDurations: %d entries", knownCount))
-    
-    -- 3c. combatFirstSeen
-    local seenCount = 0
-    local now = GetTime()
-    for spellID, firstSeen in pairs(combatFirstSeen) do
-        seenCount = seenCount + 1
-        local spellData = trackedSpells[spellID]
-        local name = spellData and spellData.name or "?"
-        p(string.format("  FIRST SEEN: %s (%d) %.1fs ago", name, spellID, now - firstSeen))
-    end
-    p(string.format("combatFirstSeen: %d entries", seenCount))
-    
-    -- 4. Per-spell GetCooldownState trace
-    p("--- Per-spell GetCooldownState ---")
-    for spellID, spellData in pairs(trackedSpells) do
-        local isOnCD, remaining, duration = self:GetCooldownState(spellID)
-        p(string.format("  %s (%d): isOnCD=%s rem=%.1f dur=%.1f",
-            spellData.name, spellID, tostring(isOnCD), remaining or 0, duration or 0))
-    end
-    
-    -- 5. GetActiveCooldowns result
-    local active = self:GetActiveCooldowns()
-    local activeCount = 0
-    for spellID, data in pairs(active) do
-        activeCount = activeCount + 1
-        p(string.format("  ACTIVE: %s (%d) rem=%.1f dur=%.1f",
-            data.name, spellID, data.remaining, data.duration))
-    end
-    p(string.format("GetActiveCooldowns: %d entries", activeCount))
-    
-    -- 6. Raw C_Spell check + IsActive (even in combat, to see what happens)
-    p("--- Raw C_Spell + IsActive probe ---")
-    local DurationAPI = TUICD.DurationAPI
-    for spellID, spellData in pairs(trackedSpells) do
-        local status = "?"
-        pcall(function()
-            if C_Spell and C_Spell.GetSpellCooldownDuration then
-                local dObj = C_Spell.GetSpellCooldownDuration(spellID)
-                if dObj then
-                    local activeStr = "?"
-                    if DurationAPI and DurationAPI.IsActive then
-                        local aOk, aRes = pcall(DurationAPI.IsActive, DurationAPI, dObj)
-                        activeStr = aOk and tostring(aRes) or ("err:" .. tostring(aRes))
-                    end
-                    local rem = dObj:GetRemainingDuration()
-                    local total = dObj:GetTotalDuration()
-                    local remSecret = issecretvalue and issecretvalue(rem) or false
-                    local totalSecret = issecretvalue and issecretvalue(total) or false
-                    status = string.format("IsActive=%s rem=%s(secret=%s) total=%s(secret=%s)",
-                        activeStr, tostring(rem), tostring(remSecret), tostring(total), tostring(totalSecret))
-                else
-                    status = "dObj=nil"
-                end
-            else
-                status = "no API"
-            end
-        end)
-        p(string.format("  RAW: %s (%d): %s", spellData.name, spellID, status))
-    end
-    
-    p("========== END DEBUG DUMP ==========")
-end
-
-SLASH_TLDBG1 = "/tldbg"
-SlashCmdList["TLDBG"] = function()
-    if TUICD.TimelineData then
-        TUICD.TimelineData:DebugFullPipeline()
-    else
-        print("|cffff0000[TL-DBG] TimelineData not loaded|r")
     end
 end
 

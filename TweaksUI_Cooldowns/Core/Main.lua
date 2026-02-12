@@ -487,6 +487,7 @@ local function HandleSlashCommand(msg)
         TUICD:Print("|cffffff00/tuicd reseticons|r - Reset per-icon order (fixes jumbled icons)")
         TUICD:Print("|cffffff00/tuicd bridge|r - Buff identity bridge diagnostics")
         TUICD:Print("|cffffff00/tuicdresetmulti|r - Reset all multi-trackers")
+        TUICD:Print("|cffffff00/tuicdresetbars|r - Reset all timer bars & timeline")
         TUICD:Print("|cffffff00/cdm|r - Toggle Blizzard Cooldown Settings")
         TUICD:Print("|cffffff00/rl|r - Reload UI")
         
@@ -911,10 +912,6 @@ local function HandleSlashCommand(msg)
             if TUICD.BuffIdentityBridge then
                 TUICD.BuffIdentityBridge:WipeAll()
             end
-            -- Clear BuffHighlights texture cache (prevents stale textures)
-            if TUICD.BuffHighlights and TUICD.BuffHighlights.WipeCachedTextures then
-                TUICD.BuffHighlights:WipeCachedTextures()
-            end
             -- Resync spell ID caches
             if TUICD.CooldownHighlights and TUICD.CooldownHighlights.RefreshSpellIDCache then
                 TUICD.CooldownHighlights:RefreshSpellIDCache(nil)  -- nil = all trackers
@@ -937,15 +934,6 @@ local function HandleSlashCommand(msg)
             if TUICD.BuffIdentityBridge then
                 C_Timer.After(0.5, function()
                     TUICD.BuffIdentityBridge:ForceRebuildSlotMap()
-                    -- Prune orphaned entries after bridge has fresh data
-                    C_Timer.After(0.3, function()
-                        if TUICD.BuffHighlights and TUICD.BuffHighlights.PruneOrphans then
-                            local pruned = TUICD.BuffHighlights:PruneOrphans()
-                            if pruned > 0 then
-                                TUICD:PrintDebug("Pruned " .. pruned .. " orphaned highlight(s)")
-                            end
-                        end
-                    end)
                 end)
             end
             TUICD:Print("|cff00ff00Per-icon order reset for all trackers.|r Reopen settings to see updated list.")
@@ -986,6 +974,79 @@ SlashCmdList["TUICDRESETMULTI"] = function()
         hideOnEscape = true,
     }
     StaticPopup_Show("TUICD_RESET_MULTI")
+end
+
+SLASH_TUICDRESETBARS1 = "/tuicdresetbars"
+SlashCmdList["TUICDRESETBARS"] = function()
+    StaticPopupDialogs["TUICD_RESET_BARS"] = {
+        text = "Reset ALL timer bars and timeline?\n\nThis will clear:\n- Cooldown timer bars\n- Buff timer bars\n- Timeline tracked spells\n\nYou can re-import from multi-trackers afterward. Cannot be undone.",
+        button1 = "Reset All",
+        button2 = "Cancel",
+        OnAccept = function()
+            local cleared = {}
+
+            -- 1. Cooldown Bars
+            if TUICD.BarsData then
+                local count = TUICD.BarsData:RemoveAllSpells()
+                table.insert(cleared, "CD Bars: " .. (count or 0) .. " removed")
+                -- Destroy existing bar frames
+                if TUICD.BarsFrames then
+                    TUICD.BarsFrames:DestroyAllBars()
+                end
+            end
+
+            -- 2. Buff Bars
+            if TUICD.BuffBarsData then
+                local db = TUICD.BuffBarsData:GetDB()
+                if db then
+                    local count = 0
+                    if db.spells then
+                        for _ in pairs(db.spells) do count = count + 1 end
+                        wipe(db.spells)
+                    end
+                    table.insert(cleared, "Buff Bars: " .. count .. " removed")
+                    -- Destroy existing buff bar frames
+                    if TUICD.BuffBarsFrames then
+                        TUICD.BuffBarsFrames:DestroyAllBars()
+                    end
+                end
+            end
+
+            -- 3. Timeline
+            if TUICD.TimelineData then
+                -- Clear tracked spells in DB
+                local settings = TUICD.Database and TUICD.Database:GetModuleSettings("timeline")
+                if settings then
+                    local count = 0
+                    if settings.trackedSpells then
+                        for _ in pairs(settings.trackedSpells) do count = count + 1 end
+                        wipe(settings.trackedSpells)
+                    end
+                    table.insert(cleared, "Timeline: " .. count .. " removed")
+                end
+                -- Rebuild (will be empty)
+                if TUICD.TimelineData.RebuildSpellList then
+                    TUICD.TimelineData:RebuildSpellList()
+                end
+                -- Refresh frames
+                if TUICD.TimelineFrames and TUICD.TimelineFrames.FullRefresh then
+                    TUICD.TimelineFrames:FullRefresh()
+                end
+            end
+
+            -- Report
+            TUICD:Print("|cffffff00Timer Bars & Timeline Reset:|r")
+            for _, msg in ipairs(cleared) do
+                TUICD:Print("  " .. msg)
+            end
+            TUICD:Print("Use |cffffff00/tuicd bars import|r to re-import cooldown bars from multi-trackers.")
+            TUICD:Print("Use |cffffff00/tuicd buffbars discover|r to rediscover buff bars.")
+        end,
+        timeout = 0,
+        whileDead = true,
+        hideOnEscape = true,
+    }
+    StaticPopup_Show("TUICD_RESET_BARS")
 end
 
 -- Register slash commands

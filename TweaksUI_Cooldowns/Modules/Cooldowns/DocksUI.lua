@@ -1742,7 +1742,7 @@ function DocksUI:RefreshContent()
     }
     local FLASH_TYPE_OPTIONS = {
         { label = "Pixel Border",  value = "pixel" },
-        { label = "Shine",         value = "shine" },
+        { label = "Shine Flash",   value = "shine" },
         { label = "Spell Glow",    value = "glow" },
     }
     

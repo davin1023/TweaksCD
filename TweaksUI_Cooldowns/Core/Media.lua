@@ -34,9 +34,25 @@ Media.BuiltInFonts = {
 }
 
 -- Built-in sounds (registered with LSM on init)
+-- Blizzard sound file IDs that work with PlaySoundFile(fileID, channel)
 Media.BuiltInSounds = {
-    -- Add custom sounds here if bundled in Media/Sounds/
-    -- ["TUICD Alert"] = SOUND_PATH .. "alert.ogg",
+    -- Alert / Notification
+    ["TUI: Arrow Whoosh"]       = 567415,   -- UI_BNet_Toast
+    ["TUI: Quest Complete"]     = 567439,   -- UI_QuestComplete
+    ["TUI: Quest Activate"]     = 567400,   -- UI_QuestActivate
+    ["TUI: Power Aura"]         = 569593,   -- UI_PowerAura_Generic
+    ["TUI: Level Up"]           = 567431,   -- UI_LevelUp
+    ["TUI: Raid Warning"]       = 567397,   -- UI_RaidBossWhisper
+    ["TUI: PvP Flag"]           = 569200,   -- PVP_FlagTakenAlliance
+    ["TUI: Ready Check"]        = 567478,   -- ReadyCheck
+    -- Subtle / Soft
+    ["TUI: Map Ping"]           = 567416,   -- UI_BNet_PM
+    ["TUI: Loot Coin"]          = 567428,   -- LOOTWINDOWOPENCOINSOUND
+    ["TUI: Enchant"]            = 567384,   -- ENCHANT_COMPLETE
+    -- Combat / Action
+    ["TUI: Proc"]               = 568975,   -- PROC_BLOODLUST
+    ["TUI: Spell Fizzle"]       = 569772,   -- SPELL_FIZZLE
+    ["TUI: Crowd Roar"]         = 569310,   -- PVP_CROWD_ROAR
 }
 
 -- Legacy texture paths (for backwards compatibility)
@@ -78,9 +94,11 @@ function Media:Initialize()
             LSM:Register("font", name, path)
         end
         
-        -- Register our custom sounds with LSM
+        -- Register our custom sounds with LSM (only string paths, not fileIDs)
         for name, path in pairs(Media.BuiltInSounds) do
-            LSM:Register("sound", name, path)
+            if type(path) == "string" then
+                LSM:Register("sound", name, path)
+            end
         end
         
         -- Print counts (always, for debugging)
@@ -303,6 +321,47 @@ function Media:PlaySound(name, channel)
     if soundPath then
         PlaySoundFile(soundPath, channel or "Master")
     end
+end
+
+-- Get sorted list of sounds with TUI presets first, then LSM sounds
+-- @return table - Array: {"None", "TUI: ...", "TUI: ...", ..., "LSM Sound 1", ...}
+function Media:GetSoundListWithPresets()
+    local list = {"None"}
+    -- Add our presets first (sorted)
+    local presets = {}
+    for name in pairs(Media.BuiltInSounds) do
+        table.insert(presets, name)
+    end
+    table.sort(presets)
+    for _, name in ipairs(presets) do
+        table.insert(list, name)
+    end
+    -- Add LSM sounds (skip duplicates already registered from our presets)
+    if LSM then
+        local lsmList = LSM:List("sound")
+        if lsmList then
+            for _, name in ipairs(lsmList) do
+                if not Media.BuiltInSounds[name] then
+                    table.insert(list, name)
+                end
+            end
+        end
+    end
+    return list
+end
+
+-- Debounced alert sound playback (prevents spam when many icons transition at once)
+local soundLastPlayed = {}
+local SOUND_COOLDOWN = 0.1  -- seconds between same sound
+
+function Media:PlayAlertSound(name)
+    if not name or name == "" or name == "None" then return end
+    local now = GetTime()
+    if soundLastPlayed[name] and (now - soundLastPlayed[name]) < SOUND_COOLDOWN then
+        return  -- Debounce
+    end
+    soundLastPlayed[name] = now
+    self:PlaySound(name, "Master")
 end
 
 -- ============================================================================
@@ -773,7 +832,7 @@ function Media:CreateSoundDropdown(parent, name, x, y, width, currentSound, onCh
     dropdown.currentSound = currentSound
     
     UIDropDownMenu_Initialize(dropdown, function(self, level)
-        local soundList = Media:GetSoundList()
+        local soundList = Media:GetSoundListWithPresets()
         for _, soundName in ipairs(soundList) do
             local info = UIDropDownMenu_CreateInfo()
             info.text = soundName
@@ -788,6 +847,8 @@ function Media:CreateSoundDropdown(parent, name, x, y, width, currentSound, onCh
             UIDropDownMenu_AddButton(info)
         end
     end)
+    
+    -- Enable scrolling for large sound lists
     
     -- Play button
     local playBtn = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")

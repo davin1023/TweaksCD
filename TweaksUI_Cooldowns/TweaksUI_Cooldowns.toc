@@ -2,7 +2,7 @@
 ## Title: TweaksUI: Cooldowns
 ## Notes: Enhanced cooldown tracking with custom layouts, visibility controls, and proc alerts.|n|cff00ccffv3.1.0:|r Release prep and cleanup
 ## Author: Meltheran
-## Version: 3.2.0
+## Version: 3.1.5
 ## SavedVariables: TweaksUI_Cooldowns_DB
 ## SavedVariablesPerCharacter: TweaksUI_Cooldowns_CharDB
 ## OptionalDeps: Masque, LibSharedMedia-3.0, CMT, !TweaksUI
@@ -100,12 +100,15 @@ Modules\Bars\BuffBarsUI.lua
 Modules\Bars\Bars.lua
 
 # ============================================================================
-# Modules - Timeline (Phase 3: Settings Panel & Persistence)
+# Modules - Timeline (DISABLED - secret anchors prevent combat positioning)
 # ============================================================================
-Modules\Timeline\TimelineData.lua
-Modules\Timeline\Timeline.lua
-Modules\Timeline\TimelineFrames.lua
-Modules\Timeline\TimelineUI.lua
+# Modules\Timeline\TimelineData.lua
+# Modules\Timeline\Timeline.lua
+# Modules\Timeline\TimelineFrames.lua
+# Modules\Timeline\TimelineUI.lua
+
+# Timeline Diagnostic (DISABLED - proper isOnGCD fix deployed)
+# TimelineDiag.lua
 
 # ============================================================================
 # Modules - Profiles UI

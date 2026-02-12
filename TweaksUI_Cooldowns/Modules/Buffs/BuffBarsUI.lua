@@ -33,7 +33,7 @@ local tabButtons      = {}
 -- ============================================================================
 
 local PANEL_WIDTH     = 540
-local PANEL_HEIGHT    = 665
+local PANEL_HEIGHT    = 650
 local LIST_WIDTH      = 170
 local CONFIG_WIDTH    = 340
 local BUTTON_HEIGHT   = 28
@@ -571,7 +571,6 @@ local function RefreshSpellList()
 
         btn:SetScript("OnClick", function()
             selectedBarKey = entry.barKey
-            BuffBarsFrames:SetPreviewBar(selectedBarKey)
             RefreshSpellList()
             BuffBarsUI:RefreshConfigPanel()
         end)
@@ -599,40 +598,20 @@ end
 function BuffBarsUI:RefreshConfigPanel()
     if not configScrollChild then return end
 
-    -- Hide ALL children from all scroll containers
+    -- Hide ALL children from both scroll containers
     for _, child in ipairs({configScrollChild:GetChildren()}) do child:Hide() end
     if dockScrollChild then
         for _, child in ipairs({dockScrollChild:GetChildren()}) do child:Hide() end
     end
-    if self._visibilityScrollChild then
-        for _, child in ipairs({self._visibilityScrollChild:GetChildren()}) do child:Hide() end
-    end
     CloseActivePopup()
 
     if activeTab == "dock" then
-        -- Hide other scroll children, show dock
-        if configScrollChild then configScrollChild:Hide() end
-        if self._visibilityScrollChild then self._visibilityScrollChild:Hide() end
-        if dockScrollChild then dockScrollChild:Show() end
         configFrame:SetScrollChild(dockScrollChild)
         self:BuildDockSettingsUI(dockScrollChild)
         return
     end
 
-    if activeTab == "visibility" then
-        -- Hide other scroll children, show visibility
-        if configScrollChild then configScrollChild:Hide() end
-        if dockScrollChild then dockScrollChild:Hide() end
-        if self._visibilityScrollChild then self._visibilityScrollChild:Show() end
-        configFrame:SetScrollChild(self._visibilityScrollChild)
-        self:BuildVisibilityUI(self._visibilityScrollChild)
-        return
-    end
-
-    -- Spell tab: hide other scroll children, show config
-    if dockScrollChild then dockScrollChild:Hide() end
-    if self._visibilityScrollChild then self._visibilityScrollChild:Hide() end
-    if configScrollChild then configScrollChild:Show() end
+    -- Spell tab
     configFrame:SetScrollChild(configScrollChild)
 
     if not selectedBarKey then
@@ -652,7 +631,7 @@ function BuffBarsUI:RefreshConfigPanel()
     local config = BuffBarsData:GetSpellConfig(selectedBarKey)
     if not config then return end
 
-    local slotIndex = BuffBarsData.GetSlotIndexForBarKey(selectedBarKey)
+    local slotIndex = BuffBarsData.ParseBarKey(selectedBarKey)
     local y = 0
 
     -- ========================================
@@ -682,9 +661,12 @@ function BuffBarsUI:RefreshConfigPanel()
 
     -- Enable
     local enableCheck = CreateCheckbox(configScrollChild, "Enabled", function(checked)
-        BuffBarsData:EnableByBarKey(selectedBarKey, nil, checked)
-        BuffBarsFrames:OnConfigChanged(selectedBarKey)
-        RefreshSpellList()
+        local si = BuffBarsData.ParseBarKey(selectedBarKey)
+        if si then
+            BuffBarsData:EnableSlot(si, checked)
+            BuffBarsFrames:OnConfigChanged(selectedBarKey)
+            RefreshSpellList()
+        end
     end)
     enableCheck:SetPoint("TOPLEFT", 0, -y)
     enableCheck:SetChecked(config.enabled ~= false)
@@ -778,7 +760,7 @@ function BuffBarsUI:RefreshConfigPanel()
 
     -- Color by Time toggle
     local cbtCheck = CreateCheckbox(configScrollChild, "Color by Time Remaining", function(checked)
-        SetAndApply("colorByTime", checked, true)  -- refreshPanel to show/hide swatches
+        SetAndApply("colorByTime", checked, true)
     end)
     cbtCheck:SetPoint("TOPLEFT", 0, -y)
     cbtCheck:SetChecked(config.colorByTime == true)
@@ -786,7 +768,23 @@ function BuffBarsUI:RefreshConfigPanel()
     y = y + 26
 
     if config.colorByTime then
-        -- Color swatches row: High / Med / Low
+        local highSlider = CreateSlider(configScrollChild, "High (sec)", 2, 120, 1, CONTROL_WIDTH, function(val)
+            SetAndApply("colorHighSeconds", val)
+        end)
+        highSlider:SetPoint("TOPLEFT", 0, -y)
+        highSlider:SetInitialValue(config.colorHighSeconds or 10)
+        highSlider:Show()
+        y = y + 38
+
+        local medSlider = CreateSlider(configScrollChild, "Medium (sec)", 1, 60, 1, CONTROL_WIDTH, function(val)
+            SetAndApply("colorMedSeconds", val)
+        end)
+        medSlider:SetPoint("TOPLEFT", 0, -y)
+        medSlider:SetInitialValue(config.colorMedSeconds or 5)
+        medSlider:Show()
+        y = y + 38
+
+        -- Color swatches row
         local cbtRow = CreateFrame("Frame", nil, configScrollChild)
         cbtRow:SetSize(CONTROL_WIDTH, 24)
         cbtRow:SetPoint("TOPLEFT", 0, -y)
@@ -822,15 +820,16 @@ function BuffBarsUI:RefreshConfigPanel()
         cbtLowSwatch:SetPoint("LEFT", cbtLowLabel, "RIGHT", 6, 0)
         cbtLowSwatch:Show()
 
-        -- Reset Defaults button
         local resetBtn = CreateFrame("Button", nil, cbtRow, "UIPanelButtonTemplate")
         resetBtn:SetSize(60, 20)
         resetBtn:SetPoint("LEFT", cbtLowSwatch, "RIGHT", 14, 0)
         resetBtn:SetText("Reset")
         resetBtn:SetScript("OnClick", function()
+            SetAndApply("colorHighSeconds", 10)
+            SetAndApply("colorMedSeconds", 5)
             SetAndApply("colorHigh", { r = 0.2, g = 0.8, b = 0.2 })
             SetAndApply("colorMed", { r = 1.0, g = 0.8, b = 0.0 })
-            SetAndApply("colorLow", { r = 1.0, g = 0.2, b = 0.2 }, true)  -- refresh panel
+            SetAndApply("colorLow", { r = 1.0, g = 0.2, b = 0.2 }, true)
         end)
         resetBtn:Show()
         y = y + 28
@@ -1086,7 +1085,6 @@ function BuffBarsUI:RefreshConfigPanel()
     removeBtn:SetText("|cffff4444Remove Buff|r")
     removeBtn:Show()
     removeBtn:SetScript("OnClick", function()
-        BuffBarsFrames:ClearPreviewBar()
         BuffBarsData:RemoveSlot(selectedBarKey)
         BuffBarsFrames:DestroyBar(selectedBarKey)
         selectedBarKey = nil
@@ -1161,15 +1159,7 @@ function BuffBarsUI:BuildDockSettingsUI(parent)
     local function DockSet(key, value)
         BuffBarsData:SetDockSetting(key, value)
         local dock = TUICD.BuffBarsDock
-        if dock then 
-            if key == "justify" or key == "direction" then
-                -- Re-anchor dock when justify or orientation changes
-                if dock.ReanchorForJustify then
-                    dock:ReanchorForJustify()
-                end
-            end
-            dock:QueueLayout() 
-        end
+        if dock then dock:QueueLayout() end
     end
 
     -- Section: Layout
@@ -1186,37 +1176,7 @@ function BuffBarsUI:BuildDockSettingsUI(parent)
         { label = "Horizontal", value = "HORIZONTAL", width = 80, tooltip = "Stack bars left-to-right" },
     }, orientValue, y, function(val)
         DockSet("direction", val == "HORIZONTAL" and "RIGHT" or "DOWN")
-        -- Update justify labels based on new orientation
-        if parent._justifyRow then
-            local isVert = (val == "VERTICAL")
-            local btns = parent._justifyRow._buttons
-            if btns and #btns >= 3 then
-                btns[1]:GetFontString():SetText(isVert and "Top" or "Left")
-                btns[2]:GetFontString():SetText(isVert and "Middle" or "Center")
-                btns[3]:GetFontString():SetText(isVert and "Bottom" or "Right")
-            end
-        end
     end)
-    y = y + 34
-
-    -- Justify - labels change based on orientation
-    local isVert = (orientValue == "VERTICAL")
-    local justifyValue = BuffBarsData:GetDockSetting("justify") or "CENTER"
-    local justRow = CreateToggleRow(parent, "Justify:", {
-        { label = isVert and "Top" or "Left",      value = "START",  width = 55, tooltip = "Bars grow from " .. (isVert and "top" or "left") .. " edge" },
-        { label = isVert and "Middle" or "Center", value = "CENTER", width = 55, tooltip = "Center-out placement" },
-        { label = isVert and "Bottom" or "Right",  value = "END",    width = 55, tooltip = "Bars grow from " .. (isVert and "bottom" or "right") .. " edge" },
-    }, justifyValue, y, function(val) DockSet("justify", val) end)
-    -- Store reference for dynamic label updates
-    parent._justifyRow = justRow
-    -- Store button references
-    justRow._buttons = {}
-    local btns = {justRow:GetChildren()}
-    for _, child in ipairs(btns) do
-        if child:GetObjectType() == "Button" then
-            table.insert(justRow._buttons, child)
-        end
-    end
     y = y + 34
 
     -- Spacing slider
@@ -1228,436 +1188,6 @@ function BuffBarsUI:BuildDockSettingsUI(parent)
     spacingSlider:Show()
     y = y + 44
 
-    -- Section: Override Bar Settings
-    local secOverride = CreateSectionLabel(parent, "Visual Override")
-    secOverride:SetPoint("TOPLEFT", 0, -y)
-    secOverride:Show()
-    y = y + 22
-
-    -- Enable Override checkbox
-    local overrideEnabled = BuffBarsData:IsOverrideEnabled()
-    local overrideCheck = CreateCheckbox(parent, "Override all bar visuals", function(checked)
-        BuffBarsData:SetOverrideEnabled(checked)
-        BuffBarsUI:RefreshConfigPanel()
-    end)
-    overrideCheck:SetPoint("TOPLEFT", 0, -y)
-    overrideCheck:SetChecked(overrideEnabled)
-    overrideCheck:Show()
-    y = y + 26
-
-    -- Override description
-    local overrideDescFrame = CreateFrame("Frame", nil, parent)
-    overrideDescFrame:SetSize(CONTROL_WIDTH, 24)
-    overrideDescFrame:SetPoint("TOPLEFT", 0, -y)
-    overrideDescFrame:Show()
-    local overrideDescFS = overrideDescFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    overrideDescFS:SetPoint("TOPLEFT", 22, 0)
-    overrideDescFS:SetWidth(CONTROL_WIDTH - 30)
-    overrideDescFS:SetJustifyH("LEFT")
-    overrideDescFS:SetText("|cff888888When enabled, dock settings apply to all bars,\noverriding individual bar configurations.|r")
-    y = y + 36
-
-    if not overrideEnabled then
-        -- Section: Tips (shown when override disabled)
-        local secInfo = CreateSectionLabel(parent, "Tips")
-        secInfo:SetPoint("TOPLEFT", 0, -y)
-        secInfo:Show()
-        y = y + 22
-
-        local infoFrame = CreateFrame("Frame", nil, parent)
-        infoFrame:SetSize(CONTROL_WIDTH, 80)
-        infoFrame:SetPoint("TOPLEFT", 0, -y)
-        infoFrame:Show()
-        local infoFS = infoFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        infoFS:SetPoint("TOPLEFT", 8, 0)
-        infoFS:SetWidth(CONTROL_WIDTH - 16)
-        infoFS:SetJustifyH("LEFT")
-        infoFS:SetText("|cff666666Use |cff00ccff/tuicd buffbars layout|cff666666 to move the dock.\n\nBuff bars appear when the tracked buff is active\nand drain down as the buff expires. Enable\n\"Show When Inactive\" on individual bars to keep\nthem visible at all times.|r")
-        y = y + 90
-
-        parent:SetHeight(y + 10)
-        return
-    end
-
-    -- =====================================================
-    -- OVERRIDE ENABLED: Full visual settings
-    -- =====================================================
-    local function OverrideSet(key, value, refreshPanel)
-        BuffBarsData:SetDockOverride(key, value)
-        -- Invalidate color caches when color-related settings change
-        if key == "colorByTime" or key == "colorHigh" or key == "colorMed" or key == "colorLow" or key == "barColor" then
-            BuffBarsFrames:InvalidateAllColorCurves()
-        end
-        if refreshPanel then
-            BuffBarsUI:RefreshConfigPanel()
-        end
-    end
-
-    local bo = BuffBarsData:GetDockOverrides()
-    if not bo then
-        parent:SetHeight(y + 10)
-        return
-    end
-
-    -- ---- Bar Dimensions ----
-    local dimSec = CreateSectionLabel(parent, "Bar Dimensions")
-    dimSec:SetPoint("TOPLEFT", 0, -y)
-    dimSec:Show()
-    y = y + 16
-
-    local oIsVert = (bo.barDirection == "UP" or bo.barDirection == "DOWN")
-    local oWMin, oWMax, oWStep = 60, 500, 5
-    local oHMin, oHMax, oHStep = 8, 60, 1
-    if oIsVert then
-        oWMin, oWMax, oWStep = 8, 60, 1
-        oHMin, oHMax, oHStep = 60, 500, 5
-    end
-
-    local oWidthSlider = CreateSlider(parent, "Bar Width", oWMin, oWMax, oWStep, CONTROL_WIDTH - 20, function(val)
-        OverrideSet("width", val)
-    end)
-    oWidthSlider:SetPoint("TOPLEFT", 0, -y)
-    oWidthSlider:SetInitialValue(bo.width or (oIsVert and 20 or 200))
-    oWidthSlider:Show()
-    y = y + 38
-
-    local oHeightSlider = CreateSlider(parent, "Bar Height", oHMin, oHMax, oHStep, CONTROL_WIDTH - 20, function(val)
-        OverrideSet("height", val)
-    end)
-    oHeightSlider:SetPoint("TOPLEFT", 0, -y)
-    oHeightSlider:SetInitialValue(bo.height or (oIsVert and 200 or 20))
-    oHeightSlider:Show()
-    y = y + 38
-
-    -- ---- Appearance ----
-    local oAppSec = CreateSectionLabel(parent, "Appearance")
-    oAppSec:SetPoint("TOPLEFT", 0, -y)
-    oAppSec:Show()
-    y = y + 16
-
-    local oTexDD = CreateScrollDropdown(parent, "Bar Texture", CONTROL_WIDTH - 20,
-        function() return Media and Media:GetStatusBarList() or { "Blizzard" } end,
-        function() return bo.barTexture or "Blizzard" end,
-        function(val) OverrideSet("barTexture", val) end
-    )
-    oTexDD:SetPoint("TOPLEFT", 0, -y)
-    oTexDD:SetValue(bo.barTexture or "Blizzard")
-    oTexDD:Show()
-    y = y + 40
-
-    -- Colors row
-    local oColorRow = CreateFrame("Frame", nil, parent)
-    oColorRow:SetSize(CONTROL_WIDTH, 24)
-    oColorRow:SetPoint("TOPLEFT", 0, -y)
-    oColorRow:Show()
-
-    local oBcLabel = oColorRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    oBcLabel:SetPoint("LEFT", 0, 0)
-    oBcLabel:SetText("Bar Color")
-
-    local oBarColor = bo.barColor or { r = 0.2, g = 0.8, b = 0.2, a = 1.0 }
-    local oBarSwatch = CreateColorSwatch(oColorRow, oBarColor, function(r, g, b)
-        OverrideSet("barColor", { r = r, g = g, b = b, a = 1.0 })
-    end)
-    oBarSwatch:SetPoint("LEFT", oBcLabel, "RIGHT", 8, 0)
-    oBarSwatch:Show()
-
-    local oBgcLabel = oColorRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    oBgcLabel:SetPoint("LEFT", oBarSwatch, "RIGHT", 16, 0)
-    oBgcLabel:SetText("Background")
-
-    local oBgColor = bo.backgroundColor or { r = 0.1, g = 0.1, b = 0.1, a = 0.8 }
-    local oBgSwatch = CreateColorSwatch(oColorRow, oBgColor, function(r, g, b, a)
-        OverrideSet("backgroundColor", { r = r, g = g, b = b, a = a })
-    end, true)
-    oBgSwatch:SetPoint("LEFT", oBgcLabel, "RIGHT", 8, 0)
-    oBgSwatch:Show()
-    y = y + 28
-
-    -- Color by Time toggle
-    local oCbtCheck = CreateCheckbox(parent, "Color by Time Remaining", function(checked)
-        OverrideSet("colorByTime", checked, true)
-    end)
-    oCbtCheck:SetPoint("TOPLEFT", 0, -y)
-    oCbtCheck:SetChecked(bo.colorByTime == true)
-    oCbtCheck:Show()
-    y = y + 26
-
-    if bo.colorByTime then
-        -- Color swatches row: High / Med / Low
-        local oCbtRow = CreateFrame("Frame", nil, parent)
-        oCbtRow:SetSize(CONTROL_WIDTH, 24)
-        oCbtRow:SetPoint("TOPLEFT", 0, -y)
-        oCbtRow:Show()
-
-        local oChLabel = oCbtRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        oChLabel:SetPoint("LEFT", 0, 0)
-        oChLabel:SetText("High")
-        local oChColor = bo.colorHigh or { r = 0.2, g = 0.8, b = 0.2 }
-        local oChSwatch = CreateColorSwatch(oCbtRow, oChColor, function(r, g, b)
-            OverrideSet("colorHigh", { r = r, g = g, b = b })
-        end)
-        oChSwatch:SetPoint("LEFT", oChLabel, "RIGHT", 6, 0)
-        oChSwatch:Show()
-
-        local oCmLabel = oCbtRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        oCmLabel:SetPoint("LEFT", oChSwatch, "RIGHT", 14, 0)
-        oCmLabel:SetText("Med")
-        local oCmColor = bo.colorMed or { r = 1.0, g = 0.8, b = 0.0 }
-        local oCmSwatch = CreateColorSwatch(oCbtRow, oCmColor, function(r, g, b)
-            OverrideSet("colorMed", { r = r, g = g, b = b })
-        end)
-        oCmSwatch:SetPoint("LEFT", oCmLabel, "RIGHT", 6, 0)
-        oCmSwatch:Show()
-
-        local oClLabel = oCbtRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        oClLabel:SetPoint("LEFT", oCmSwatch, "RIGHT", 14, 0)
-        oClLabel:SetText("Low")
-        local oClColor = bo.colorLow or { r = 1.0, g = 0.2, b = 0.2 }
-        local oClSwatch = CreateColorSwatch(oCbtRow, oClColor, function(r, g, b)
-            OverrideSet("colorLow", { r = r, g = g, b = b })
-        end)
-        oClSwatch:SetPoint("LEFT", oClLabel, "RIGHT", 6, 0)
-        oClSwatch:Show()
-
-        -- Reset Defaults button
-        local oResetBtn = CreateFrame("Button", nil, oCbtRow, "UIPanelButtonTemplate")
-        oResetBtn:SetSize(60, 20)
-        oResetBtn:SetPoint("LEFT", oClSwatch, "RIGHT", 14, 0)
-        oResetBtn:SetText("Reset")
-        oResetBtn:SetScript("OnClick", function()
-            OverrideSet("colorHigh", { r = 0.2, g = 0.8, b = 0.2 })
-            OverrideSet("colorMed", { r = 1.0, g = 0.8, b = 0.0 })
-            OverrideSet("colorLow", { r = 1.0, g = 0.2, b = 0.2 }, true)
-        end)
-        oResetBtn:Show()
-        y = y + 28
-    end
-
-    -- ---- Icon ----
-    local oIconSec = CreateSectionLabel(parent, "Icon")
-    oIconSec:SetPoint("TOPLEFT", 0, -y)
-    oIconSec:Show()
-    y = y + 16
-
-    local oShowIconCheck = CreateCheckbox(parent, "Show Icon", function(checked)
-        OverrideSet("showIcon", checked)
-    end)
-    oShowIconCheck:SetPoint("TOPLEFT", 0, -y)
-    oShowIconCheck:SetChecked(bo.showIcon ~= false)
-    oShowIconCheck:Show()
-    y = y + 26
-
-    local oCurSizeMode = bo.iconSizeMode or "auto"
-    local oSizeModeGroup = CreateButtonGroup(parent, "Icon Size",
-        { { label = "Auto", value = "auto" }, { label = "Manual", value = "manual" } },
-        function() return bo.iconSizeMode or "auto" end,
-        function(val) OverrideSet("iconSizeMode", val, true) end
-    )
-    oSizeModeGroup:SetPoint("TOPLEFT", 0, -y)
-    oSizeModeGroup:Show()
-    y = y + 28
-
-    if oCurSizeMode == "manual" then
-        local oIconSzSlider = CreateSlider(parent, "Icon Size (px)", 8, 120, 1, CONTROL_WIDTH - 20, function(val)
-            OverrideSet("iconSize", val)
-        end)
-        oIconSzSlider:SetPoint("TOPLEFT", 0, -y)
-        oIconSzSlider:SetInitialValue(bo.iconSize or 20)
-        oIconSzSlider:Show()
-        y = y + 38
-    end
-
-    local oAspectDD = CreateScrollDropdown(parent, "Aspect", (CONTROL_WIDTH - 20) / 2 - 5,
-        function()
-            local opts = {}
-            for _, key in ipairs(ICON_ASPECT_ORDER) do
-                table.insert(opts, ICON_ASPECT_LABELS[key] or key)
-            end
-            return opts
-        end,
-        function()
-            local cur = bo.iconAspect or "1:1"
-            return ICON_ASPECT_LABELS[cur] or cur
-        end,
-        function(labelVal)
-            for _, key in ipairs(ICON_ASPECT_ORDER) do
-                if ICON_ASPECT_LABELS[key] == labelVal then
-                    OverrideSet("iconAspect", key)
-                    return
-                end
-            end
-        end
-    )
-    oAspectDD:SetPoint("TOPLEFT", 0, -y)
-    oAspectDD:SetValue(ICON_ASPECT_LABELS[bo.iconAspect or "1:1"] or "1:1 (Square)")
-    oAspectDD:Show()
-
-    local oPosGroup = CreateButtonGroup(parent, "Position",
-        { { label = "Left", value = "LEFT" }, { label = "Right", value = "RIGHT" } },
-        function() return bo.iconPosition or "LEFT" end,
-        function(val) OverrideSet("iconPosition", val) end
-    )
-    oPosGroup:SetPoint("TOPLEFT", (CONTROL_WIDTH - 20) / 2 + 5, -y - 10)
-    oPosGroup:Show()
-    y = y + 42
-
-    -- ---- Text ----
-    local oTxtSec = CreateSectionLabel(parent, "Text")
-    oTxtSec:SetPoint("TOPLEFT", 0, -y)
-    oTxtSec:Show()
-    y = y + 16
-
-    local oFontDD = CreateScrollDropdown(parent, "Font", CONTROL_WIDTH - 20,
-        function()
-            local list = Media and Media:GetFontList() or { "Friz Quadrata TT" }
-            local opts = { "(Default)" }
-            for _, name in ipairs(list) do table.insert(opts, name) end
-            return opts
-        end,
-        function()
-            local f = bo.font
-            if not f or f == "" then return "(Default)" end
-            return f
-        end,
-        function(val)
-            if val == "(Default)" then val = "" end
-            OverrideSet("font", val)
-        end
-    )
-    oFontDD:SetPoint("TOPLEFT", 0, -y)
-    local oFontDisplay = bo.font
-    if not oFontDisplay or oFontDisplay == "" then oFontDisplay = "(Default)" end
-    oFontDD:SetValue(oFontDisplay)
-    oFontDD:Show()
-    y = y + 40
-
-    local oNameSzSlider = CreateSlider(parent, "Name Font Size", 6, 24, 1, CONTROL_WIDTH - 20, function(val)
-        OverrideSet("nameFontSize", val)
-    end)
-    oNameSzSlider:SetPoint("TOPLEFT", 0, -y)
-    oNameSzSlider:SetInitialValue(bo.nameFontSize or 11)
-    oNameSzSlider:Show()
-    y = y + 36
-
-    local oTimeSzSlider = CreateSlider(parent, "Time Font Size", 6, 24, 1, CONTROL_WIDTH - 20, function(val)
-        OverrideSet("timeFontSize", val)
-    end)
-    oTimeSzSlider:SetPoint("TOPLEFT", 0, -y)
-    oTimeSzSlider:SetInitialValue(bo.timeFontSize or 11)
-    oTimeSzSlider:Show()
-    y = y + 36
-
-    local oShowNameCheck = CreateCheckbox(parent, "Show Spell Name", function(checked)
-        OverrideSet("showName", checked)
-    end)
-    oShowNameCheck:SetPoint("TOPLEFT", 0, -y)
-    oShowNameCheck:SetChecked(bo.showName ~= false)
-    oShowNameCheck:Show()
-
-    local oShowTimeCheck = CreateCheckbox(parent, "Show Time", function(checked)
-        OverrideSet("showTime", checked)
-    end)
-    oShowTimeCheck:SetPoint("TOPLEFT", 155, -y)
-    oShowTimeCheck:SetChecked(bo.showTime ~= false)
-    oShowTimeCheck:Show()
-    y = y + 28
-
-    -- Text offset sliders
-    local oHalfW = (CONTROL_WIDTH - 20) / 2 - 5
-
-    local oNxSlider = CreateSlider(parent, "Name Offset X", -100, 100, 1, oHalfW, function(val)
-        OverrideSet("nameOffsetX", val)
-    end)
-    oNxSlider:SetPoint("TOPLEFT", 0, -y)
-    oNxSlider:SetInitialValue(bo.nameOffsetX or 0)
-    oNxSlider:Show()
-
-    local oNySlider = CreateSlider(parent, "Name Offset Y", -100, 100, 1, oHalfW, function(val)
-        OverrideSet("nameOffsetY", val)
-    end)
-    oNySlider:SetPoint("TOPLEFT", oHalfW + 10, -y)
-    oNySlider:SetInitialValue(bo.nameOffsetY or 0)
-    oNySlider:Show()
-    y = y + 36
-
-    local oTxSlider = CreateSlider(parent, "Time Offset X", -100, 100, 1, oHalfW, function(val)
-        OverrideSet("timeOffsetX", val)
-    end)
-    oTxSlider:SetPoint("TOPLEFT", 0, -y)
-    oTxSlider:SetInitialValue(bo.timeOffsetX or 0)
-    oTxSlider:Show()
-
-    local oTySlider = CreateSlider(parent, "Time Offset Y", -100, 100, 1, oHalfW, function(val)
-        OverrideSet("timeOffsetY", val)
-    end)
-    oTySlider:SetPoint("TOPLEFT", oHalfW + 10, -y)
-    oTySlider:SetInitialValue(bo.timeOffsetY or 0)
-    oTySlider:Show()
-    y = y + 36
-
-    -- ---- Behavior ----
-    local oBehSec = CreateSectionLabel(parent, "Behavior")
-    oBehSec:SetPoint("TOPLEFT", 0, -y)
-    oBehSec:Show()
-    y = y + 16
-
-    local oInactiveCheck = CreateCheckbox(parent, "Show When Inactive (buff not active)", function(checked)
-        OverrideSet("showWhenInactive", checked)
-    end)
-    oInactiveCheck:SetPoint("TOPLEFT", 0, -y)
-    oInactiveCheck:SetChecked(bo.showWhenInactive == true)
-    oInactiveCheck:Show()
-    y = y + 30
-
-    local oFillGroup = CreateButtonGroup(parent, "Fill Mode",
-        {
-            { label = "Drain", value = "drain", tooltip = "Bar starts full, empties as buff ticks" },
-            { label = "Fill",  value = "fill",  tooltip = "Bar starts empty, fills as buff expires" },
-        },
-        function() return bo.fillMode or "drain" end,
-        function(val) OverrideSet("fillMode", val) end
-    )
-    oFillGroup:SetPoint("TOPLEFT", 0, -y)
-    oFillGroup:Show()
-    y = y + 30
-
-    local oDirGroup = CreateButtonGroup(parent, "Direction",
-        {
-            { label = "R", value = "RIGHT", tooltip = "Fill left to right (horizontal)" },
-            { label = "L", value = "LEFT",  tooltip = "Fill right to left (horizontal)" },
-            { label = "U", value = "UP",    tooltip = "Fill bottom to top (vertical)" },
-            { label = "D", value = "DOWN",  tooltip = "Fill top to bottom (vertical)" },
-        },
-        function() return bo.barDirection or "RIGHT" end,
-        function(newDir)
-            local oldDir = bo.barDirection or "RIGHT"
-            local wasVert = (oldDir == "UP" or oldDir == "DOWN")
-            local nowVert = (newDir == "UP" or newDir == "DOWN")
-
-            if wasVert ~= nowVert then
-                local w = bo.width or 200
-                local h = bo.height or 20
-                OverrideSet("width", h)
-                OverrideSet("height", w)
-            end
-
-            OverrideSet("barDirection", newDir, true)
-        end
-    )
-    local oDirBtnIdx = 0
-    for _, child in ipairs({oDirGroup:GetChildren()}) do
-        if child.GetObjectType and child:GetObjectType() == "Button" then
-            child:SetSize(34, 22)
-            child:ClearAllPoints()
-            child:SetPoint("LEFT", 80 + (oDirBtnIdx * 38), 0)
-            oDirBtnIdx = oDirBtnIdx + 1
-        end
-    end
-    oDirGroup:SetPoint("TOPLEFT", 0, -y)
-    oDirGroup:Show()
-    y = y + 36
-
     -- Section: Tips
     local secInfo = CreateSectionLabel(parent, "Tips")
     secInfo:SetPoint("TOPLEFT", 0, -y)
@@ -1665,124 +1195,17 @@ function BuffBarsUI:BuildDockSettingsUI(parent)
     y = y + 22
 
     local infoFrame = CreateFrame("Frame", nil, parent)
-    infoFrame:SetSize(CONTROL_WIDTH, 60)
+    infoFrame:SetSize(CONTROL_WIDTH, 80)
     infoFrame:SetPoint("TOPLEFT", 0, -y)
     infoFrame:Show()
     local infoFS = infoFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     infoFS:SetPoint("TOPLEFT", 8, 0)
     infoFS:SetWidth(CONTROL_WIDTH - 16)
     infoFS:SetJustifyH("LEFT")
-    infoFS:SetText("|cff666666Use |cff00ccff/tuicd buffbars layout|cff666666 to move the dock.\n\nAll docked bars now use these visual settings.|r")
-    y = y + 70
+    infoFS:SetText("|cff666666Use |cff00ccff/tuicd buffbars layout|cff666666 to move the dock.\n\nBuff bars appear when the tracked buff is active\nand drain down as the buff expires. Enable\n\"Show When Inactive\" on individual bars to keep\nthem visible at all times.|r")
+    y = y + 90
 
     parent:SetHeight(y + 10)
-end
-
--- ============================================================================
--- VISIBILITY TAB
--- ============================================================================
-
-function BuffBarsUI:BuildVisibilityUI(parent)
-    local y = 10
-    
-    local BuffBarsDock = TUICD.BuffBarsDock
-    local BuffBarsData = TUICD.BuffBarsData
-    
-    -- Helper to get/set dock settings
-    local function GetSetting(key)
-        local settings = BuffBarsData:GetDockSettings()
-        return settings[key]
-    end
-    
-    local function SetSetting(key, value)
-        BuffBarsData:SetDockSetting(key, value)
-        -- Update dock visibility
-        if BuffBarsDock and BuffBarsDock.UpdateVisibility then
-            BuffBarsDock:UpdateVisibility()
-        end
-    end
-    
-    -- Section header helper
-    local function CreateHeader(text)
-        local header = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        header:SetPoint("TOPLEFT", 0, -y)
-        header:SetText("|cffaaaaaa— " .. text .. " —|r")
-        header:Show()
-        y = y + 18
-        return header
-    end
-    
-    -- Checkbox helper
-    local function CreateVisCheckbox(text, key)
-        local check = CreateFrame("CheckButton", nil, parent, "InterfaceOptionsCheckButtonTemplate")
-        check:SetPoint("TOPLEFT", 20, -y)
-        check.Text:SetText(text)
-        check:SetChecked(GetSetting(key))
-        check:SetScript("OnClick", function(self)
-            SetSetting(key, self:GetChecked())
-        end)
-        check:Show()
-        y = y + 24
-        return check
-    end
-    
-    -- Title
-    local title = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    title:SetPoint("TOPLEFT", 0, -y)
-    title:SetText("|cffffd100Visibility Conditions|r")
-    title:Show()
-    y = y + 25
-    
-    -- Master toggle
-    local enableCheck = CreateFrame("CheckButton", nil, parent, "InterfaceOptionsCheckButtonTemplate")
-    enableCheck:SetPoint("TOPLEFT", 0, -y)
-    enableCheck.Text:SetText("Enable Visibility Rules")
-    enableCheck:SetChecked(GetSetting("visibilityEnabled"))
-    enableCheck:SetScript("OnClick", function(self)
-        SetSetting("visibilityEnabled", self:GetChecked())
-    end)
-    enableCheck:Show()
-    y = y + 24
-    
-    -- Hint text
-    local hint = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    hint:SetPoint("TOPLEFT", 20, -y)
-    hint:SetText("|cff888888When enabled, bars only show in checked situations:|r")
-    hint:Show()
-    y = y + 18
-    
-    -- Combat section
-    CreateHeader("Combat State")
-    CreateVisCheckbox("Show In Combat", "showInCombat")
-    CreateVisCheckbox("Show Out of Combat", "showOutOfCombat")
-    
-    y = y + 5
-    
-    -- Group section
-    CreateHeader("Group Type")
-    CreateVisCheckbox("Show Solo", "showSolo")
-    CreateVisCheckbox("Show in Party", "showInParty")
-    CreateVisCheckbox("Show in Raid", "showInRaid")
-    
-    y = y + 5
-    
-    -- Instance section
-    CreateHeader("Instance Type")
-    CreateVisCheckbox("Show in Arena", "showInArena")
-    CreateVisCheckbox("Show in Battleground", "showInBattleground")
-    CreateVisCheckbox("Show in Dungeon", "showInDungeon")
-    CreateVisCheckbox("Show in Delve", "showInDelve")
-    
-    y = y + 5
-    
-    -- Target / Mount section
-    CreateHeader("Target / Mount")
-    CreateVisCheckbox("Has Target", "showHasTarget")
-    CreateVisCheckbox("No Target", "showNoTarget")
-    CreateVisCheckbox("Mounted", "showMounted")
-    CreateVisCheckbox("Not Mounted", "showNotMounted")
-    
-    parent:SetHeight(y + 20)
 end
 
 -- ============================================================================
@@ -1792,9 +1215,14 @@ end
 function BuffBarsUI:CreatePanel()
     if mainPanel then return mainPanel end
 
-    local dockTo = TUICD.BarsHub and TUICD.BarsHub:GetPanel()
-    if not dockTo then
-        dockTo = TUICD.Settings and TUICD.Settings.hubPanel
+    -- Get dock target (Settings hub)
+    local dockTo = nil
+    if TUICD.Settings then
+        if TUICD.Settings.GetHubPanel then
+            dockTo = TUICD.Settings:GetHubPanel()
+        elseif TUICD.Settings.hubPanel then
+            dockTo = TUICD.Settings.hubPanel
+        end
     end
 
     mainPanel = CreateFrame("Frame", "TUICD_BuffBarsPanel", UIParent, "BackdropTemplate")
@@ -1832,7 +1260,7 @@ function BuffBarsUI:CreatePanel()
     -- ========================================
     local listBg = CreateFrame("Frame", nil, mainPanel, "BackdropTemplate")
     listBg:SetPoint("TOPLEFT", 15, -40)
-    listBg:SetSize(LIST_WIDTH, PANEL_HEIGHT - 210)
+    listBg:SetSize(LIST_WIDTH, PANEL_HEIGHT - 130)
     listBg:SetBackdrop({
         bgFile = "Interface\\Buttons\\WHITE8x8",
         edgeFile = "Interface\\Buttons\\WHITE8x8",
@@ -1855,7 +1283,7 @@ function BuffBarsUI:CreatePanel()
     -- ========================================
     local infoArea = CreateFrame("Frame", nil, mainPanel)
     infoArea:SetPoint("TOPLEFT", listBg, "BOTTOMLEFT", 0, -6)
-    infoArea:SetSize(LIST_WIDTH, 150)
+    infoArea:SetSize(LIST_WIDTH, 60)
 
     local infoLabel = infoArea:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     infoLabel:SetPoint("TOPLEFT", 2, 0)
@@ -1882,32 +1310,6 @@ function BuffBarsUI:CreatePanel()
         GameTooltip:Show()
     end)
     discoverBtn:SetScript("OnLeave", GameTooltip_Hide)
-
-    -- Clear All button
-    local clearAllBtn = CreateFrame("Button", nil, infoArea, "UIPanelButtonTemplate")
-    clearAllBtn:SetSize(LIST_WIDTH, 22)
-    clearAllBtn:SetPoint("TOPLEFT", discoverBtn, "BOTTOMLEFT", 0, -4)
-    clearAllBtn:SetText("|cffff4444Clear All|r")
-    clearAllBtn:SetScript("OnClick", function()
-        if not IsShiftKeyDown() then
-            TUICD:Print("Hold Shift and click to clear all buff bars.")
-            return
-        end
-        BuffBarsFrames:ClearPreviewBar()
-        BuffBarsFrames:DestroyAll()
-        local count = BuffBarsData:RemoveAllSlots()
-        selectedBarKey = nil
-        RefreshSpellList()
-        BuffBarsUI:RefreshConfigPanel()
-        TUICD:Print("Cleared " .. count .. " buff bar(s).")
-    end)
-    clearAllBtn:SetScript("OnEnter", function(self)
-        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-        GameTooltip:SetText("Clear All Buff Bars")
-        GameTooltip:AddLine("Removes every buff from the bars list.\n|cffff8888Shift-click to confirm.|r", 1, 1, 1, true)
-        GameTooltip:Show()
-    end)
-    clearAllBtn:SetScript("OnLeave", GameTooltip_Hide)
 
     -- ========================================
     -- Right side: Tab bar + Scrollable config
@@ -1947,7 +1349,6 @@ function BuffBarsUI:CreatePanel()
     local tabDefs = {
         { key = "spell", label = "Spell Config" },
         { key = "dock",  label = "Dock" },
-        { key = "visibility", label = "Visibility" },
     }
     local tabX = 0
     for _, def in ipairs(tabDefs) do
@@ -1985,17 +1386,11 @@ function BuffBarsUI:CreatePanel()
     configFrame:SetPoint("TOPLEFT", 6, -32)
     configFrame:SetPoint("BOTTOMRIGHT", -26, 6)
 
-    configScrollChild = CreateFrame("Frame", nil, configFrame)
+    configScrollChild = CreateFrame("Frame")
     configScrollChild:SetSize(CONTROL_WIDTH, 1)
 
-    dockScrollChild = CreateFrame("Frame", nil, configFrame)
+    dockScrollChild = CreateFrame("Frame")
     dockScrollChild:SetSize(CONTROL_WIDTH, 1)
-    dockScrollChild:Hide()
-
-    local visibilityScrollChild = CreateFrame("Frame", nil, configFrame)
-    visibilityScrollChild:SetSize(CONTROL_WIDTH, 1)
-    visibilityScrollChild:Hide()
-    BuffBarsUI._visibilityScrollChild = visibilityScrollChild
 
     configFrame:SetScrollChild(configScrollChild)
 
@@ -2029,10 +1424,10 @@ function BuffBarsUI:Show()
         self:CreatePanel()
     end
 
-    -- Dock to BarsHub
-    local dockTo = TUICD.BarsHub and TUICD.BarsHub:GetPanel()
-    if not dockTo then
-        dockTo = TUICD.Settings and TUICD.Settings.hubPanel
+    -- Dock to Settings Hub
+    local dockTo = nil
+    if TUICD.Settings and TUICD.Settings.GetHubPanel then
+        dockTo = TUICD.Settings:GetHubPanel()
     end
     if dockTo and mainPanel then
         mainPanel:ClearAllPoints()
@@ -2042,16 +1437,10 @@ function BuffBarsUI:Show()
     RefreshSpellList()
     self:RefreshConfigPanel()
     mainPanel:Show()
-
-    -- Restore preview for selected bar
-    if selectedBarKey then
-        BuffBarsFrames:SetPreviewBar(selectedBarKey)
-    end
 end
 
 function BuffBarsUI:Hide()
     if mainPanel then
-        BuffBarsFrames:ClearPreviewBar()
         CloseActivePopup()
         mainPanel:Hide()
     end

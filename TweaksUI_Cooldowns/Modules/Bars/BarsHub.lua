@@ -194,6 +194,7 @@ local function CreateHubPanel()
         GameTooltip:Hide()
     end)
     buttons.timeline = tlBtn
+    tlBtn:Hide()  -- Timeline disabled (secret anchors prevent combat positioning)
 
     -- On hide: close any active sub-panel
     hubPanel:SetScript("OnHide", function()

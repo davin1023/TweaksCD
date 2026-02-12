@@ -344,4 +344,201 @@ function DurationAPI:IsEmpoweredCast(unit)
     return isEmpowered == true, numEmpowerStages or 0
 end
 
+-- Get remaining seconds from a spell's Duration Object as a plain number.
+-- Returns nil when value is secret (caller should treat as "unknown" / fire immediately).
+function DurationAPI:GetSpellRemainingSeconds(spellID)
+    if not spellID or not C_Spell or not C_Spell.GetSpellCooldownDuration then return nil end
+    local ok, dObj = pcall(C_Spell.GetSpellCooldownDuration, spellID)
+    if not ok or not dObj then return nil end
+    local rok, remaining = pcall(dObj.GetRemainingDuration, dObj)
+    if not rok or not remaining then return nil end
+    if type(remaining) ~= "number" then return nil end
+    if IsSecret(remaining) then return nil end
+    return remaining
+end
+
+-- ============================================================================
+-- REAL COOLDOWN DETECTION (GCD-safe, secret-safe)
+--
+-- Multi-path GCD filtering:
+--   Path 1: isOnGCD field (if non-secret — secret bools can't be branched)
+--   Path 2: GetTotalDuration (if non-secret and ≤ 2s → GCD)
+--   Path 3: Known-real-CD cache + debounce (wait > 2s to confirm not GCD)
+--   Path 4: Unknown spell + all-secret → assume GCD (safe, prevents flashing)
+--
+-- IMPORTANT: Midnight's "if x then" on a secret value tests non-nil, not truthiness.
+-- So "if secretFalse then" → true! We MUST check issecretvalue before branching.
+--
+-- GCD BUG: When all values are secret, EVERY GCD cycle makes every spell's
+-- Duration Object briefly active. Without debounce, known spells would flash
+-- true→false→true on every GCD (~1.5s), triggering false on-ready alerts.
+-- ============================================================================
+
+-- Spells confirmed to have real CDs, learned from non-secret reads
+-- Persists across GCD cycles so combat reads can trust the cache
+DurationAPI._knownRealCDs = DurationAPI._knownRealCDs or {}
+
+-- Debounce timers: { [spellID] = GetTime() when first detected active }
+-- If spell stays active > 2s, it's a real CD (GCD is always < 2s)
+DurationAPI._activeTimers = DurationAPI._activeTimers or {}
+
+local GCD_DEBOUNCE_SEC = 2.0
+
+-- Check if a spell is on a REAL cooldown (not GCD), handling secret values.
+-- @param spellID: numeric spell ID
+-- @return isOnRealCD (bool), durationObj (or nil)
+function DurationAPI:IsRealCooldownActive(spellID)
+    if not spellID or not C_Spell then return false, nil end
+
+    -- Get Duration Object first (needed for all paths)
+    if not C_Spell.GetSpellCooldownDuration then return false, nil end
+    local ok, dObj = pcall(C_Spell.GetSpellCooldownDuration, spellID)
+    if not ok or not dObj then return false, nil end
+
+    -- Is anything active at all? (secret-safe)
+    if not self:IsActive(dObj) then
+        self._activeTimers[spellID] = nil  -- Reset debounce when CD fully expires
+        return false, nil
+    end
+
+    -- Path 1: isOnGCD from C_Spell.GetSpellCooldown
+    -- ONLY trust if the value is non-secret (secret bools can't be branched)
+    local gcdKnown = false  -- did we get a definitive answer?
+    local gcdResult = false -- true = is GCD, false = is real CD
+    if C_Spell.GetSpellCooldown then
+        pcall(function()
+            local cdInfo = C_Spell.GetSpellCooldown(spellID)
+            if cdInfo then
+                local gcd = cdInfo.isOnGCD
+                if gcd ~= nil then
+                    if issecretvalue and issecretvalue(gcd) then
+                        -- Secret boolean — can't branch on it, skip
+                    else
+                        gcdKnown = true
+                        gcdResult = (gcd == true)
+                    end
+                end
+            end
+        end)
+    end
+
+    if gcdKnown then
+        if gcdResult then
+            self._activeTimers[spellID] = nil
+            return false, nil  -- confirmed GCD
+        else
+            self._knownRealCDs[spellID] = true
+            self._activeTimers[spellID] = nil
+            return true, dObj  -- confirmed real CD
+        end
+    end
+
+    -- Path 2: Check total duration (if non-secret and ≤ 2s → GCD)
+    local totalSec = nil
+    pcall(function()
+        local total = dObj:GetTotalDuration()
+        if total and type(total) == "number" then
+            if not (issecretvalue and issecretvalue(total)) then
+                totalSec = total
+            end
+        end
+    end)
+
+    if totalSec then
+        if totalSec <= 2.0 then
+            self._activeTimers[spellID] = nil
+            return false, nil  -- GCD (≤ 2s)
+        else
+            self._knownRealCDs[spellID] = true
+            self._activeTimers[spellID] = nil
+            return true, dObj  -- real CD (> 2s)
+        end
+    end
+
+    -- Path 3: All values secret — debounce for GCD filtering
+    -- Even for known spells, we MUST debounce because every GCD cycle
+    -- makes all spell Duration Objects briefly active (~1.5s).
+    -- Only confirm real CD after the activation persists > 2s.
+    if not self._activeTimers[spellID] then
+        self._activeTimers[spellID] = GetTime()
+    end
+
+    local elapsed = GetTime() - self._activeTimers[spellID]
+    if elapsed >= GCD_DEBOUNCE_SEC then
+        -- Active for > 2s → definitely a real CD
+        return true, dObj
+    end
+
+    -- Path 4: Still in debounce window → assume GCD (safe default)
+    -- Prevents flashing every icon on each GCD pulse
+    return false, nil
+end
+
+-- ============================================================================
+-- COLOR CURVES (for secret-safe color-by-time)
+--
+-- Creates Curve objects that can be evaluated against Duration Objects:
+--   durObj:EvaluateRemainingPercent(curve)
+-- Returns secret values passable to SetVertexColor/SetStatusBarColor.
+-- Pattern proven by TellMeWhen addon.
+-- ============================================================================
+
+-- Create a pair of Curve objects for one color channel (normal + inverted)
+-- @param lowValue: value when remaining ≈ 0% (near expiry)
+-- @param midValue: value at 50% remaining
+-- @param highValue: value at 100% remaining (just started)
+-- @return curve, curveInverted (or nil, nil if all values equal)
+function DurationAPI:CreateChannelCurves(lowValue, midValue, highValue)
+    if not C_CurveUtil or not C_CurveUtil.CreateCurve then return nil, nil end
+    if not Enum or not Enum.LuaCurveType or not Enum.LuaCurveType.Linear then return nil, nil end
+    if lowValue == midValue and midValue == highValue then return nil, nil end
+
+    local ok, curve, inv = pcall(function()
+        -- Normal: 0% remaining = low, 50% = mid, 100% = high
+        local c = C_CurveUtil.CreateCurve()
+        c:SetType(Enum.LuaCurveType.Linear)
+        c:AddPoint(0, lowValue)    -- expired / near expiry
+        c:AddPoint(0.5, midValue)  -- halfway
+        c:AddPoint(1, highValue)   -- just started
+
+        -- Inverted: for drain bars
+        local i = C_CurveUtil.CreateCurve()
+        i:SetType(Enum.LuaCurveType.Linear)
+        i:AddPoint(0, highValue)
+        i:AddPoint(0.5, midValue)
+        i:AddPoint(1, lowValue)
+
+        return c, i
+    end)
+
+    if ok then return curve, inv end
+    return nil, nil
+end
+
+-- Create RGB Curve set from 3 color tables { r, g, b }
+-- @return { r, g, b } of Curve objects (nil channels where no change)
+function DurationAPI:CreateColorCurves(lowColor, midColor, highColor)
+    if not C_CurveUtil then return nil end
+    local rC = self:CreateChannelCurves(lowColor.r, midColor.r, highColor.r)
+    local gC = self:CreateChannelCurves(lowColor.g, midColor.g, highColor.g)
+    local bC = self:CreateChannelCurves(lowColor.b, midColor.b, highColor.b)
+    return { r = rC, g = gC, b = bC }
+end
+
+-- Evaluate color curves against a Duration Object
+-- @return r, g, b (secret values passable to SetVertexColor/SetStatusBarColor)
+function DurationAPI:EvaluateColorCurves(dObj, curves, defaultColor)
+    if not dObj or not curves then
+        return defaultColor.r, defaultColor.g, defaultColor.b
+    end
+    local ok, r, g, b = pcall(function()
+        local cr = curves.r and dObj:EvaluateRemainingPercent(curves.r) or defaultColor.r
+        local cg = curves.g and dObj:EvaluateRemainingPercent(curves.g) or defaultColor.g
+        local cb = curves.b and dObj:EvaluateRemainingPercent(curves.b) or defaultColor.b
+        return cr, cg, cb
+    end)
+    if ok then return r, g, b end
+    return defaultColor.r, defaultColor.g, defaultColor.b
+end
+
 return DurationAPI

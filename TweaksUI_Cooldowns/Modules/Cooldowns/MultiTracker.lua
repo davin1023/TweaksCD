@@ -154,6 +154,8 @@ local TRACKER_DEFAULTS = {
     onReadyPulseDuration = 0.4,
     onReadyPulseCount = 3,
     onReadyPulseTiming = 0,          -- -5 to 5: negative = before ready, 0 = on ready, positive = after ready
+    onReadySoundEnabled = false,
+    onReadySoundName = "None",
     -- Visibility
     visibilityEnabled = false,
     showInCombat = true,

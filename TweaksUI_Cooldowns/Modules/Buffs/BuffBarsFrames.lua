@@ -16,7 +16,6 @@ local BuffBarsFrames = TUICD.BuffBarsFrames
 local BuffBarsData  -- resolved lazily (load order)
 local SpellAPI      -- resolved lazily
 local Media         -- resolved lazily
-local StatusBarAPI  -- resolved lazily
 
 local function GetData()
     if not BuffBarsData then BuffBarsData = TUICD.BuffBarsData end
@@ -33,15 +32,16 @@ local function GetMedia()
     return Media
 end
 
-local function GetStatusBarAPI()
-    if not StatusBarAPI then StatusBarAPI = TUICD.StatusBarAPI end
-    return StatusBarAPI
-end
-
 -- Forward ref for dock integration
 local function GetDock()
     return TUICD.BuffBarsDock
 end
+
+-- ============================================================================
+-- COLOR-BY-TIME SUPPORT
+-- Uses cached non-secret milliseconds + GetTime() math (same as Bars module)
+-- This pattern works reliably in combat - no secret value issues
+-- ============================================================================
 
 -- ============================================================================
 -- CONSTANTS
@@ -61,9 +61,6 @@ local TEXT_UPDATE_HZ    = 0.05  -- 20Hz for smooth countdown + drain
 
 local barFrames = {}    -- [barKey] = frame
 local isLayoutMode = false
-
--- Config preview: force-show this bar even if disabled/inactive
-local previewBarKey = nil
 
 -- ============================================================================
 -- HELPERS
@@ -108,27 +105,54 @@ local function ResolveFontPath(config)
     return "Fonts\\FRIZQT__.TTF"
 end
 
--- Compute icon dimensions (width, height) respecting iconSizeMode and aspect ratio
--- barThickness = the bar dimension the icon should match in auto mode (height for horizontal bars)
-local function ComputeIconDimensions(config, barThickness)
-    if not config.showIcon then return 0, 0 end
-
-    local baseSize
-    if config.iconSizeMode == "manual" and config.iconSize and config.iconSize > 0 then
-        baseSize = config.iconSize
-    else
-        -- Auto: match bar thickness (height for horizontal, width for vertical)
-        baseSize = barThickness
+-- Compute icon dimensions (icons are always square, sized to bar height)
+local function ComputeIconSize(config, barHeight)
+    if not config.showIcon then return 0 end
+    if config.iconSize and config.iconSize > 0 then
+        return config.iconSize
     end
+    return barHeight  -- Match bar height by default
+end
 
-    local data = GetData()
-    local aspects = data and data.ICON_ASPECTS or { ["1:1"] = { w = 1, h = 1 } }
-    local aspect = aspects[config.iconAspect or "1:1"]
-    if not aspect then aspect = aspects["1:1"] or { w = 1, h = 1 } end
+-- Color-by-time: lerp between 3 colors based on remaining seconds
+local function LerpValue(a, b, t)
+    return a + (b - a) * t
+end
 
-    local iconH = baseSize
-    local iconW = baseSize * (aspect.w / aspect.h)
-    return math.floor(iconW + 0.5), math.floor(iconH + 0.5)
+local function GetTimeBasedColor(remaining, config)
+    local highSec = config.colorHighSeconds or 10
+    local medSec  = config.colorMedSeconds or 5
+    local cHigh = config.colorHigh or { r = 0.2, g = 0.8, b = 0.2 }  -- Green (lots of time)
+    local cMed  = config.colorMed  or { r = 1.0, g = 0.8, b = 0.0 }  -- Yellow (some time)
+    local cLow  = config.colorLow  or { r = 1.0, g = 0.2, b = 0.2 }  -- Red (expiring)
+
+    if remaining >= highSec then
+        return cHigh.r, cHigh.g, cHigh.b
+    elseif remaining >= medSec then
+        local t = (remaining - medSec) / (highSec - medSec)
+        return LerpValue(cMed.r, cHigh.r, t),
+               LerpValue(cMed.g, cHigh.g, t),
+               LerpValue(cMed.b, cHigh.b, t)
+    elseif remaining > 0 then
+        local t = remaining / medSec
+        return LerpValue(cLow.r, cMed.r, t),
+               LerpValue(cLow.g, cMed.g, t),
+               LerpValue(cLow.b, cMed.b, t)
+    else
+        return cLow.r, cLow.g, cLow.b
+    end
+end
+
+-- Calculate remaining seconds from cached non-secret milliseconds
+-- This matches the pattern from working Bars module - works in combat!
+local function GetRemainingFromState(state)
+    if state.startMs and state.durationMs then
+        local endSec = (state.startMs + state.durationMs) / 1000
+        return endSec - GetTime()
+    elseif state.expirationTime and type(state.expirationTime) == "number" then
+        return state.expirationTime - GetTime()
+    end
+    return nil
 end
 
 -- Border helpers (4-texture border)
@@ -143,20 +167,6 @@ end
 local function SetBorderColor(border, r, g, b, a)
     if not border then return end
     for _, tex in ipairs(border) do tex:SetColorTexture(r, g, b, a) end
-end
-
--- Direction helpers (ported from BarsFrames.lua)
-local function IsVertical(dir)
-    return dir == "UP" or dir == "DOWN"
-end
-
-local function GetOrientation(dir)
-    return IsVertical(dir) and "VERTICAL" or "HORIZONTAL"
-end
-
-local function GetFillStyle(dir)
-    -- RIGHT/UP = STANDARD,  LEFT/DOWN = REVERSE
-    return (dir == "LEFT" or dir == "DOWN") and "REVERSE" or "STANDARD"
 end
 
 -- ============================================================================
@@ -185,42 +195,52 @@ local GLOBAL_DEFAULTS = {
     barDirection    = "RIGHT",
     fillMode        = "drain",
     showWhenInactive = false,
+    colorByTime     = false,
+    colorHighSeconds = 10,
+    colorMedSeconds  = 5,
+    colorHigh       = { r = 0.2, g = 0.8, b = 0.2 },
+    colorMed        = { r = 1.0, g = 0.8, b = 0.0 },
+    colorLow        = { r = 1.0, g = 0.2, b = 0.2 },
     nameOffsetX     = 0,
     nameOffsetY     = 0,
     timeOffsetX     = 0,
     timeOffsetY     = 0,
-    -- Color by duration
-    colorByTime     = false,
-    colorHigh       = { r = 0.2, g = 0.8, b = 0.2 },  -- lots of time left = green
-    colorMed        = { r = 1.0, g = 0.8, b = 0.0 },  -- half remaining = yellow
-    colorLow        = { r = 1.0, g = 0.2, b = 0.2 },  -- near expiry = red
 }
 
 local function GetEffectiveConfig(barKey)
     local data = GetData()
     if not data then return GLOBAL_DEFAULTS end
 
-    -- Use data layer's GetEffectiveConfig which handles dock overrides
-    local effectiveConfig = data:GetEffectiveConfig(barKey)
-    if not effectiveConfig then return GLOBAL_DEFAULTS end
+    local spellConfig = data:GetSpellConfig(barKey)
+    if not spellConfig then return GLOBAL_DEFAULTS end
 
-    -- Merge with GLOBAL_DEFAULTS for any missing keys
+    -- Read global overrides from DB (dockSettings contains shared bar settings)
+    local db = data:GetDB()
+    local globals = db and db.dockSettings or {}
+
+    -- Merge: spell overrides > global overrides > hardcoded defaults
     local cfg = {}
     for k, v in pairs(GLOBAL_DEFAULTS) do
-        if effectiveConfig[k] ~= nil then
-            cfg[k] = effectiveConfig[k]
+        local spellVal = spellConfig[k]
+        if spellVal ~= nil then
+            cfg[k] = spellVal
         else
-            cfg[k] = v
+            local globalVal = globals[k]
+            if globalVal ~= nil then
+                cfg[k] = globalVal
+            else
+                cfg[k] = v
+            end
         end
     end
 
-    -- Always pull identity fields from effective config directly
-    cfg.name      = effectiveConfig.name
-    cfg.texture   = effectiveConfig.texture
-    cfg.iconID    = effectiveConfig.iconID or effectiveConfig.texture
-    cfg.enabled   = effectiveConfig.enabled
-    cfg.type      = effectiveConfig.type
-    cfg.slotIndex = effectiveConfig.slotIndex
+    -- Always pull these from spell config directly
+    cfg.name      = spellConfig.name
+    cfg.texture   = spellConfig.texture
+    cfg.iconID    = spellConfig.iconID or spellConfig.texture
+    cfg.enabled   = spellConfig.enabled
+    cfg.type      = spellConfig.type
+    cfg.slotIndex = spellConfig.slotIndex
 
     return cfg
 end
@@ -236,37 +256,21 @@ local function CreateBarFrame(barKey)
     if not config then return nil end
 
     local data = GetData()
-    local slotIndex = data and data.GetSlotIndexForBarKey(barKey)
-    if not slotIndex then
-        local id = data and data.ParseBarKey(barKey)
-        slotIndex = (id and id <= 100) and id or nil
-    end
+    local slotIndex = data and data.ParseBarKey(barKey)
     local safeKey = barKey:gsub("[^%w]", "_")
     local frameName = "TUICD_BuffBar_" .. safeKey
 
     local width  = config.width or DEFAULT_WIDTH
     local height = config.height or DEFAULT_HEIGHT
-    local initDir = config.barDirection or "RIGHT"
-    local isVert = IsVertical(initDir)
-    local iconMatchDim = isVert and width or height
-    local iconW, iconH = ComputeIconDimensions(config, iconMatchDim)
-    local showIcon = config.showIcon and iconH > 0
-
-    -- Frame dimensions depend on orientation
-    local totalWidth, totalHeight
-    if isVert then
-        totalWidth = math.max(width, showIcon and iconW or 0)
-        totalHeight = height + (showIcon and (iconH + ICON_PADDING) or 0)
-    else
-        totalWidth = width + (showIcon and (iconW + ICON_PADDING) or 0)
-        totalHeight = math.max(height, iconH)
-    end
+    local iconSize = ComputeIconSize(config, height)
+    local showIcon = config.showIcon and iconSize > 0
+    local totalWidth = width + (showIcon and (iconSize + ICON_PADDING) or 0)
 
     -- ========================================
     -- Main container
     -- ========================================
     local frame = CreateFrame("Frame", frameName, UIParent)
-    frame:SetSize(totalWidth, totalHeight)
+    frame:SetSize(totalWidth, height)
     frame:SetFrameStrata(DEFAULT_STRATA)
     frame:SetFrameLevel(DEFAULT_LEVEL)
     frame:SetClampedToScreen(true)
@@ -279,24 +283,14 @@ local function CreateBarFrame(barKey)
     -- Icon
     -- ========================================
     local icon = frame:CreateTexture(frameName .. "_Icon", "ARTWORK")
-    icon:SetSize(iconW, iconH)
+    icon:SetSize(iconSize, iconSize)
     frame.icon = icon
 
     if showIcon then
-        if isVert then
-            -- Vertical: icon at TOP or BOTTOM
-            if config.iconPosition == "RIGHT" then
-                icon:SetPoint("BOTTOM", frame, "BOTTOM", 0, 0)
-            else
-                icon:SetPoint("TOP", frame, "TOP", 0, 0)
-            end
+        if config.iconPosition == "RIGHT" then
+            icon:SetPoint("RIGHT", frame, "RIGHT", 0, 0)
         else
-            -- Horizontal: icon at LEFT or RIGHT
-            if config.iconPosition == "RIGHT" then
-                icon:SetPoint("RIGHT", frame, "RIGHT", 0, 0)
-            else
-                icon:SetPoint("LEFT", frame, "LEFT", 0, 0)
-            end
+            icon:SetPoint("LEFT", frame, "LEFT", 0, 0)
         end
         -- Zoom crop for square icon in potentially non-square display
         icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
@@ -316,21 +310,12 @@ local function CreateBarFrame(barKey)
     -- ========================================
     -- Status bar region
     -- ========================================
-    local bgBar
-    if isVert then
-        local barOffsetT = 0
-        if showIcon and config.iconPosition ~= "RIGHT" then
-            barOffsetT = -(iconH + ICON_PADDING)
-        end
-        bgBar = CreateFrame("Frame", frameName .. "_BG", frame)
-        bgBar:SetPoint("TOP", frame, "TOP", 0, barOffsetT)
-        bgBar:SetSize(width, height)
-    else
-        local barOffsetL = showIcon and (config.iconPosition ~= "RIGHT") and (iconW + ICON_PADDING) or 0
-        bgBar = CreateFrame("Frame", frameName .. "_BG", frame)
-        bgBar:SetPoint("LEFT", frame, "LEFT", barOffsetL, 0)
-        bgBar:SetSize(width, height)
-    end
+    local barOffsetL = showIcon and (config.iconPosition ~= "RIGHT") and (iconSize + ICON_PADDING) or 0
+
+    -- Background frame
+    local bgBar = CreateFrame("Frame", frameName .. "_BG", frame)
+    bgBar:SetPoint("LEFT", frame, "LEFT", barOffsetL, 0)
+    bgBar:SetSize(width, height)
     frame.bgBar = bgBar
 
     local bgColorTex = bgBar:CreateTexture(nil, "BACKGROUND")
@@ -379,24 +364,6 @@ local function CreateBarFrame(barKey)
         or "Interface\\TargetingFrame\\UI-StatusBar"
     bar:SetStatusBarTexture(texPath)
     bar:SetStatusBarColor(config.barColor.r, config.barColor.g, config.barColor.b, config.barColor.a)
-
-    -- Initial orientation + fill style from barDirection
-    pcall(function() bar:SetOrientation(GetOrientation(initDir)) end)
-    local sbarAPI = GetStatusBarAPI()
-    if sbarAPI then
-        sbarAPI:SetFillStyle(bar, GetFillStyle(initDir))
-    end
-
-    -- Cache on frame for re-assertion after SetTimerDuration
-    frame._barOrientation = GetOrientation(initDir)
-    frame._barFillStyle = GetFillStyle(initDir)
-    frame._barIsVert = isVert
-
-    -- Rotate texture 90° for vertical bars so the gradient follows the fill direction
-    if isVert then
-        local bt = bar:GetStatusBarTexture()
-        if bt then bt:SetTexCoord(0, 1, 0, 0, 1, 1, 1, 0) end
-    end
 
     -- ========================================
     -- Text overlays (on separate high-level frame to ensure visibility)
@@ -481,39 +448,6 @@ local function CreateBarFrame(barKey)
     frame:Hide()
 
     barFrames[barKey] = frame
-
-    -- ========================================
-    -- Register with Layout system (TUIFrame per bar)
-    -- ========================================
-    local safeKeyForLayout = data and data.SanitizeKey(barKey) or safeKey
-    if TUICD.Layout and TUICD.Layout.RegisterElement then
-        local name = config.name or ("Buff Slot " .. (slotIndex or "?"))
-        local displayName = name .. " (Buff)"
-        local count = 0
-        for _ in pairs(barFrames) do count = count + 1 end
-        
-        local tuiFrame = TUICD.TUIFrame:New("buffbar_" .. safeKeyForLayout, {
-            name = "Buff Bar: " .. displayName,
-            category = "Buff Bar",
-            width = frame:GetWidth(),
-            height = frame:GetHeight(),
-            defaultX = 0,
-            defaultY = 100 - (count or 0) * 28,
-        })
-        if tuiFrame then
-            frame:SetParent(tuiFrame.frame)
-            frame:ClearAllPoints()
-            frame:SetAllPoints(tuiFrame.frame)
-            frame._tuiFrame = tuiFrame
-
-            TUICD.Layout:RegisterElement("buffbar_" .. safeKeyForLayout, {
-                name = "Buff Bar: " .. displayName,
-                category = "Buff Bar",
-                tuiFrame = tuiFrame,
-            })
-        end
-    end
-
     return frame
 end
 
@@ -528,55 +462,22 @@ function BuffBarsFrames:ApplyConfig(barKey)
     local config = GetEffectiveConfig(barKey)
     if not config then return end
 
-    local dir = config.barDirection or "RIGHT"
-    local isVert = IsVertical(dir)
     local width  = config.width or DEFAULT_WIDTH
     local height = config.height or DEFAULT_HEIGHT
+    local iconSize = ComputeIconSize(config, height)
+    local showIcon = config.showIcon and iconSize > 0
+    local totalWidth = width + (showIcon and (iconSize + ICON_PADDING) or 0)
 
-    -- For vertical bars, icon auto-size matches bar width (the "thickness")
-    local iconMatchDim = isVert and width or height
-    local iconW, iconH = ComputeIconDimensions(config, iconMatchDim)
-    local showIcon = config.showIcon and iconH > 0
+    frame:SetSize(totalWidth, height)
 
-    -- ========================================
-    -- Frame dimensions
-    -- ========================================
-    local totalWidth, totalHeight
-    if isVert then
-        totalWidth = math.max(width, showIcon and iconW or 0)
-        totalHeight = height + (showIcon and (iconH + ICON_PADDING) or 0)
-    else
-        totalWidth = width + (showIcon and (iconW + ICON_PADDING) or 0)
-        totalHeight = math.max(height, iconH)
-    end
-
-    frame:SetSize(totalWidth, totalHeight)
-
-    -- Resize TUIFrame parent if registered with layout system
-    if frame._tuiFrame and frame._tuiFrame.frame then
-        frame._tuiFrame.frame:SetSize(totalWidth, totalHeight)
-    end
-
-    -- ========================================
-    -- Icon placement
-    -- ========================================
-    frame.icon:SetSize(iconW, iconH)
+    -- Icon
+    frame.icon:SetSize(iconSize, iconSize)
     if showIcon then
         frame.icon:ClearAllPoints()
-        if isVert then
-            -- Vertical: LEFT config → TOP, RIGHT config → BOTTOM
-            if config.iconPosition == "RIGHT" then
-                frame.icon:SetPoint("BOTTOM", frame, "BOTTOM", 0, 0)
-            else
-                frame.icon:SetPoint("TOP", frame, "TOP", 0, 0)
-            end
+        if config.iconPosition == "RIGHT" then
+            frame.icon:SetPoint("RIGHT", frame, "RIGHT", 0, 0)
         else
-            -- Horizontal: standard left/right
-            if config.iconPosition == "RIGHT" then
-                frame.icon:SetPoint("RIGHT", frame, "RIGHT", 0, 0)
-            else
-                frame.icon:SetPoint("LEFT", frame, "LEFT", 0, 0)
-            end
+            frame.icon:SetPoint("LEFT", frame, "LEFT", 0, 0)
         end
         frame.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
         frame.icon:SetTexture(config.iconID or 134400)
@@ -587,66 +488,18 @@ function BuffBarsFrames:ApplyConfig(barKey)
         frame.iconBorder:Hide()
     end
 
-    -- ========================================
-    -- Status bar placement
-    -- ========================================
+    -- Bar region
+    local barOffsetL = showIcon and (config.iconPosition ~= "RIGHT") and (iconSize + ICON_PADDING) or 0
     frame.bgBar:ClearAllPoints()
-    if isVert then
-        local barOffsetT = 0
-        if showIcon and config.iconPosition ~= "RIGHT" then
-            barOffsetT = -(iconH + ICON_PADDING)
-        end
-        frame.bgBar:SetPoint("TOP", frame, "TOP", 0, barOffsetT)
-        frame.bgBar:SetSize(width, height)
-    else
-        local barOffsetL = 0
-        if showIcon and config.iconPosition ~= "RIGHT" then
-            barOffsetL = iconW + ICON_PADDING
-        end
-        frame.bgBar:SetPoint("LEFT", frame, "LEFT", barOffsetL, 0)
-        frame.bgBar:SetSize(width, height)
-    end
+    frame.bgBar:SetPoint("LEFT", frame, "LEFT", barOffsetL, 0)
+    frame.bgBar:SetSize(width, height)
 
-    -- ========================================
-    -- Orientation + fill style
-    -- ========================================
-    local orientation = GetOrientation(dir)
-    local fillStyle = GetFillStyle(dir)
-
-    pcall(function() frame.bar:SetOrientation(orientation) end)
-    local sbarAPI = GetStatusBarAPI()
-    if sbarAPI then
-        sbarAPI:SetFillStyle(frame.bar, fillStyle)
-    end
-
-    -- Cache on frame so UpdateBarDisplay can re-assert after SetTimerDuration
-    -- (SetTimerDuration may reset orientation to horizontal)
-    frame._barOrientation = orientation
-    frame._barFillStyle = fillStyle
-    frame._barIsVert = isVert
-
-    -- ========================================
     -- Textures & colors
-    -- ========================================
     local media = GetMedia()
     local texPath = (media and media.GetStatusBarTexture and media:GetStatusBarTexture(config.barTexture))
         or "Interface\\TargetingFrame\\UI-StatusBar"
     frame.bar:SetStatusBarTexture(texPath)
-
-    -- Rotate texture 90° for vertical bars so the gradient follows the fill direction
-    local barTex = frame.bar:GetStatusBarTexture()
-    if barTex then
-        if isVert then
-            barTex:SetTexCoord(0, 1, 0, 0, 1, 1, 1, 0)
-        else
-            barTex:SetTexCoord(0, 0, 0, 1, 1, 0, 1, 1)
-        end
-    end
-
-    -- Set bar color (skip if colorByTime - that's handled later with curves)
-    if not config.colorByTime then
-        frame.bar:SetStatusBarColor(config.barColor.r, config.barColor.g, config.barColor.b, config.barColor.a or 1)
-    end
+    frame.bar:SetStatusBarColor(config.barColor.r, config.barColor.g, config.barColor.b, config.barColor.a or 1)
 
     local bgc = config.backgroundColor
     if frame.bgBar.colorTex then
@@ -656,9 +509,7 @@ function BuffBarsFrames:ApplyConfig(barKey)
     local bdc = config.borderColor
     SetBorderColor(frame.barBorder, bdc.r, bdc.g, bdc.b, bdc.a or 1)
 
-    -- ========================================
-    -- Text anchoring (direction-aware + user offsets)
-    -- ========================================
+    -- Text
     local fontPath = ResolveFontPath(config)
     frame.nameText:SetFont(fontPath, config.nameFontSize or 11, "OUTLINE")
     frame.nameText:SetText(config.name or "")
@@ -666,40 +517,6 @@ function BuffBarsFrames:ApplyConfig(barKey)
 
     frame.timeText:SetFont(fontPath, config.timeFontSize or 11, "OUTLINE")
     frame.timeText:SetShown(config.showTime ~= false)
-
-    local nox = config.nameOffsetX or 0
-    local noy = config.nameOffsetY or 0
-    local tox = config.timeOffsetX or 0
-    local toy = config.timeOffsetY or 0
-
-    frame.nameText:ClearAllPoints()
-    frame.timeText:ClearAllPoints()
-
-    if isVert then
-        -- Vertical: center text horizontally, name at start end, time at fill end
-        if dir == "UP" then
-            frame.nameText:SetPoint("BOTTOM", frame.bar, "BOTTOM", nox, 3 + noy)
-            frame.timeText:SetPoint("TOP", frame.bar, "TOP", tox, -3 + toy)
-        else  -- DOWN
-            frame.nameText:SetPoint("TOP", frame.bar, "TOP", nox, -3 + noy)
-            frame.timeText:SetPoint("BOTTOM", frame.bar, "BOTTOM", tox, 3 + toy)
-        end
-        frame.nameText:SetJustifyH("CENTER")
-        frame.timeText:SetJustifyH("CENTER")
-    else
-        -- Horizontal: name at leading edge, time at trailing edge
-        if dir == "LEFT" then
-            frame.nameText:SetPoint("RIGHT", frame.bar, "RIGHT", -4 + nox, noy)
-            frame.nameText:SetJustifyH("RIGHT")
-            frame.timeText:SetPoint("LEFT", frame.bar, "LEFT", 4 + tox, toy)
-            frame.timeText:SetJustifyH("LEFT")
-        else  -- RIGHT (default)
-            frame.nameText:SetPoint("LEFT", frame.bar, "LEFT", 4 + nox, noy)
-            frame.nameText:SetJustifyH("LEFT")
-            frame.timeText:SetPoint("RIGHT", frame.bar, "RIGHT", -4 + tox, toy)
-            frame.timeText:SetJustifyH("RIGHT")
-        end
-    end
 end
 
 -- ============================================================================
@@ -716,8 +533,7 @@ local function RestorePosition(barKey, frame)
         frame:SetPoint(pos.point or "CENTER", UIParent, pos.point or "CENTER", pos.x or 0, pos.y or 0)
     else
         -- Default position: stagger bars vertically
-        local slotIndex = data.GetSlotIndexForBarKey(barKey) or data.ParseBarKey(barKey) or 1
-        if slotIndex > 20 then slotIndex = 1 end  -- Safety: spellID fallback
+        local slotIndex = data.ParseBarKey(barKey) or 1
         frame:ClearAllPoints()
         frame:SetPoint("CENTER", UIParent, "CENTER", 0, 100 - (slotIndex - 1) * 28)
     end
@@ -757,8 +573,6 @@ timerFrame:SetScript("OnUpdate", function(self, elapsed)
                         local remaining = state.expirationTime - GetTime()
                         if remaining > 0 then
                             local pct = math.min(1, math.max(0, remaining / state.duration))
-                            local cfgFM = config and config.fillMode
-                            if cfgFM == "fill" then pct = 1 - pct end
                             frame.bar:SetValue(pct)
                         else
                             -- Buff expired
@@ -786,38 +600,14 @@ timerFrame:SetScript("OnUpdate", function(self, elapsed)
                         end
                     end
                 end
-
-                -- COLOR BY DURATION: Curve-based (works with secret values)
+                
+                -- COLOR-BY-TIME UPDATE: Uses cached non-secret milliseconds
+                -- Same pattern as working Bars module - works in combat!
                 if config and config.colorByTime then
-                    local DurationAPI = TUICD.DurationAPI
-                    if DurationAPI and DurationAPI.EvaluateColorCurves and state.auraInstanceID then
-                        local getAuraDurationFunc = C_UnitAuras and (C_UnitAuras.GetAuraDuration or C_UnitAuras.GetUnitAuraDuration)
-                        if getAuraDurationFunc then
-                            local ok = pcall(function()
-                                local dObj = getAuraDurationFunc("player", state.auraInstanceID)
-                                if dObj then
-                                    if not frame._buffColorCurves then
-                                        frame._buffColorCurves = DurationAPI:CreateColorCurves(
-                                            config.colorLow  or { r = 1.0, g = 0.2, b = 0.2 },
-                                            config.colorMed  or { r = 1.0, g = 0.8, b = 0.0 },
-                                            config.colorHigh or { r = 0.2, g = 0.8, b = 0.2 }
-                                        )
-                                    end
-                                    if frame._buffColorCurves then
-                                        local bc = config.barColor or { r = 0.26, g = 0.65, b = 1.0 }
-                                        local r, g, b = DurationAPI:EvaluateColorCurves(dObj, frame._buffColorCurves, bc)
-                                        frame.bar:SetStatusBarColor(r, g, b)
-                                        -- Cache last successful color to prevent flickering
-                                        frame._lastCBTColor = { r = r, g = g, b = b }
-                                    end
-                                end
-                            end)
-                            -- On failure, reapply last successful color instead of resetting
-                            if not ok and frame._lastCBTColor then
-                                pcall(frame.bar.SetStatusBarColor, frame.bar,
-                                    frame._lastCBTColor.r, frame._lastCBTColor.g, frame._lastCBTColor.b)
-                            end
-                        end
+                    local rem = GetRemainingFromState(state)
+                    if rem and rem > 0 then
+                        local r, g, b = GetTimeBasedColor(rem, config)
+                        frame.bar:SetStatusBarColor(r, g, b)
                     end
                 end
             elseif frame:IsShown() then
@@ -845,24 +635,9 @@ function BuffBarsFrames:StopTimer()
 end
 
 -- Called by UI when a setting changes - reapply config and update display
--- Called by UI when a setting changes - reapply config and update display
 function BuffBarsFrames:OnConfigChanged(barKey)
-    -- Invalidate curve cache for this bar so new colors take effect
-    local frame = barFrames[barKey]
-    if frame then
-        frame._buffColorCurves = nil
-        frame._lastCBTColor = nil
-    end
     self:ApplyConfig(barKey)
     self:UpdateBarDisplay(barKey)
-end
-
--- Invalidate cached color curves on all bars (called when dock overrides change colors)
-function BuffBarsFrames:InvalidateAllColorCurves()
-    for _, frame in pairs(barFrames) do
-        frame._buffColorCurves = nil
-        frame._lastCBTColor = nil
-    end
 end
 
 -- ============================================================================
@@ -875,9 +650,7 @@ function BuffBarsFrames:UpdateBarDisplay(barKey)
     if not data then return end
 
     local config = GetEffectiveConfig(barKey)
-    local isPreview = (barKey == previewBarKey)
-
-    if not config or (not config.enabled and not isPreview) then
+    if not config or not config.enabled then
         if frame and frame:IsShown() then
             frame:Hide()
             local dock = GetDock()
@@ -909,30 +682,6 @@ function BuffBarsFrames:UpdateBarDisplay(barKey)
         return
     end
 
-    -- Config preview: show selected bar with placeholder even if disabled/inactive
-    if isPreview then
-        local wouldNormallyShow = config.enabled and
-            ((state and state.isActive and state.auraInstanceID) or config.showWhenInactive)
-        if not wouldNormallyShow then
-            local wasHidden = not frame:IsShown()
-            frame:Show()
-            frame.bgBar:Show()
-            ShowBorder(frame.barBorder)
-            frame.bar:SetMinMaxValues(0, 1)
-            frame.bar:SetValue(0.65)
-            frame.nameText:SetText(config.name or barKey)
-            frame.timeText:SetText("12s")
-            frame.layoutOverlay:Hide()
-            frame:EnableMouse(false)
-            if wasHidden then
-                local dock = GetDock()
-                if dock then dock:OnBarShown(barKey) end
-            end
-            return
-        end
-        -- Bar would show normally, fall through to real display
-    end
-
     -- Normal mode
     frame.layoutOverlay:Hide()
     frame:EnableMouse(false)
@@ -962,38 +711,17 @@ function BuffBarsFrames:UpdateBarDisplay(barKey)
 
         -- ALWAYS update timer bar from current Duration Object on every poll
         -- ElkBuffBars does this on every OnUpdate - SetTimerDuration handles refresh internally
-        local isDrain = (config.fillMode ~= "fill")
         if C_UnitAuras then
             local getAuraDurationFunc = C_UnitAuras.GetAuraDuration or C_UnitAuras.GetUnitAuraDuration
             if getAuraDurationFunc then
                 pcall(function()
                     local durationObj = getAuraDurationFunc("player", state.auraInstanceID)
                     if durationObj and frame.bar.SetTimerDuration then
-                        if isDrain then
-                            -- Drain mode: bar starts full, empties (show remaining time)
-                            frame.bar:SetTimerDuration(durationObj, nil, Enum.StatusBarTimerDirection.RemainingTime)
-                        else
-                            -- Fill mode: bar starts empty, fills (show elapsed time)
-                            frame.bar:SetTimerDuration(durationObj)
-                        end
+                        frame.bar:SetTimerDuration(durationObj, nil, Enum.StatusBarTimerDirection.RemainingTime)
                         frame._usingTimerDuration = true
                         frame._manualBarUpdate = false
                     end
                 end)
-            end
-        end
-
-        -- Re-assert orientation after SetTimerDuration (it may reset to horizontal)
-        if frame._barOrientation then
-            pcall(function() frame.bar:SetOrientation(frame._barOrientation) end)
-            local sbarAPI = GetStatusBarAPI()
-            if sbarAPI and frame._barFillStyle then
-                sbarAPI:SetFillStyle(frame.bar, frame._barFillStyle)
-            end
-            -- Re-apply texture rotation for vertical bars
-            if frame._barIsVert then
-                local barTex = frame.bar:GetStatusBarTexture()
-                if barTex then barTex:SetTexCoord(0, 1, 0, 0, 1, 1, 1, 0) end
             end
         end
         
@@ -1006,10 +734,9 @@ function BuffBarsFrames:UpdateBarDisplay(barKey)
             if not InCombatLockdown() and state.expirationTime and state.duration and state.duration > 0 then
                 local remaining = state.expirationTime - GetTime()
                 local pct = math.min(1, math.max(0, remaining / state.duration))
-                if not isDrain then pct = 1 - pct end  -- Fill mode: invert
                 frame.bar:SetValue(pct)
             else
-                frame.bar:SetValue(isDrain and 1 or 0)
+                frame.bar:SetValue(1)
             end
         end
         
@@ -1044,18 +771,19 @@ function BuffBarsFrames:UpdateBarDisplay(barKey)
             end
         end
 
-        -- Bar color (initial - colorByTime will override in OnUpdate tick)
+        -- Bar color: colorByTime uses cached milliseconds for combat-safe calculations
+        -- Same pattern as working Bars module - no secret value issues
         if config.colorByTime then
-            -- Use last successful curve color if available to prevent flicker
-            if frame._lastCBTColor then
-                frame.bar:SetStatusBarColor(frame._lastCBTColor.r, frame._lastCBTColor.g, frame._lastCBTColor.b)
+            local rem = GetRemainingFromState(state)
+            if rem and rem > 0 then
+                local r, g, b = GetTimeBasedColor(rem, config)
+                frame.bar:SetStatusBarColor(r, g, b)
             else
-                -- First time: start with midpoint color; curves will refine on next tick
-                local cMed = config.colorMed or { r = 1.0, g = 0.8, b = 0.0 }
-                frame.bar:SetStatusBarColor(cMed.r, cMed.g, cMed.b)
+                -- Fallback to static color if no timing data
+                frame.bar:SetStatusBarColor(config.barColor.r, config.barColor.g, config.barColor.b)
             end
-            -- NOTE: curve cache is only invalidated by OnConfigChanged/InvalidateAllColorCurves
         else
+            -- Static color
             frame.bar:SetStatusBarColor(config.barColor.r, config.barColor.g, config.barColor.b)
         end
 
@@ -1124,70 +852,27 @@ end
 -- LAYOUT MODE
 -- ============================================================================
 
-function BuffBarsFrames:EnterLayoutMode()
-    isLayoutMode = true
-
-    local data = GetData()
-    if not data then return end
-
-    local dockEnabled = data:IsDockEnabled()
-    local dock = GetDock()
-
-    if dockEnabled and dock then
-        -- Dock layout mode: dock handles all positioning
-        dock:EnterLayoutMode()
-        -- Still show overlays on individual bars for identification
-        for barKey, frame in pairs(barFrames) do
-            frame:Show()
-            if frame.layoutOverlay then
-                frame.layoutOverlay:Show()
-            end
-            frame.bar:SetMinMaxValues(0, 1)
-            frame.bar:SetValue(0.65)
-            frame.timeText:SetText("12s")
-        end
-    else
-        -- Standalone layout mode: each bar is individually draggable
-        for barKey, frame in pairs(barFrames) do
-            frame:EnableMouse(true)
-            frame:Show()
-            if frame.layoutOverlay then
-                frame.layoutOverlay:Show()
-            end
-            frame.bar:SetMinMaxValues(0, 1)
-            frame.bar:SetValue(0.65)
-            frame.timeText:SetText("12s")
-        end
-    end
-end
-
-function BuffBarsFrames:ExitLayoutMode()
-    isLayoutMode = false
-
-    local data = GetData()
-    if not data then return end
-
-    local dockEnabled = data:IsDockEnabled()
-    local dock = GetDock()
-
-    if dockEnabled and dock then
-        dock:ExitLayoutMode()
-    end
-
-    for barKey, frame in pairs(barFrames) do
-        frame:EnableMouse(false)
-        if frame.layoutOverlay then
-            frame.layoutOverlay:Hide()
-        end
-        self:UpdateBarDisplay(barKey)
-    end
-end
-
 function BuffBarsFrames:SetLayoutMode(enabled)
-    if enabled then
-        self:EnterLayoutMode()
-    else
-        self:ExitLayoutMode()
+    isLayoutMode = enabled
+
+    local data = GetData()
+    if not data then return end
+
+    for barKey, config in pairs(data:GetTrackedSpells()) do
+        if config.enabled then
+            if enabled then
+                -- Show all bars in layout mode
+                self:UpdateBarDisplay(barKey)
+            else
+                -- Return to normal display
+                local frame = barFrames[barKey]
+                if frame then
+                    frame.layoutOverlay:Hide()
+                    frame:EnableMouse(false)
+                end
+                self:UpdateBarDisplay(barKey)
+            end
+        end
     end
 end
 
@@ -1302,53 +987,6 @@ function BuffBarsFrames:HandleSlashCommand(args)
         return false  -- Not handled
     end
     return true
-end
-
--- ============================================================================
--- CONFIG PREVIEW (force-show selected bar in settings panel)
--- ============================================================================
-
-function BuffBarsFrames:SetPreviewBar(barKey)
-    local oldKey = previewBarKey
-    previewBarKey = barKey
-
-    -- Hide old preview if it was only showing because of preview
-    if oldKey and oldKey ~= barKey and barFrames[oldKey] then
-        self:UpdateBarDisplay(oldKey)
-    end
-
-    -- Show new preview bar
-    if barKey then
-        if not barFrames[barKey] then
-            local frame = CreateBarFrame(barKey)
-            if frame then RestorePosition(barKey, frame) end
-        end
-        if barFrames[barKey] then
-            self:ApplyConfig(barKey)
-            self:UpdateBarDisplay(barKey)
-        end
-        -- Force dock visible for preview
-        local dock = GetDock()
-        if dock then dock:UpdateVisibility() end
-    end
-end
-
-function BuffBarsFrames:ClearPreviewBar()
-    local oldKey = previewBarKey
-    previewBarKey = nil
-
-    if oldKey and barFrames[oldKey] then
-        -- Re-evaluate: normal display rules apply again
-        self:UpdateBarDisplay(oldKey)
-    end
-
-    -- Let dock re-evaluate visibility
-    local dock = GetDock()
-    if dock then dock:UpdateVisibility() end
-end
-
-function BuffBarsFrames:GetPreviewBarKey()
-    return previewBarKey
 end
 
 return BuffBarsFrames

@@ -573,6 +573,32 @@ end
 
 -- Returns r, g, b for the bar based on remaining seconds and config thresholds
 -- Smoothly interpolates between colorHigh -> colorMed -> colorLow
+-- Curve-based color-by-time: works with secret values via EvaluateRemainingPercent
+-- Cache curves per config hash to avoid recreating every frame
+local colorCurveCache = {}  -- { [cacheKey] = { r = curve, g = curve, b = curve } }
+
+local function GetOrCreateColorCurves(config)
+    local cHigh = config.colorHigh or { r = 1.0, g = 0.2, b = 0.2 }
+    local cMed  = config.colorMed  or { r = 1.0, g = 0.8, b = 0.0 }
+    local cLow  = config.colorLow  or { r = 0.2, g = 0.8, b = 0.2 }
+    
+    -- Simple cache key from color values
+    local key = string.format("%.2f%.2f%.2f%.2f%.2f%.2f%.2f%.2f%.2f",
+        cHigh.r, cHigh.g, cHigh.b, cMed.r, cMed.g, cMed.b, cLow.r, cLow.g, cLow.b)
+    
+    if colorCurveCache[key] then return colorCurveCache[key] end
+    
+    if DurationAPI and DurationAPI.CreateColorCurves then
+        local curves = DurationAPI:CreateColorCurves(cLow, cMed, cHigh)
+        if curves then
+            colorCurveCache[key] = curves
+            return curves
+        end
+    end
+    return nil
+end
+
+-- Fallback color-by-time using non-secret remaining (only works outside combat)
 local function GetTimeBasedColor(remaining, config)
     local highSec = config.colorHighSeconds or 10
     local medSec  = config.colorMedSeconds or 5
@@ -581,16 +607,13 @@ local function GetTimeBasedColor(remaining, config)
     local cLow  = config.colorLow  or { r = 0.2, g = 0.8, b = 0.2 }
 
     if remaining >= highSec then
-        -- Above high threshold: solid high color
         return cHigh.r, cHigh.g, cHigh.b
     elseif remaining >= medSec then
-        -- Between med and high: lerp from med to high
         local t = (remaining - medSec) / (highSec - medSec)
         return LerpValue(cMed.r, cHigh.r, t),
                LerpValue(cMed.g, cHigh.g, t),
                LerpValue(cMed.b, cHigh.b, t)
     elseif remaining > 0 then
-        -- Between 0 and med: lerp from low to med
         local t = remaining / medSec
         return LerpValue(cLow.r, cMed.r, t),
                LerpValue(cLow.g, cMed.g, t),
@@ -598,15 +621,6 @@ local function GetTimeBasedColor(remaining, config)
     else
         return cLow.r, cLow.g, cLow.b
     end
-end
-
--- Calculate remaining seconds from cached non-secret ms
-local function GetRemainingFromState(state)
-    if state.cdStartMs and state.cdDurationMs then
-        local endSec = (state.cdStartMs + state.cdDurationMs) / 1000
-        return endSec - GetTime()
-    end
-    return nil
 end
 
 local textUpdateFrame = CreateFrame("Frame")
@@ -630,12 +644,30 @@ textUpdateFrame:SetScript("OnUpdate", function(self, elapsed)
                 if state.isActive and state.durationObj then
                     anyActive = true
 
-                    -- Color-by-time: update bar color from cached non-secret ms
+                    local dObj = state.durationObj
+
+                    -- TMW approach: SetValue with secret-safe Duration Object methods
+                    -- SetMinMaxValues and SetValue both accept secret numbers
+                    pcall(function()
+                        local totalDuration = dObj:GetTotalDuration()
+                        local remaining = dObj:GetRemainingDuration()
+                        frame.bar:SetMinMaxValues(0, totalDuration)
+                        if config.fillMode ~= "fill" then
+                            -- Drain: value = remaining (full → empty)
+                            frame.bar:SetValue(remaining)
+                        else
+                            -- Fill: value = elapsed (empty → full)
+                            frame.bar:SetValue(dObj:GetElapsedDuration())
+                        end
+                    end)
+
+                    -- Color-by-time: Curve approach (works with secrets)
                     if config.colorByTime then
-                        local rem = GetRemainingFromState(state)
-                        if rem and rem > 0 then
-                            local r, g, b = GetTimeBasedColor(rem, config)
-                            frame.bar:SetStatusBarColor(r, g, b)
+                        local curves = GetOrCreateColorCurves(config)
+                        if curves and DurationAPI then
+                            local bc = config.barColor or { r = 0.26, g = 0.65, b = 1.0 }
+                            local r, g, b = DurationAPI:EvaluateColorCurves(dObj, curves, bc)
+                            pcall(function() frame.bar:SetStatusBarColor(r, g, b) end)
                         end
                     end
 
@@ -801,56 +833,32 @@ function BarsFrames:UpdateBarDisplay(barKey)
         if dock then dock:OnBarShown(barKey) end
     end
 
-    -- Apply timer from duration object (Midnight native API)
-    -- SetTimerDuration makes the bar auto-update from the Duration Object
-    -- No manual OnUpdate arithmetic needed (and secret values forbid it)
+    -- Apply Duration Object (TMW-proven approach: SetMinMaxValues + SetValue per tick)
+    -- SetValue and SetMinMaxValues both accept secret numbers from Duration Objects
     if state and state.isActive and state.durationObj then
         -- Show background + border while on cooldown
         frame.bgBar:Show()
-        -- Re-assert background color via ColorTexture
         local bgc = config.backgroundColor or { r = 0.1, g = 0.1, b = 0.1, a = 0.8 }
         if frame.bgBar.colorTex then
             frame.bgBar.colorTex:SetColorTexture(bgc.r, bgc.g, bgc.b, bgc.a or 0.8)
         end
         ShowBorder(frame.barBorder)
 
-        local isDrain = (config.fillMode ~= "fill")
-
-        if isDrain then
-            -- Drain mode: bar starts full, drains to empty (show remaining time)
-            local ok = false
-
-            -- Path 1: use cached direction enum via wrapper
-            if HAS_TIMER_DIRECTION then
-                ok = pcall(function()
-                    StatusBarAPI:SetTimerDuration(frame.bar, state.durationObj, nil, TIMER_DIR_REMAINING)
-                end)
+        -- Set up min/max from Duration Object's total duration (accepts secrets)
+        pcall(function()
+            local totalDuration = state.durationObj:GetTotalDuration()
+            frame.bar:SetMinMaxValues(0, totalDuration)
+            -- Initial fill value
+            if config.fillMode ~= "fill" then
+                frame.bar:SetValue(state.durationObj:GetRemainingDuration())
+            else
+                frame.bar:SetValue(state.durationObj:GetElapsedDuration())
             end
-
-            -- Path 2: try direct API call with enum (bypasses wrapper caching)
-            if not ok then
-                ok = pcall(function()
-                    local dir = Enum.StatusBarTimerDirection.Remaining
-                    frame.bar:SetTimerDuration(state.durationObj, nil, dir)
-                end)
-            end
-
-            -- Path 3: last resort, at least show elapsed (fill) rather than nothing
-            if not ok then
-                pcall(function()
-                    frame.bar:SetTimerDuration(state.durationObj)
-                end)
-            end
-        else
-            -- Fill mode: bar starts empty, fills to full (show elapsed time)
-            pcall(function()
-                frame.bar:SetTimerDuration(state.durationObj)
-            end)
-        end
+        end)
 
         frame._manualDrain = false
 
-        -- Re-assert orientation after SetTimerDuration (it may reset to horizontal)
+        -- Re-assert orientation
         if frame._barOrientation then
             pcall(function() frame.bar:SetOrientation(frame._barOrientation) end)
             StatusBarAPI:SetFillStyle(frame.bar, frame._barFillStyle)
@@ -860,12 +868,13 @@ function BarsFrames:UpdateBarDisplay(barKey)
             end
         end
 
-        -- Set initial bar color (colorByTime or static)
+        -- Set initial bar color
         if config.colorByTime then
-            local rem = GetRemainingFromState(state)
-            if rem and rem > 0 then
-                local r, g, b = GetTimeBasedColor(rem, config)
-                frame.bar:SetStatusBarColor(r, g, b)
+            local curves = GetOrCreateColorCurves(config)
+            if curves and DurationAPI then
+                local bc = config.barColor or { r = 0.26, g = 0.65, b = 1.0 }
+                local r, g, b = DurationAPI:EvaluateColorCurves(state.durationObj, curves, bc)
+                pcall(function() frame.bar:SetStatusBarColor(r, g, b) end)
             end
         else
             local bc = config.barColor or { r = 0.26, g = 0.65, b = 1.0 }

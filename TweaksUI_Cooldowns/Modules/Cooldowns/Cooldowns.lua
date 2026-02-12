@@ -7012,7 +7012,7 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
             elseif tabKey == "text" then
                 contentHeight = 440
             elseif tabKey == "alerts" then
-                contentHeight = 840  -- two full alert blocks (onStart with timing, onEnd without)
+                contentHeight = 1000  -- two full alert blocks with sound sections
             else
                 contentHeight = 440
             end
@@ -7905,6 +7905,68 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
                 y = y - 20
             end
             
+            -- === SOUND SECTION ===
+            y = y - 8
+            local soundHeader = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            soundHeader:SetPoint("TOPLEFT", 15, y)
+            soundHeader:SetText("|cff00ccff— Sound —|r")
+            y = y - 16
+            
+            ac.soundEnableCheck = CreateFrame("CheckButton", nil, parent, "UICheckButtonTemplate")
+            ac.soundEnableCheck:SetPoint("TOPLEFT", 20, y)
+            ac.soundEnableCheck.text = ac.soundEnableCheck:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            ac.soundEnableCheck.text:SetPoint("LEFT", ac.soundEnableCheck, "RIGHT", 2, 0)
+            ac.soundEnableCheck.text:SetText("Enable Sound")
+            ac.soundEnableCheck:SetScript("OnClick", function(self)
+                if currentAlertSpellID and BuffHighlights then
+                    BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "SoundEnabled", self:GetChecked())
+                end
+            end)
+            y = y - 24
+            
+            local soundLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            soundLabel:SetPoint("TOPLEFT", 35, y)
+            soundLabel:SetText("Sound:")
+            
+            local soundDDName = "TUICD_BuffPerIcon_" .. prefix .. "_SoundDD"
+            ac.soundDropdown = CreateFrame("Frame", soundDDName, parent, "UIDropDownMenuTemplate")
+            ac.soundDropdown:SetPoint("LEFT", soundLabel, "RIGHT", -8, -2)
+            UIDropDownMenu_SetWidth(ac.soundDropdown, 140)
+            UIDropDownMenu_SetText(ac.soundDropdown, "None")
+            
+            UIDropDownMenu_Initialize(ac.soundDropdown, function(self, level)
+                local soundList = TUICD.Media:GetSoundListWithPresets()
+                for _, sName in ipairs(soundList) do
+                    local info = UIDropDownMenu_CreateInfo()
+                    info.text = sName
+                    info.checked = false
+                    if currentAlertSpellID and BuffHighlights then
+                        info.checked = (BuffHighlights:GetIconAlertSetting(currentAlertSpellID, prefix .. "SoundName") or "None") == sName
+                    end
+                    info.func = function()
+                        if currentAlertSpellID and BuffHighlights then
+                            BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "SoundName", sName)
+                        end
+                        UIDropDownMenu_SetText(ac.soundDropdown, sName)
+                    end
+                    UIDropDownMenu_AddButton(info, level)
+                end
+            end)
+            
+            ac.soundPlayBtn = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
+            ac.soundPlayBtn:SetPoint("LEFT", ac.soundDropdown, "RIGHT", -10, 2)
+            ac.soundPlayBtn:SetSize(40, 20)
+            ac.soundPlayBtn:SetText("Play")
+            ac.soundPlayBtn:SetScript("OnClick", function()
+                if currentAlertSpellID and BuffHighlights and TUICD.Media then
+                    local snd = BuffHighlights:GetIconAlertSetting(currentAlertSpellID, prefix .. "SoundName") or "None"
+                    if snd ~= "None" then
+                        TUICD.Media:PlaySound(snd, "Master")
+                    end
+                end
+            end)
+            y = y - 30
+            
             return y, ac
         end
         
@@ -8078,6 +8140,15 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
                             BuffHighlights:SetIconAlertSetting(currentAlertSpellID, prefix .. "PulseTiming", val)
                         end
                     end)
+                end
+                
+                -- Sound controls
+                if ac.soundEnableCheck then
+                    ac.soundEnableCheck:SetChecked(get("SoundEnabled") or false)
+                end
+                if ac.soundDropdown then
+                    local sndName = get("SoundName") or "None"
+                    UIDropDownMenu_SetText(ac.soundDropdown, sndName)
                 end
                 
                 -- Update grey state for thickness/scale
@@ -8698,8 +8769,8 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
         
         local glowStyleOptions = {
             { label = "Pixel Border", value = "pixel" },
-            { label = "Shine Flash", value = "shine" },
-            { label = "Spell Glow", value = "glow" },
+                { label = "Shine Flash", value = "shine" },
+                { label = "Spell Glow", value = "glow" },
         }
         
         local thicknessSlider, scaleSlider
@@ -8839,6 +8910,52 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
             pulseTimingHint:SetJustifyH("LEFT")
             y = y - 18
         end
+        
+        -- Sound section
+        y = y - 10
+        y = CreateHeader(parent, y, sectionLabel .. " Sound")
+        
+        y = CreateCheckbox(parent, y, "Enable Sound",
+            function() return GetSetting(trackerKey, prefix .. "SoundEnabled") end,
+            function(v) SetSetting(trackerKey, prefix .. "SoundEnabled", v) end)
+        
+        local soundLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        soundLabel:SetPoint("TOPLEFT", 35, y)
+        soundLabel:SetText("Sound:")
+        
+        local soundDDName = "TUICD_AlertSound_" .. trackerKey .. "_" .. prefix .. "_tracker"
+        local soundDropdown = CreateFrame("Frame", soundDDName, parent, "UIDropDownMenuTemplate")
+        soundDropdown:SetPoint("LEFT", soundLabel, "RIGHT", -8, -2)
+        UIDropDownMenu_SetWidth(soundDropdown, 160)
+        
+        local currentSoundName = GetSetting(trackerKey, prefix .. "SoundName") or "None"
+        UIDropDownMenu_SetText(soundDropdown, currentSoundName)
+        
+        UIDropDownMenu_Initialize(soundDropdown, function(self, level)
+            local soundList = TUICD.Media:GetSoundListWithPresets()
+            for _, sName in ipairs(soundList) do
+                local info = UIDropDownMenu_CreateInfo()
+                info.text = sName
+                info.checked = (GetSetting(trackerKey, prefix .. "SoundName") or "None") == sName
+                info.func = function()
+                    SetSetting(trackerKey, prefix .. "SoundName", sName)
+                    UIDropDownMenu_SetText(soundDropdown, sName)
+                end
+                UIDropDownMenu_AddButton(info, level)
+            end
+        end)
+        
+        local soundPlayBtn = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
+        soundPlayBtn:SetPoint("LEFT", soundDropdown, "RIGHT", -10, 2)
+        soundPlayBtn:SetSize(40, 20)
+        soundPlayBtn:SetText("Play")
+        soundPlayBtn:SetScript("OnClick", function()
+            local snd = GetSetting(trackerKey, prefix .. "SoundName") or "None"
+            if snd ~= "None" and TUICD.Media then
+                TUICD.Media:PlaySound(snd, "Master")
+            end
+        end)
+        y = y - 30
         
         return y
     end
@@ -9025,6 +9142,52 @@ function Cooldowns:CreateTrackerPanel(trackerKey)
             pulseTimingHint:SetText("|cff888888Negative = fire before ready, 0 = on ready, positive = after ready|r")
             pulseTimingHint:SetJustifyH("LEFT")
             y = y - 18
+            
+            -- Sound section
+            y = y - 10
+            y = CreateHeader(parent, y, "On Ready Sound")
+            
+            y = CreateCheckbox(parent, y, "Enable On Ready Sound",
+                function() return GetSetting(trackerKey, "onReadySoundEnabled") end,
+                function(v) SetSetting(trackerKey, "onReadySoundEnabled", v) end)
+            
+            local orSoundLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            orSoundLabel:SetPoint("TOPLEFT", 35, y)
+            orSoundLabel:SetText("Sound:")
+            
+            local orSoundDDName = "TUICD_OnReadySound_" .. trackerKey
+            local orSoundDropdown = CreateFrame("Frame", orSoundDDName, parent, "UIDropDownMenuTemplate")
+            orSoundDropdown:SetPoint("LEFT", orSoundLabel, "RIGHT", -8, -2)
+            UIDropDownMenu_SetWidth(orSoundDropdown, 160)
+            
+            local orCurrentSound = GetSetting(trackerKey, "onReadySoundName") or "None"
+            UIDropDownMenu_SetText(orSoundDropdown, orCurrentSound)
+            
+            UIDropDownMenu_Initialize(orSoundDropdown, function(self, level)
+                local soundList = TUICD.Media:GetSoundListWithPresets()
+                for _, sName in ipairs(soundList) do
+                    local info = UIDropDownMenu_CreateInfo()
+                    info.text = sName
+                    info.checked = (GetSetting(trackerKey, "onReadySoundName") or "None") == sName
+                    info.func = function()
+                        SetSetting(trackerKey, "onReadySoundName", sName)
+                        UIDropDownMenu_SetText(orSoundDropdown, sName)
+                    end
+                    UIDropDownMenu_AddButton(info, level)
+                end
+            end)
+            
+            local orSoundPlayBtn = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
+            orSoundPlayBtn:SetPoint("LEFT", orSoundDropdown, "RIGHT", -10, 2)
+            orSoundPlayBtn:SetSize(40, 20)
+            orSoundPlayBtn:SetText("Play")
+            orSoundPlayBtn:SetScript("OnClick", function()
+                local snd = GetSetting(trackerKey, "onReadySoundName") or "None"
+                if snd ~= "None" and TUICD.Media then
+                    TUICD.Media:PlaySound(snd, "Master")
+                end
+            end)
+            y = y - 30
             
             parent:SetHeight(math.abs(y) + 20)
         end  -- if trackerKey == "buffs"
@@ -10184,6 +10347,51 @@ function Cooldowns:BuildPerIconTab(parent, trackerType)
         block.pulseTimingHint:Hide()
         alertsGroup[#alertsGroup + 1] = block.pulseTimingHint
         
+        -- === SOUND SECTION ===
+        block.soundSectionLabel = parentFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        block.soundSectionLabel:SetPoint("TOPLEFT", block.pulseTimingHint, "BOTTOMLEFT", 0, -10)
+        block.soundSectionLabel:SetText("|cff00ccff— Sound —|r")
+        block.soundSectionLabel:Hide()
+        alertsGroup[#alertsGroup + 1] = block.soundSectionLabel
+        
+        block.soundEnableCheck = CreateFrame("CheckButton", nil, parentFrame, "UICheckButtonTemplate")
+        block.soundEnableCheck:SetPoint("TOPLEFT", block.soundSectionLabel, "BOTTOMLEFT", 0, -4)
+        block.soundEnableCheck.text = block.soundEnableCheck:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        block.soundEnableCheck.text:SetPoint("LEFT", block.soundEnableCheck, "RIGHT", 2, 0)
+        block.soundEnableCheck.text:SetText("Enable Sound")
+        block.soundEnableCheck:Hide()
+        alertsGroup[#alertsGroup + 1] = block.soundEnableCheck
+        
+        block.soundLabel = parentFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        block.soundLabel:SetPoint("TOPLEFT", block.soundEnableCheck, "BOTTOMLEFT", 0, -4)
+        block.soundLabel:SetText("Sound:")
+        block.soundLabel:SetTextColor(0.8, 0.8, 0.8)
+        block.soundLabel:Hide()
+        alertsGroup[#alertsGroup + 1] = block.soundLabel
+        
+        local cdSoundDDName = "TUICD_CDPerIcon_" .. prefix .. "_SoundDD"
+        block.soundDropdown = CreateFrame("Frame", cdSoundDDName, parentFrame, "UIDropDownMenuTemplate")
+        block.soundDropdown:SetPoint("LEFT", block.soundLabel, "RIGHT", -8, -2)
+        UIDropDownMenu_SetWidth(block.soundDropdown, 130)
+        UIDropDownMenu_SetText(block.soundDropdown, "None")
+        block.soundDropdown:Hide()
+        alertsGroup[#alertsGroup + 1] = block.soundDropdown
+        
+        block.soundPlayBtn = CreateFrame("Button", nil, parentFrame, "UIPanelButtonTemplate")
+        block.soundPlayBtn:SetPoint("LEFT", block.soundDropdown, "RIGHT", -10, 2)
+        block.soundPlayBtn:SetSize(40, 20)
+        block.soundPlayBtn:SetText("Play")
+        block.soundPlayBtn:Hide()
+        alertsGroup[#alertsGroup + 1] = block.soundPlayBtn
+        
+        -- Bottom anchor (left-aligned spacer below the dropdown row)
+        block.bottomAnchor = parentFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        block.bottomAnchor:SetPoint("TOPLEFT", block.soundLabel, "BOTTOMLEFT", 0, -20)
+        block.bottomAnchor:SetText("")
+        block.bottomAnchor:SetHeight(1)
+        block.bottomAnchor:Hide()
+        alertsGroup[#alertsGroup + 1] = block.bottomAnchor
+        
         return block
     end
     
@@ -10201,7 +10409,7 @@ function Cooldowns:BuildPerIconTab(parent, trackerType)
         "Trigger when the cooldown finishes and the spell becomes available.",
         -5, 5, "Negative = before ready, 0 = on ready, Positive = after ready")
     
-    alertControls.onCooldown = BuildCDAlertBlock(controlsPanel, alertControls.onReady.pulseTimingHint,
+    alertControls.onCooldown = BuildCDAlertBlock(controlsPanel, alertControls.onReady.bottomAnchor,
         "onCooldown", "On Cooldown Start",
         "Trigger when the spell goes on cooldown.",
         0, 5, "0 = on cooldown start, Positive = seconds after")
@@ -10277,7 +10485,7 @@ function Cooldowns:BuildPerIconTab(parent, trackerType)
         elseif tabKey == "text" then
             controlsPanel:SetHeight(700)
         elseif tabKey == "alerts" then
-            controlsPanel:SetHeight(800)
+            controlsPanel:SetHeight(1000)
         end
     end
     
@@ -11104,10 +11312,9 @@ function Cooldowns:BuildPerIconTab(parent, trackerType)
             end
             
             local GLOW_STYLES = {
-                { label = "Pixel Glow", value = "pixel" },
-                { label = "Proc Glow", value = "proc" },
-                { label = "AutoCast Shine", value = "autocast" },
-                { label = "Button Glow", value = "button" },
+                { label = "Pixel Border", value = "pixel" },
+                { label = "Shine Flash", value = "shine" },
+                { label = "Spell Glow", value = "glow" },
             }
             
             -- Glow enable
@@ -11215,6 +11422,36 @@ function Cooldowns:BuildPerIconTab(parent, trackerType)
                 setAlert("pulseTiming", val)
             end)
             
+            -- Sound enable
+            local soundEnabled = getAlert("soundEnabled")
+            block.soundEnableCheck:SetChecked(soundEnabled or false)
+            block.soundEnableCheck:SetScript("OnClick", function(self2) setAlert("soundEnabled", self2:GetChecked()) end)
+            
+            -- Sound dropdown
+            local curSound = getAlert("soundName") or "None"
+            UIDropDownMenu_SetText(block.soundDropdown, curSound)
+            UIDropDownMenu_Initialize(block.soundDropdown, function(self2, level)
+                local soundList = TUICD.Media:GetSoundListWithPresets()
+                for _, sName in ipairs(soundList) do
+                    local info = UIDropDownMenu_CreateInfo()
+                    info.text = sName
+                    info.checked = (getAlert("soundName") or "None") == sName
+                    info.func = function()
+                        setAlert("soundName", sName)
+                        UIDropDownMenu_SetText(block.soundDropdown, sName)
+                    end
+                    UIDropDownMenu_AddButton(info, level)
+                end
+            end)
+            
+            -- Sound play button
+            block.soundPlayBtn:SetScript("OnClick", function()
+                local snd = getAlert("soundName") or "None"
+                if snd ~= "None" and TUICD.Media then
+                    TUICD.Media:PlaySound(snd, "Master")
+                end
+            end)
+            
             -- Grey out controls when parent is disabled
             local glowAlpha = glowEnabled and 1.0 or 0.4
             block.glowStyleLabel:SetAlpha(glowAlpha)
@@ -11238,6 +11475,11 @@ function Cooldowns:BuildPerIconTab(parent, trackerType)
             block.pulseTimingLabel:SetAlpha(pulseAlpha)
             block.pulseTimingSlider:SetAlpha(pulseAlpha)
             block.pulseTimingValue:SetAlpha(pulseAlpha)
+            
+            local soundAlpha = soundEnabled and 1.0 or 0.4
+            block.soundLabel:SetAlpha(soundAlpha)
+            block.soundDropdown:SetAlpha(soundAlpha)
+            block.soundPlayBtn:SetAlpha(soundAlpha)
         end
         
         -- Update both alert blocks
@@ -13111,7 +13353,7 @@ function Cooldowns:CreateCustomTrackersPanel()
         
         local procHint = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         procHint:SetPoint("TOPLEFT", 20, y)
-        procHint:SetText("|cff888888Thickness → Pixel Border  |  Scale → Spell Glow / Blizzard|r")
+        procHint:SetText("|cff888888Thickness → Pixel Border  |  Scale → Spell Glow|r")
         y = y - 20
         
         parent:SetHeight(math.abs(y) + 20)
@@ -13457,8 +13699,8 @@ function Cooldowns:CreateCustomTrackersPanel()
         
         local glowStyleOptions = {
             { label = "Pixel Border", value = "pixel" },
-            { label = "Shine Flash", value = "shine" },
-            { label = "Spell Glow", value = "glow" },
+                { label = "Shine Flash", value = "shine" },
+                { label = "Spell Glow", value = "glow" },
         }
         
         local orThicknessSlider, orScaleSlider

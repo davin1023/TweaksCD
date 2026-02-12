@@ -117,6 +117,12 @@ local isEnabled = false
 local wasOnCooldown = {}      -- { [spellID] = true } tracks spells that were on CD
 local onReadyHolding = {}     -- { [spellID] = { holdUntil, icon, data, glowActive, pulseActive, pulsesPlayed } }
 
+-- Sticky CD state: once a spell is confirmed on CD, it stays "on CD" until
+-- the Duration Object says remaining is 0 (via Format returning non-secret).
+-- This prevents the debounce in IsRealCooldownActive from flickering icons
+-- on every GCD pulse. Same pattern as bars (event-driven state, frame-driven render).
+local spellOnCD = {}          -- { [spellID] = true } sticky "is on real cooldown" flag
+
 -- Forward declarations for on-ready effect helpers (defined later, called from ReleaseIcon)
 local CleanupOnReadyEffects
 
@@ -127,6 +133,9 @@ local function dprint(...)
         print("|cff00ccff[TL-Frames]|r", ...)
     end
 end
+
+-- Secret value detection
+local IsSecret = issecretvalue or function() return false end
 
 function TimelineFrames:SetDebug(enabled)
     debugMode = enabled
@@ -316,6 +325,44 @@ local function CreateIcon(parent)
     icon.targetX = 0
     icon.verticalOffset = 0
     
+    -- Position StatusBar: invisible bar spanning timeline width.
+    -- SetValue(remaining) positions the fill edge, icon follows it.
+    -- This accepts secret values from Duration Objects (same tech as timer bars).
+    if timelineFrame and timelineFrame.bar then
+        local baseY = 2 + (s.iconVerticalOffset or 0)
+        icon.posBar = CreateFrame("StatusBar", nil, timelineFrame)
+        icon.posBar:SetPoint("LEFT", timelineFrame.bar, "TOPLEFT", 0, baseY + iconH / 2)
+        icon.posBar:SetPoint("RIGHT", timelineFrame.bar, "TOPRIGHT", 0, baseY + iconH / 2)
+        icon.posBar:SetHeight(20)  -- DEBUG: tall enough to see
+        icon.posBar:SetMinMaxValues(0, s.maxDuration or 120)
+        icon.posBar:SetStatusBarTexture("Interface\\Buttons\\WHITE8x8")
+        icon.posBar:SetStatusBarColor(1, 0, 0, 0.5)  -- DEBUG: visible red
+        icon.posBar:SetValue(0)
+        icon.posBar:SetFrameLevel(timelineFrame.bar:GetFrameLevel() + 1)
+        
+        -- For reversed direction (ready on right), reverse the fill
+        if s.direction == "leftToRight" then
+            pcall(function()
+                if icon.posBar.SetReverseFill then
+                    icon.posBar:SetReverseFill(true)
+                elseif icon.posBar.SetFillStyle then
+                    if Enum and Enum.StatusBarFillStyle and Enum.StatusBarFillStyle.Reverse then
+                        icon.posBar:SetFillStyle(Enum.StatusBarFillStyle.Reverse)
+                    else
+                        icon.posBar:SetFillStyle("REVERSE")
+                    end
+                end
+            end)
+        end
+        
+        -- DEBUG: Do NOT anchor icon to fill texture (testing secret anchor theory)
+        -- Instead anchor icon to a fixed spot on the bar so we can see if it renders
+        icon:ClearAllPoints()
+        icon:SetPoint("CENTER", timelineFrame.bar, "CENTER", 0, baseY + iconH / 2)
+        
+        icon.posBarActive = true
+    end
+
     icon:Hide()
     return icon
 end
@@ -667,7 +714,8 @@ local function ShowSpellGlow(icon, r, g, b, glowScale, speed)
     
     local glow = icon._spellGlow
     local scale = glowScale or 1.0
-    local w, h = icon:GetSize()
+    -- Don't use icon:GetSize() — returns secrets due to secret anchors from posBar
+    local w, h = GetIconDimensions()
     local pad = (w * 0.4) * scale
     
     glow:ClearAllPoints()
@@ -785,257 +833,221 @@ CleanupOnReadyEffects = function(icon)
     StopPulseAnimation(icon)
 end
 
+-- ============================================================================
+-- PASS-THROUGH RENDERING (no event-driven state, no debounce)
+-- 
+-- Problem solved: Event-driven + debounce fails because SPELL_UPDATE_COOLDOWN
+-- fires at GCD start when ALL Duration Objects ARE active. After 2s debounce,
+-- everything gets permanently marked as real CD.
+--
+-- Solution: Poll every frame. Use Midnight's native APIs:
+--   1. TruncateWhenZero(remaining) → "" means idle (remaining=0), secret means ticking
+--   2. SetAlphaFromBoolean(isOnGCD, 0, 1) → hides GCD-only, shows real CDs
+--   3. posBar:SetValue(remaining) → positions icon (secret-safe)
+-- No detection, no debounce, no cache, no event frame.
+-- ============================================================================
+
 local function OnUpdate(self, elapsed)
     if not isEnabled then return end
     
     lastUpdate = lastUpdate + elapsed
-    
-    -- Use cached settings - only update when Refresh() is called
     local s = settings
     if not s or not s.updateInterval then
-        -- Settings not loaded yet, try to get them
         settings = GetSettings()
         s = settings
     end
-    
-    if lastUpdate < (s.updateInterval or 0.033) then
-        return
-    end
+    if lastUpdate < (s.updateInterval or 0.033) then return end
     lastUpdate = 0
     
-    -- Get current cooldown states from TimelineData
-    local activeCooldowns = TimelineData:GetActiveCooldowns()
-    local readySpells = TimelineData:GetReadySpells()
+    local trackedSpells = TimelineData and TimelineData:GetTrackedSpells()
+    if not trackedSpells then return end
     
-    -- Track which spells we've processed
+    local maxDur = s.maxDuration or 120
+    local now = GetTime()
+    local inCombat = InCombatLockdown()
     local processed = {}
-    local iconPositions = {}  -- For anti-overlap calculation
-    wipe(overflowIcons)
     
-    local iconW, iconH = GetIconDimensions()
+    -- On-ready settings
+    local glowEnabled = s.onReadyGlowEnabled
+    local pulseEnabled = s.onReadyPulseEnabled
+    local anyOnReadyEnabled = glowEnabled or pulseEnabled
     
-    -- First pass: calculate positions and acquire icons
-    for spellID, data in pairs(activeCooldowns) do
+    for spellID, spellData in pairs(trackedSpells) do
         processed[spellID] = true
         
+        -- Acquire/reuse icon
         local icon = activeIcons[spellID]
         if not icon then
             icon = AcquireIcon()
             activeIcons[spellID] = icon
         end
         
-        -- Calculate position
-        local targetX, isOverflow = CalculateIconX(data.remaining, data.duration)
-        icon.spellID = spellID
-        icon.targetX = targetX
-        icon.isOverflow = isOverflow
-        
         -- Set texture if needed
-        if icon.texture:GetTexture() ~= data.icon then
-            icon.texture:SetTexture(data.icon)
+        if icon.spellID ~= spellID then
+            icon.spellID = spellID
+            icon.texture:SetTexture(spellData.icon)
             UpdateIconAppearance(icon)
         end
         
-        -- Track position for anti-overlap (exclude overflow icons)
-        if not isOverflow then
-            table.insert(iconPositions, {
-                icon = icon,
-                spellID = spellID,
-                xPos = targetX,
-                remaining = data.remaining,
-                duration = data.duration,
-                data = data,
-                row = 0,
-            })
-        else
-            -- Track overflow icons for stacking
-            if s.showOverflowStack then
-                table.insert(overflowIcons, { icon = icon, remaining = data.remaining, data = data })
+        -- Get Duration Object + cooldown info
+        local dObj, cdInfo
+        pcall(function()
+            if C_Spell then
+                if C_Spell.GetSpellCooldownDuration then
+                    dObj = C_Spell.GetSpellCooldownDuration(spellID)
+                end
+                if C_Spell.GetSpellCooldown then
+                    cdInfo = C_Spell.GetSpellCooldown(spellID)
+                end
             end
-        end
+        end)
         
-        -- Remove from ready list if it was there
-        if readyIcons[spellID] then
-            readyIcons[spellID] = nil
-        end
-        
-        -- Track that this spell is currently on cooldown (for transition detection)
-        wasOnCooldown[spellID] = true
-        
-        -- If this spell was being held for on-ready, cancel it (went back on CD)
-        if onReadyHolding[spellID] then
-            onReadyHolding[spellID] = nil
-        end
-    end
-    
-    -- Process ready spells: detect transitions and handle on-ready effects
-    local now = GetTime()
-    local glowEnabled = s.onReadyGlowEnabled
-    local pulseEnabled = s.onReadyPulseEnabled
-    local anyOnReadyEnabled = glowEnabled or pulseEnabled
-    
-    for spellID, data in pairs(readySpells) do
-        processed[spellID] = true
-        
-        -- Check if this is a NEW transition from cooldown → ready
-        if wasOnCooldown[spellID] and anyOnReadyEnabled and not onReadyHolding[spellID] then
-            -- Calculate hold duration (max of glow and pulse durations)
-            local holdDuration = 0
-            if glowEnabled then
-                local glowDur = (s.onReadyGlowDuration or 3.0) + math.max(0, s.onReadyGlowTiming or 0)
-                holdDuration = math.max(holdDuration, glowDur)
+        if not dObj or not icon.posBar then
+            -- No data available
+            if not onReadyHolding[spellID] then
+                icon:Hide()
             end
-            if pulseEnabled then
-                local pulseTotal = (s.onReadyPulseCount or 3) * (s.onReadyPulseDuration or 0.4)
-                    + math.max(0, s.onReadyPulseTiming or 0)
-                holdDuration = math.max(holdDuration, pulseTotal)
-            end
-            
-            -- Acquire/keep the icon for the hold period
-            local icon = activeIcons[spellID]
-            if not icon then
-                icon = AcquireIcon()
-                activeIcons[spellID] = icon
-            end
-            
-            -- Set texture if needed
-            if icon.texture:GetTexture() ~= data.icon then
-                icon.texture:SetTexture(data.icon)
-                UpdateIconAppearance(icon)
-            end
-            icon.spellID = spellID
-            icon.cooldown:Clear()
-            icon.isReady = true
-            
-            onReadyHolding[spellID] = {
-                holdUntil = now + holdDuration,
-                startTime = now,
-                icon = icon,
-                data = data,
-                glowStarted = false,
-                pulseStarted = false,
-                pulsesPlayed = 0,
-            }
-            
-            dprint("On-ready transition: " .. (data.name or tostring(spellID)) .. " hold=" .. holdDuration .. "s")
-        end
-        
-        -- If NOT holding this spell, release its icon
-        if not onReadyHolding[spellID] then
-            local icon = activeIcons[spellID]
-            if icon then
-                ReleaseIcon(icon)
-                activeIcons[spellID] = nil
-            end
-            readyIcons[spellID] = nil
-        end
-        
-        -- Clear the wasOnCooldown flag (spell is now ready)
-        wasOnCooldown[spellID] = nil
-    end
-    
-    -- Process on-ready holding icons: position, effects, expiration
-    local readyX = (s.direction == "leftToRight") and (s.barWidth - iconW) or 0
-    
-    for spellID, hold in pairs(onReadyHolding) do
-        processed[spellID] = true
-        local elapsed_hold = now - hold.startTime
-        
-        -- Check if hold has expired
-        if now >= hold.holdUntil then
-            -- Release the icon
-            local icon = hold.icon
-            if icon then
-                CleanupOnReadyEffects(icon)
-                ReleaseIcon(icon)
-                activeIcons[spellID] = nil
-            end
-            onReadyHolding[spellID] = nil
             wasOnCooldown[spellID] = nil
         else
-            -- Still holding: position icon at ready edge
-            local icon = hold.icon
-            if icon then
-                icon:ClearAllPoints()
-                icon:SetPoint("BOTTOMLEFT", timelineFrame.bar, "TOPLEFT", readyX, 2 + s.iconVerticalOffset)
-                icon.durationText:SetText("")
-                icon:Show()
-                
-                -- Apply glow effect (with timing offset)
-                if glowEnabled and not hold.glowStarted then
-                    local glowTiming = s.onReadyGlowTiming or 0
-                    if elapsed_hold >= glowTiming then
-                        ShowOnReadyGlow(icon, s)
-                        hold.glowStarted = true
-                        dprint("Glow started for: " .. tostring(spellID))
+            -- Step 1: Check if anything is ticking (idle filter)
+            -- TruncateWhenZero returns "" for 0, secret string for > 0
+            local isTicking = false
+            pcall(function()
+                local remaining = dObj:GetRemainingDuration()
+                if C_StringUtil and C_StringUtil.TruncateWhenZero then
+                    local str = C_StringUtil.TruncateWhenZero(remaining)
+                    -- If result is secret → remaining > 0 → something is ticking
+                    -- If result is non-secret → remaining was 0 → idle
+                    if issecretvalue and issecretvalue(str) then
+                        isTicking = true
+                    elseif str ~= "" then
+                        -- Non-secret non-empty string (out of combat, remaining > 0)
+                        isTicking = true
+                    end
+                else
+                    -- Fallback: if remaining is non-nil and non-zero
+                    if remaining and remaining ~= 0 then
+                        isTicking = true
                     end
                 end
-                
-                -- Check glow expiration
-                if hold.glowStarted and glowEnabled then
-                    local glowTiming = math.max(0, s.onReadyGlowTiming or 0)
-                    local glowEnd = glowTiming + (s.onReadyGlowDuration or 3.0)
-                    if elapsed_hold >= glowEnd then
-                        HideOnReadyGlow(icon)
+            end)
+            
+            if not isTicking then
+                -- IDLE: nothing on cooldown
+                -- On-ready effects
+                if wasOnCooldown[spellID] and anyOnReadyEnabled and not onReadyHolding[spellID] and not inCombat then
+                    local holdDuration = 0
+                    if glowEnabled then
+                        holdDuration = math.max(holdDuration, (s.onReadyGlowDuration or 3.0) + math.max(0, s.onReadyGlowTiming or 0))
                     end
+                    if pulseEnabled then
+                        holdDuration = math.max(holdDuration, (s.onReadyPulseCount or 3) * (s.onReadyPulseDuration or 0.4) + math.max(0, s.onReadyPulseTiming or 0))
+                    end
+                    onReadyHolding[spellID] = {
+                        holdUntil = now + holdDuration, startTime = now, icon = icon, data = spellData,
+                        glowStarted = false, pulseStarted = false, pulsesPlayed = 0,
+                    }
+                    icon:SetAlpha(1)
+                    icon:Show()
+                elseif onReadyHolding[spellID] then
+                    icon:SetAlpha(1)
+                    icon:Show()
+                else
+                    icon:Hide()
                 end
+                wasOnCooldown[spellID] = nil
+            else
+                -- TICKING: something is on cooldown (real CD or GCD)
                 
-                -- Apply pulse effect (with timing offset)
-                if pulseEnabled then
-                    local pulseTiming = s.onReadyPulseTiming or 0
-                    local maxPulses = s.onReadyPulseCount or 3
-                    local pulseDur = s.onReadyPulseDuration or 0.4
+                -- Step 2: GCD filter via SetAlphaFromBoolean
+                -- isOnGCD is secret bool in combat. SetAlphaFromBoolean handles it natively.
+                -- isOnGCD=true → alpha=0 (hide GCD-only), isOnGCD=false → alpha=1 (show real CD)
+                -- CRITICAL: Do NOT check "isOnGCD ~= nil" — secret_bool ~= nil returns false
+                -- in Midnight (different types comparison). Just try SetAlphaFromBoolean directly.
+                local gcdFiltered = false
+                if cdInfo then
+                    -- Try SetAlphaFromBoolean first (handles secret booleans natively)
+                    pcall(function()
+                        if icon.SetAlphaFromBoolean and cdInfo.isOnGCD then
+                            icon:SetAlphaFromBoolean(cdInfo.isOnGCD, 0, 1)
+                            gcdFiltered = true
+                        end
+                    end)
                     
-                    if elapsed_hold >= pulseTiming and hold.pulsesPlayed < maxPulses then
-                        -- Check if it's time for the next pulse
-                        local pulseElapsed = elapsed_hold - pulseTiming
-                        local expectedPulses = math.floor(pulseElapsed / pulseDur) + 1
-                        
-                        if expectedPulses > hold.pulsesPlayed then
-                            hold.pulsesPlayed = hold.pulsesPlayed + 1
-                            PlayPulseAnimation(icon, s.onReadyPulseScale or 1.3, pulseDur)
-                            dprint("Pulse " .. hold.pulsesPlayed .. "/" .. maxPulses .. " for: " .. tostring(spellID))
+                    -- Fallback: non-secret check
+                    if not gcdFiltered and cdInfo.isOnGCD then
+                        if not (issecretvalue and issecretvalue(cdInfo.isOnGCD)) then
+                            if cdInfo.isOnGCD == true then
+                                icon:SetAlpha(0)
+                                gcdFiltered = true
+                            else
+                                icon:SetAlpha(1)
+                                gcdFiltered = true
+                            end
                         end
                     end
                 end
+                
+                if not gcdFiltered then
+                    -- No GCD filter available — show everything
+                    icon:SetAlpha(1)
+                end
+                
+                -- Step 3: Position via posBar (secret-safe)
+                pcall(function()
+                    icon.posBar:SetMinMaxValues(0, maxDur)
+                    icon.posBar:SetValue(dObj:GetRemainingDuration())
+                end)
+                
+                -- Step 4: Cooldown swipe (secret-safe)
+                pcall(function()
+                    if icon.cooldown and icon.cooldown.SetCooldownFromDurationObject then
+                        icon.cooldown:SetCooldownFromDurationObject(dObj)
+                    end
+                end)
+                
+                -- Step 5: Duration text (secret-safe via TruncateWhenZero)
+                if s.showCooldownText then
+                    pcall(function()
+                        local remaining = dObj:GetRemainingDuration()
+                        if C_StringUtil and C_StringUtil.TruncateWhenZero then
+                            pcall(icon.durationText.SetText, icon.durationText,
+                                C_StringUtil.TruncateWhenZero(remaining))
+                        end
+                    end)
+                else
+                    icon.durationText:SetText("")
+                end
+                
+                wasOnCooldown[spellID] = true
+                icon:Show()
             end
         end
     end
     
-    -- Calculate anti-overlap offsets (only if enabled)
-    if s.staggerOverlaps ~= false then
-        CalculateAntiOverlapOffsets(iconPositions, iconW, s.iconSpacing)
-    end
-    
-    -- Second pass: position icons with anti-overlap offsets
-    -- Icons sit ABOVE the bar (anchored to TOP of bar)
-    local baseY = 2 + s.iconVerticalOffset  -- Small gap above bar
-    
-    for _, posData in ipairs(iconPositions) do
-        local icon = posData.icon
-        local verticalOffset = (s.staggerOverlaps ~= false) and (posData.row * (iconH + s.iconSpacing)) or 0
-        
-        icon:ClearAllPoints()
-        icon:SetPoint("BOTTOMLEFT", timelineFrame.bar, "TOPLEFT", posData.xPos, baseY + verticalOffset)
-        
-        -- Update duration text
-        if s.showCooldownText then
-            icon.durationText:SetText(FormatDuration(posData.remaining))
+    -- Handle on-ready holding icons
+    for spellID, hold in pairs(onReadyHolding) do
+        if now >= hold.holdUntil then
+            CleanupOnReadyEffects(hold.icon)
+            hold.icon:Hide()
+            onReadyHolding[spellID] = nil
         else
-            icon.durationText:SetText("")
+            local icon = hold.icon
+            if glowEnabled and not hold.glowStarted then
+                local glowDelay = math.max(0, s.onReadyGlowTiming or 0)
+                if now >= hold.startTime + glowDelay then
+                    hold.glowStarted = true
+                    ShowOnReadyGlow(icon, s.onReadyGlowDuration or 3.0, s)
+                end
+            end
+            if pulseEnabled and not hold.pulseStarted then
+                local pulseDelay = math.max(0, s.onReadyPulseTiming or 0)
+                if now >= hold.startTime + pulseDelay then
+                    hold.pulseStarted = true
+                    StartPulseAnimation(icon, s.onReadyPulseCount or 3, s.onReadyPulseDuration or 0.4)
+                end
+            end
         end
-        
-        -- Update cooldown swipe
-        if posData.remaining > 0 and posData.duration > 0 then
-            local startTime = GetTime() - (posData.duration - posData.remaining)
-            icon.cooldown:SetCooldown(startTime, posData.duration)
-            icon.isReady = false
-        else
-            icon.cooldown:Clear()
-            icon.isReady = true
-        end
-        
-        icon:Show()
     end
     
     -- Release icons for spells no longer tracked
@@ -1043,85 +1055,52 @@ local function OnUpdate(self, elapsed)
         if not processed[spellID] then
             ReleaseIcon(icon)
             activeIcons[spellID] = nil
-            readyIcons[spellID] = nil
-            onReadyHolding[spellID] = nil
             wasOnCooldown[spellID] = nil
         end
     end
-    
-    -- Stack overflow icons (sorted by remaining time, stacked vertically)
-    if #overflowIcons > 0 then
-        -- Sort by remaining time (shortest first = bottom of stack)
-        table.sort(overflowIcons, function(a, b)
-            return a.remaining < b.remaining
-        end)
-        
-        local barWidth = s.barWidth
-        local reversed = (s.direction == "leftToRight")
-        local baseX = reversed and 0 or (barWidth - iconW)
-        
-        for i, data in ipairs(overflowIcons) do
-            local icon = data.icon
-            local stackOffset = (i - 1) * (iconH + s.iconSpacing)
-            
-            icon:ClearAllPoints()
-            icon:SetPoint("BOTTOMLEFT", timelineFrame.bar, "TOPLEFT", baseX, baseY + stackOffset)
-            
-            -- Update duration text
-            if s.showCooldownText then
-                icon.durationText:SetText(FormatDuration(data.remaining))
-            else
-                icon.durationText:SetText("")
+end
+
+
+-- ============================================================================
+-- POSITION SAVE/RESTORE
+-- ============================================================================
+
+local function SavePosition()
+    if not timelineFrame then return end
+    local point, _, relPoint, x, y = timelineFrame:GetPoint()
+    if point then
+        local db = TUICD.Database and TUICD.Database:GetTrackerSetting("timeline", "containerPosition")
+        if not db then
+            -- Save directly
+            local charDB = TweaksUI_Cooldowns_CharDB
+            if charDB then
+                charDB.containerPositions = charDB.containerPositions or {}
+                charDB.containerPositions.timeline = { point = point, x = x, y = y }
             end
-            
-            -- Update cooldown swipe
-            if data.remaining > 0 then
-                local startTime = GetTime() - (data.data.duration - data.remaining)
-                icon.cooldown:SetCooldown(startTime, data.data.duration)
-            end
-            
-            icon:Show()
         end
     end
 end
 
--- ============================================================================
--- MAIN FRAME CREATION
--- ============================================================================
-
--- Save position to database
-local function SavePosition()
-    if not timelineFrame then return end
-    
-    local point, _, relPoint, x, y = timelineFrame:GetPoint(1)
-    local position = {
-        point = point,
-        relPoint = relPoint,
-        x = x,
-        y = y,
-    }
-    
-    if TUICD.TimelineUI and TUICD.TimelineUI.SetSetting then
-        TUICD.TimelineUI:SetSetting("position", position)
-    end
-    
-    dprint(string.format("Position saved: %s, %d, %d", point, math.floor(x), math.floor(y)))
-end
-
--- Restore position from database
 local function RestorePosition()
     if not timelineFrame then return end
-    
-    local position = GetSettingValue("position")
-    if position and position.point then
+    local pos = nil
+    if TUICD.Database and TUICD.Database.GetTrackerSetting then
+        pos = TUICD.Database:GetTrackerSetting("timeline", "containerPosition")
+    end
+    if not pos then
+        local charDB = TweaksUI_Cooldowns_CharDB
+        if charDB and charDB.containerPositions and charDB.containerPositions.timeline then
+            pos = charDB.containerPositions.timeline
+        end
+    end
+    if pos and pos.point then
         timelineFrame:ClearAllPoints()
-        timelineFrame:SetPoint(position.point, UIParent, position.relPoint or position.point, position.x or 0, position.y or 0)
-        dprint(string.format("Position restored: %s, %d, %d", position.point, math.floor(position.x or 0), math.floor(position.y or 0)))
+        timelineFrame:SetPoint(pos.point, UIParent, pos.point, pos.x or 0, pos.y or 0)
     end
 end
 
 -- ============================================================================
--- HASH MARKS (time interval markers on the bar)
+-- HASH MARKS (time interval tick marks on the timeline bar)
 -- ============================================================================
 
 local hashMarkPool = {}
@@ -1129,54 +1108,48 @@ local hashMarkPool = {}
 local function UpdateHashMarks()
     if not timelineFrame or not timelineFrame.bar then return end
     
-    local s = GetSettings()
-    
-    -- Hide all existing hash marks
+    -- Hide existing marks
     for _, mark in ipairs(hashMarkPool) do
         mark:Hide()
     end
     
+    local s = GetSettings()
     if not s.showHashMarks then return end
     
-    local barWidth = s.barWidth
-    local barHeight = s.barHeight
-    local maxDur = s.maxDuration
-    local reversed = (s.direction == "leftToRight")
+    local maxDur = s.maxDuration or 120
+    local barWidth = s.barWidth or 500
     local color = s.hashMarkColor or { r = 0.6, g = 0.6, b = 0.6, a = 0.5 }
-    local iconW, iconH = GetIconDimensions()
     
-    -- Short marks at 5s, tall marks at 10s
+    -- Determine interval based on max duration
+    local interval
+    if maxDur <= 15 then interval = 5
+    elseif maxDur <= 30 then interval = 5
+    elseif maxDur <= 60 then interval = 10
+    elseif maxDur <= 120 then interval = 30
+    else interval = 60
+    end
+    
     local markIndex = 0
-    for sec = 5, maxDur, 5 do
+    for t = interval, maxDur - 1, interval do
         markIndex = markIndex + 1
-        
-        -- Get or create the texture
         local mark = hashMarkPool[markIndex]
         if not mark then
             mark = timelineFrame.bar:CreateTexture(nil, "OVERLAY")
-            mark:SetColorTexture(1, 1, 1, 1)
             hashMarkPool[markIndex] = mark
         end
         
-        -- Long mark at 10s intervals, short at 5s
-        local isMajor = (sec % 10 == 0)
-        local markHeight = isMajor and (iconH * 0.5) or (iconH * 0.25)
-        local markWidth = isMajor and 2 or 1
-        
-        -- Calculate X position (same math as icon positioning)
-        local ratio = sec / maxDur
-        local xPos
-        if reversed then
-            xPos = (1 - ratio) * barWidth
+        local xFraction = t / maxDur
+        local xOffset
+        if s.direction == "leftToRight" then
+            xOffset = xFraction * barWidth
         else
-            xPos = ratio * barWidth
+            xOffset = (1 - xFraction) * barWidth
         end
         
-        mark:SetSize(markWidth, markHeight)
-        mark:SetVertexColor(color.r, color.g, color.b, color.a)
+        mark:SetSize(1, s.barHeight or 2)
         mark:ClearAllPoints()
-        -- Bottom of mark sits at bottom of bar, extends upward
-        mark:SetPoint("BOTTOM", timelineFrame.bar, "BOTTOMLEFT", xPos, 0)
+        mark:SetPoint("LEFT", timelineFrame.bar, "LEFT", xOffset, 0)
+        mark:SetColorTexture(color.r, color.g, color.b, color.a)
         mark:Show()
     end
 end
@@ -1718,6 +1691,116 @@ function TimelineFrames:UnregisterVisibilityEvents()
     if visibilityEventFrame then
         visibilityEventFrame:UnregisterAllEvents()
     end
+end
+
+-- ============================================================================
+-- DEBUG: /tlfdbg - trace the render pipeline
+-- ============================================================================
+SLASH_TLFDBG1 = "/tlfdbg"
+SlashCmdList["TLFDBG"] = function()
+    local p = print
+    p("|cff00ccff[TL:Frames]|r ===========================")
+    p("isEnabled: " .. tostring(isEnabled))
+    p("timelineFrame: " .. tostring(timelineFrame))
+    if timelineFrame then
+        p("  shown: " .. tostring(timelineFrame:IsShown()))
+        if timelineFrame.bar then
+            p("  bar size: " .. tostring(timelineFrame.bar:GetWidth()) .. "x" .. tostring(timelineFrame.bar:GetHeight()))
+        end
+    end
+    p("inCombat: " .. tostring(InCombatLockdown()))
+    p("SetAlphaFromBoolean exists: " .. tostring(type(CreateFrame("Frame").SetAlphaFromBoolean) == "function"))
+    
+    local tracked = TimelineData and TimelineData:GetTrackedSpells()
+    local trackCount = 0
+    if tracked then
+        for _ in pairs(tracked) do trackCount = trackCount + 1 end
+    end
+    p("TrackedSpells: " .. trackCount)
+    
+    local iconCount, shownCount = 0, 0
+    for sid, icon in pairs(activeIcons) do
+        iconCount = iconCount + 1
+        if icon:IsShown() then shownCount = shownCount + 1 end
+    end
+    p("activeIcons: " .. iconCount .. " (" .. shownCount .. " shown)")
+    
+    if tracked then
+        for spellID, data in pairs(tracked) do
+            local icon = activeIcons[spellID]
+            local line = "  " .. spellID .. " " .. (data.name or "?") .. ": "
+            
+            -- Check isTicking
+            local isTicking = false
+            local isGCD = "?"
+            pcall(function()
+                if C_Spell and C_Spell.GetSpellCooldownDuration then
+                    local dObj = C_Spell.GetSpellCooldownDuration(spellID)
+                    if dObj then
+                        local rem = dObj:GetRemainingDuration()
+                        if C_StringUtil and C_StringUtil.TruncateWhenZero then
+                            local str = C_StringUtil.TruncateWhenZero(rem)
+                            if issecretvalue and issecretvalue(str) then
+                                isTicking = true
+                            elseif str ~= "" then
+                                isTicking = true
+                            end
+                        end
+                    end
+                end
+                if C_Spell and C_Spell.GetSpellCooldown then
+                    local cdInfo = C_Spell.GetSpellCooldown(spellID)
+                    if cdInfo then
+                        local gcd = cdInfo.isOnGCD
+                        if gcd == nil then
+                            isGCD = "nil"
+                        elseif issecretvalue and issecretvalue(gcd) then
+                            isGCD = "SECRET"
+                        else
+                            isGCD = tostring(gcd)
+                        end
+                    else
+                        isGCD = "noInfo"
+                    end
+                end
+            end)
+            
+            line = line .. "tick=" .. tostring(isTicking) .. " gcd=" .. isGCD
+            
+            if icon then
+                local shown = icon:IsShown() and "Y" or "N"
+                local alpha = "?"
+                pcall(function()
+                    local a = icon:GetAlpha()
+                    if issecretvalue and issecretvalue(a) then
+                        alpha = "SECRET"
+                    else
+                        alpha = string.format("%.1f", a)
+                    end
+                end)
+                line = line .. " shown=" .. shown .. " a=" .. alpha
+                if icon.posBar then
+                    local valStr = "?"
+                    pcall(function()
+                        local v = icon.posBar:GetValue()
+                        if issecretvalue and issecretvalue(v) then
+                            valStr = "SECRET"
+                        else
+                            valStr = string.format("%.1f", v)
+                        end
+                    end)
+                    line = line .. " val=" .. valStr
+                else
+                    line = line .. " noBar!"
+                end
+            else
+                line = line .. " (no icon)"
+            end
+            
+            p(line)
+        end
+    end
+    p("|cff00ccff[TL:Frames]|r ===========================")
 end
 
 -- ============================================================================

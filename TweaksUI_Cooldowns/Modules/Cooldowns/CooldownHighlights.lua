@@ -1153,6 +1153,7 @@ end
 local function HasCDPerIconAlert(trackerKey, slotIndex, prefix)
     return GetCDPerIconAlert(trackerKey, slotIndex, prefix, "glowEnabled")
         or GetCDPerIconAlert(trackerKey, slotIndex, prefix, "pulseEnabled")
+        or GetCDPerIconAlert(trackerKey, slotIndex, prefix, "soundEnabled")
         or false
 end
 
@@ -1393,6 +1394,18 @@ local function FirePerIconOnReady(frame, trackerKey, slotIndex)
         if timing < 0 then timing = 0 end
         SchedulePerIconAlertPulse(frame, trackerKey, slotIndex, "onReady", timing)
     end
+    if GetCDPerIconAlert(trackerKey, slotIndex, "onReady", "soundEnabled") then
+        local soundName = GetCDPerIconAlert(trackerKey, slotIndex, "onReady", "soundName")
+        local timing = GetCDPerIconAlert(trackerKey, slotIndex, "onReady", "glowTiming") or 0
+        if timing < 0 then timing = 0 end
+        if soundName and soundName ~= "None" and TUICD.Media then
+            if timing <= 0 then
+                TUICD.Media:PlayAlertSound(soundName)
+            else
+                C_Timer.After(timing, function() TUICD.Media:PlayAlertSound(soundName) end)
+            end
+        end
+    end
 end
 
 -- Fire per-icon On Cooldown Start alert (cooldown began)
@@ -1408,49 +1421,58 @@ local function FirePerIconOnCooldown(frame, trackerKey, slotIndex)
         if timing < 0 then timing = 0 end
         SchedulePerIconAlertPulse(frame, trackerKey, slotIndex, "onCooldown", timing)
     end
+    if GetCDPerIconAlert(trackerKey, slotIndex, "onCooldown", "soundEnabled") then
+        local soundName = GetCDPerIconAlert(trackerKey, slotIndex, "onCooldown", "soundName")
+        local timing = GetCDPerIconAlert(trackerKey, slotIndex, "onCooldown", "glowTiming") or 0
+        if timing < 0 then timing = 0 end
+        if soundName and soundName ~= "None" and TUICD.Media then
+            if timing <= 0 then
+                TUICD.Media:PlayAlertSound(soundName)
+            else
+                C_Timer.After(timing, function() TUICD.Media:PlayAlertSound(soundName) end)
+            end
+        end
+    end
 end
 
 -- ============================================================================
 -- END PER-ICON ALERTS
 -- ============================================================================
 
--- Cooldowns longer than 3000ms (3 sec) are "real" cooldowns, not GCD (~1500ms)
-local GCD_THRESHOLD = 3000
+-- GCD threshold: items and sensor remaining reads still need a numeric threshold
+-- (isOnGCD only available from C_Spell.GetSpellCooldown, not C_Container.GetItemCooldown)
+local GCD_THRESHOLD = 3000      -- milliseconds (sensor reads)
+local GCD_THRESHOLD_SEC = 3.0   -- seconds (item API reads)
+
+-- Full cooldown state check for a spell: uses C_Spell.GetSpellCooldown().isOnGCD
+-- Returns: isOnCooldown (bool)
+local function IsSpellOnRealCooldown(spellID)
+    if not spellID then return false end
+    if issecretvalue and issecretvalue(spellID) then return false end
+    
+    local DurationAPI = TUICD.DurationAPI
+    if DurationAPI and DurationAPI.IsRealCooldownActive then
+        local onCD = DurationAPI:IsRealCooldownActive(spellID)
+        return onCD
+    end
+    return false
+end
 
 -- Track scheduled early show timers per icon to avoid duplicates
 -- Key: "trackerKey:slotIndex", Value: true (timer is pending)
 local earlyShowTimersPending = {}
 
 -- Detect visual state by checking if source icon has a REAL cooldown (not GCD)
--- We check actual cooldown duration to avoid GCD false positives
--- NOTE: GetCooldownTimes returns MILLISECONDS
 local function GetIconVisualState(icon)
     if not icon then return true end  -- Default to "ready" if no icon
     
-    local isReady = true
+    local spellID = icon.spellID or icon.SpellID or icon.spellId or icon._spellID or icon.trackID
     
-    -- Check cooldown frame times - only count as "on cooldown" if duration > GCD threshold
-    -- NOTE: GetCooldownTimes returns MILLISECONDS
-    pcall(function()
-        local cooldown = icon.Cooldown or icon.cooldown
-        if cooldown and cooldown.GetCooldownTimes then
-            local start, duration = cooldown:GetCooldownTimes()
-            if start and duration and type(start) == "number" and type(duration) == "number" and duration > 0 then
-                -- Only count as "on cooldown" if duration > 3000ms (3 sec)
-                if duration > GCD_THRESHOLD then
-                    -- Convert to seconds for remaining time check
-                    local startSec = start / 1000
-                    local durationSec = duration / 1000
-                    local remaining = (startSec + durationSec) - GetTime()
-                    if remaining > 0.1 then
-                        isReady = false
-                    end
-                end
-            end
-        end
-    end)
+    if IsSpellOnRealCooldown(spellID) then
+        return false  -- On cooldown = not ready
+    end
     
-    return isReady
+    return true  -- Ready
 end
 
 local function GetSlotInfo(trackerKey, slotIndex)
@@ -1870,26 +1892,10 @@ local function CalculateFrameCooldown(trackerKey, slotIndex)
             
             -- =========================================================================
             -- MIDNIGHT-COMPATIBLE COOLDOWN DETECTION
-            -- After SetCooldownFromDurationObject, check the cooldown FRAME's state
-            -- using GetCooldownTimes() which returns NON-SECRET values from the UI frame
-            -- (C_Spell.GetSpellCooldown returns SECRET values that can't be compared)
+            -- Uses secret-safe IsSpellOnRealCooldown: tries sensor first,
+            -- falls back to DurationAPI:IsActive for combat secret values
             -- =========================================================================
-            pcall(function()
-                if frame.cooldown and frame.cooldown.GetCooldownTimes then
-                    local start, duration = frame.cooldown:GetCooldownTimes()
-                    if start and duration and type(start) == "number" and type(duration) == "number" then
-                        -- GetCooldownTimes returns MILLISECONDS
-                        if duration > GCD_THRESHOLD then
-                            local startSec = start / 1000
-                            local durationSec = duration / 1000
-                            local remaining = (startSec + durationSec) - GetTime()
-                            if remaining > 0.1 then
-                                thisIconOnCooldown = true
-                            end
-                        end
-                    end
-                end
-            end)
+            thisIconOnCooldown = IsSpellOnRealCooldown(trackID)
             
             -- Fallback: check charges for spells with charges (also via cooldown frame)
             if not thisIconOnCooldown then
@@ -1913,7 +1919,7 @@ local function CalculateFrameCooldown(trackerKey, slotIndex)
                 local start, duration = C_Container.GetItemCooldown(trackID)
                 if start and duration and duration > 0 then
                     frame.cooldown:SetCooldown(start, duration)
-                    if duration > GCD_THRESHOLD / 1000 then
+                    if duration > GCD_THRESHOLD_SEC then
                         local remaining = (start + duration) - GetTime()
                         if remaining > 0.1 then
                             thisIconOnCooldown = true
@@ -1954,45 +1960,13 @@ local function CalculateFrameCooldown(trackerKey, slotIndex)
         end)
     end
 
-    -- Check actual cooldown duration from source cooldown
-    -- NOTE: GetCooldownTimes returns MILLISECONDS
-    pcall(function()
-        if sourceCooldown and sourceCooldown.GetCooldownTimes then
-            local start, duration = sourceCooldown:GetCooldownTimes()
-            
-            if start and duration and type(start) == "number" and type(duration) == "number" and duration > 0 then
-                -- Only count as "on cooldown" if duration > 3000ms (3 sec) - ignore GCD (~1500ms)
-                if duration > GCD_THRESHOLD then
-                    -- Convert ms to seconds for comparison with GetTime()
-                    local startSec = start / 1000
-                    local durationSec = duration / 1000
-                    local remaining = (startSec + durationSec) - GetTime()
-                    if remaining > 0.1 then
-                        thisIconOnCooldown = true
-                    end
-                end
-            end
-        end
-    end)
+    -- Check cooldown state using secret-safe detection
+    -- Tries sensor first, falls back to DurationAPI:IsActive for secret values
+    thisIconOnCooldown = IsSpellOnRealCooldown(spellID)
     
-    -- Fallback: Try frame's own cooldown
+    -- Fallback: Try frame's own cooldown if source didn't detect
     if not thisIconOnCooldown then
-        pcall(function()
-            if frame.cooldown and frame.cooldown.GetCooldownTimes then
-                local start, duration = frame.cooldown:GetCooldownTimes()
-                
-                if start and duration and type(start) == "number" and type(duration) == "number" and duration > 0 then
-                    if duration > GCD_THRESHOLD then
-                        local startSec = start / 1000
-                        local durationSec = duration / 1000
-                        local remaining = (startSec + durationSec) - GetTime()
-                        if remaining > 0.1 then
-                            thisIconOnCooldown = true
-                        end
-                    end
-                end
-            end
-        end)
+        thisIconOnCooldown = IsSpellOnRealCooldown(spellID)
     end
 
     return thisIconOnCooldown
@@ -2029,35 +2003,43 @@ function CooldownHighlights:ApplyVisibilityConditions(trackerKey, slotIndex, isO
                     local dockSettings = TUICD.Docks:GetDockSettings(dockAssignment)
                     local earlyShowSec = dockSettings and dockSettings.earlyShowSeconds or 0
                     if earlyShowSec > 0 then
-                        -- Get remaining cooldown time from SOURCE cooldown frame
-                        -- (Blizzard's frame has non-secret values, our highlight frame may have secrets)
+                        -- Get remaining cooldown time for early/late timing
+                        -- Prefer Duration Object (works in secret env), fall back to GetCooldownTimes
                         local remainingSec = nil
-                        local slotInfo = GetSlotInfo(trackerKey, slotIndex)
-                        local sourceIcon = slotInfo and slotInfo.icon
-                        local sourceCooldown = sourceIcon and (sourceIcon.Cooldown or sourceIcon.cooldown)
-                        
-                        -- Try source cooldown frame first (Blizzard's, non-secret)
-                        if sourceCooldown and sourceCooldown.GetCooldownTimes then
-                            pcall(function()
-                                local start, duration = sourceCooldown:GetCooldownTimes()
-                                if start and duration and type(start) == "number" and type(duration) == "number"
-                                   and start > 0 and duration > GCD_THRESHOLD then
-                                    local remainingMs = (start + duration) - (GetTime() * 1000)
-                                    remainingSec = remainingMs / 1000
-                                end
-                            end)
+
+                        -- Path 1: Duration Object via DurationAPI (preferred, secret-aware)
+                        local earlySpellID = GetCachedSpellID(trackerKey, slotIndex)
+                        if not earlySpellID then
+                            local slotInfo = GetSlotInfo(trackerKey, slotIndex)
+                            local sourceIcon = slotInfo and slotInfo.icon
+                            if sourceIcon then
+                                earlySpellID = sourceIcon.spellID or sourceIcon.SpellID or sourceIcon.spellId or sourceIcon._spellID
+                                if not earlySpellID and sourceIcon.trackType == "spell" then earlySpellID = sourceIcon.trackID end
+                            end
                         end
-                        
-                        -- Fallback to highlight frame cooldown
-                        if not remainingSec and frame.cooldown and frame.cooldown.GetCooldownTimes then
-                            pcall(function()
-                                local start, duration = frame.cooldown:GetCooldownTimes()
-                                if start and duration and type(start) == "number" and type(duration) == "number" 
-                                   and start > 0 and duration > GCD_THRESHOLD then
-                                    local remainingMs = (start + duration) - (GetTime() * 1000)
-                                    remainingSec = remainingMs / 1000
-                                end
-                            end)
+                        if earlySpellID then
+                            local DurationAPI = TUICD.DurationAPI
+                            if DurationAPI and DurationAPI.GetSpellRemainingSeconds then
+                                remainingSec = DurationAPI:GetSpellRemainingSeconds(earlySpellID)
+                            end
+                        end
+
+                        -- Path 2: GetCooldownTimes from source frame (non-secret when out of combat)
+                        if not remainingSec then
+                            local slotInfo = GetSlotInfo(trackerKey, slotIndex)
+                            local sourceIcon = slotInfo and slotInfo.icon
+                            local sourceCooldown = sourceIcon and (sourceIcon.Cooldown or sourceIcon.cooldown)
+                            if sourceCooldown and sourceCooldown.GetCooldownTimes then
+                                pcall(function()
+                                    local start, duration = sourceCooldown:GetCooldownTimes()
+                                    if start and duration and type(start) == "number" and type(duration) == "number"
+                                       and not (issecretvalue and issecretvalue(start))
+                                       and start > 0 and duration > GCD_THRESHOLD then
+                                        local remainingMs = (start + duration) - (GetTime() * 1000)
+                                        remainingSec = remainingMs / 1000
+                                    end
+                                end)
+                            end
                         end
                         
                         -- Fallback for charge-based spells: GetCooldownTimes may not
@@ -2157,12 +2139,23 @@ function CooldownHighlights:ApplyVisibilityConditions(trackerKey, slotIndex, isO
         else
             local showCountdownText = GetShouldShowCountdownText(trackerKey, slotIndex)
         
-            -- Check if this is a GCD cooldown using GetCooldownTimes (returns milliseconds)
+            -- Check if this is a GCD cooldown using C_Spell.GetSpellCooldown().isOnGCD
             local isGCD = false
-            if frame.cooldown and frame.cooldown.GetCooldownTimes then
+            if spellID and C_Spell and C_Spell.GetSpellCooldown then
+                pcall(function()
+                    local cdInfo = C_Spell.GetSpellCooldown(spellID)
+                    if cdInfo and cdInfo.isOnGCD then
+                        isGCD = true
+                    end
+                end)
+            end
+            -- Fallback for items: check sensor threshold
+            if not isGCD and not spellID and frame.cooldown and frame.cooldown.GetCooldownTimes then
                 pcall(function()
                     local start, duration = frame.cooldown:GetCooldownTimes()
-                    if start and duration and duration > 0 and duration <= GCD_THRESHOLD then
+                    if start and duration and type(duration) == "number"
+                       and not (issecretvalue and issecretvalue(duration))
+                       and duration > 0 and duration <= GCD_THRESHOLD then
                         isGCD = true
                     end
                 end)
@@ -2273,8 +2266,12 @@ function CooldownHighlights:ApplyVisibilityConditions(trackerKey, slotIndex, isO
     end
     
     -- Fire "onReady" reappearance effects when transitioning off cooldown
+    -- Only fire if CD lasted > 2s (suppress GCD false positives)
     if wasOnCooldown and not isOnCooldown and shouldShowCustomHighlight then
-        FireReappearanceEffects(frame, "onReady", trackerKey, slotIndex)
+        local cdDuration = GetTime() - (frame._TUI_cdDetectedAt or 0)
+        if cdDuration >= 2.0 then
+            FireReappearanceEffects(frame, "onReady", trackerKey, slotIndex)
+        end
     end
     
     -- =========================================================================
@@ -2285,11 +2282,15 @@ function CooldownHighlights:ApplyVisibilityConditions(trackerKey, slotIndex, isO
     if wasOnCooldown ~= nil then
         if wasOnCooldown and not isOnCooldown then
             -- Cooldown ended → On Ready per-icon alert
-            if HasCDPerIconAlert(trackerKey, slotIndex, "onReady") then
+            -- Only fire if CD lasted > 2s (suppress GCD false positives)
+            local cdDuration = GetTime() - (frame._TUI_cdDetectedAt or 0)
+            if cdDuration >= 2.0 and HasCDPerIconAlert(trackerKey, slotIndex, "onReady") then
                 pcall(FirePerIconOnReady, frame, trackerKey, slotIndex)
             end
+            frame._TUI_cdDetectedAt = nil
         elseif not wasOnCooldown and isOnCooldown then
             -- Cooldown started → On Cooldown per-icon alert
+            frame._TUI_cdDetectedAt = GetTime()
             if HasCDPerIconAlert(trackerKey, slotIndex, "onCooldown") then
                 pcall(FirePerIconOnCooldown, frame, trackerKey, slotIndex)
             end
