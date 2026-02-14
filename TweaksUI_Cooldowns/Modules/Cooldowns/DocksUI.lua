@@ -1969,8 +1969,8 @@ function DocksUI:Show()
     if TUICD.MultiTrackerUI and TUICD.MultiTrackerUI.HideAllPanels then
         TUICD.MultiTrackerUI:HideAllPanels()
     end
-    if TUICD.Bars and TUICD.Bars.HideAllPanels then
-        TUICD.Bars:HideAllPanels()
+    if TUICD.BuffBarsUI and TUICD.BuffBarsUI:IsShown() then
+        TUICD.BuffBarsUI:Hide()
     end
     
     if not panel then

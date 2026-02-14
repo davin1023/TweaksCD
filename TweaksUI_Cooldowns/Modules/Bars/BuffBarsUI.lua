@@ -1792,10 +1792,7 @@ end
 function BuffBarsUI:CreatePanel()
     if mainPanel then return mainPanel end
 
-    local dockTo = TUICD.BarsHub and TUICD.BarsHub:GetPanel()
-    if not dockTo then
-        dockTo = TUICD.Settings and TUICD.Settings.hubPanel
-    end
+    local dockTo = TUICD.Settings and TUICD.Settings.hubPanel
 
     mainPanel = CreateFrame("Frame", "TUICD_BuffBarsPanel", UIParent, "BackdropTemplate")
     mainPanel:SetSize(PANEL_WIDTH, PANEL_HEIGHT)
@@ -2029,11 +2026,8 @@ function BuffBarsUI:Show()
         self:CreatePanel()
     end
 
-    -- Dock to BarsHub
-    local dockTo = TUICD.BarsHub and TUICD.BarsHub:GetPanel()
-    if not dockTo then
-        dockTo = TUICD.Settings and TUICD.Settings.hubPanel
-    end
+    -- Dock to main hub
+    local dockTo = TUICD.Settings and TUICD.Settings.hubPanel
     if dockTo and mainPanel then
         mainPanel:ClearAllPoints()
         mainPanel:SetPoint("TOPLEFT", dockTo, "TOPRIGHT", 0, 0)

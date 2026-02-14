@@ -94,13 +94,13 @@ local function HideAllPanels()
     end
 end
 
--- Close all module sub-hubs (Cooldowns, BarsHub, PersonalResources, etc.)
+-- Close all module sub-hubs (Cooldowns, PersonalResources, etc.)
 local function CloseAllModuleHubs()
     if TUICD.Cooldowns and TUICD.Cooldowns.HideAllPanels then
         TUICD.Cooldowns:HideAllPanels()
     end
-    if TUICD.BarsHub and TUICD.BarsHub:IsShown() then
-        TUICD.BarsHub:Hide()
+    if TUICD.BuffBarsUI and TUICD.BuffBarsUI.Hide then
+        TUICD.BuffBarsUI:Hide()
     end
     if TUICD.PersonalResources and TUICD.PersonalResources.HideAllPanels then
         TUICD.PersonalResources:HideAllPanels()
@@ -189,13 +189,13 @@ function Settings:CreatePanel()
     end)
     yOffset = yOffset - BUTTON_HEIGHT - BUTTON_SPACING
     
-    -- Timer Bars Button
+    -- Buff Bars Button
     local barsBtn = CreateFrame("Button", nil, hubPanel, "UIPanelButtonTemplate")
     barsBtn:SetPoint("TOPLEFT", 15, yOffset)
     barsBtn:SetSize(BUTTON_WIDTH, BUTTON_HEIGHT)
-    barsBtn:SetText("Timer Bars")
+    barsBtn:SetText("Buff Bars")
     barsBtn:SetScript("OnClick", function()
-        self:OpenBarsPanel()
+        self:OpenBuffBarsPanel()
     end)
     yOffset = yOffset - BUTTON_HEIGHT - BUTTON_SPACING
     
@@ -351,8 +351,8 @@ end
 -- ============================================================
 function Settings:OpenCooldownsPanel()
     -- Close other module hubs first
-    if TUICD.BarsHub and TUICD.BarsHub:IsShown() then
-        TUICD.BarsHub:Hide()
+    if TUICD.BuffBarsUI and TUICD.BuffBarsUI:IsShown() then
+        TUICD.BuffBarsUI:Hide()
     end
     if TUICD.PersonalResources and TUICD.PersonalResources.HideAllPanels then
         TUICD.PersonalResources:HideAllPanels()
@@ -373,8 +373,8 @@ function Settings:OpenPersonalResourcesPanel()
     if TUICD.Cooldowns and TUICD.Cooldowns.HideAllPanels then
         TUICD.Cooldowns:HideAllPanels()
     end
-    if TUICD.BarsHub and TUICD.BarsHub:IsShown() then
-        TUICD.BarsHub:Hide()
+    if TUICD.BuffBarsUI and TUICD.BuffBarsUI:IsShown() then
+        TUICD.BuffBarsUI:Hide()
     end
     -- Use the PersonalResources module's built-in settings panel
     if TUICD.PersonalResources and TUICD.PersonalResources.ToggleSettingsPanel then
@@ -385,9 +385,9 @@ function Settings:OpenPersonalResourcesPanel()
 end
 
 -- ============================================================
--- OPEN BARS PANEL (opens BarsHub sub-hub)
+-- OPEN BUFF BARS PANEL (opens BuffBarsUI directly, docked to main hub)
 -- ============================================================
-function Settings:OpenBarsPanel()
+function Settings:OpenBuffBarsPanel()
     -- Close other module hubs first
     if TUICD.Cooldowns and TUICD.Cooldowns.HideAllPanels then
         TUICD.Cooldowns:HideAllPanels()
@@ -396,18 +396,14 @@ function Settings:OpenBarsPanel()
         TUICD.PersonalResources:HideAllPanels()
     end
 
-    if TUICD.BarsHub then
-        if TUICD.BarsHub:IsShown() then
-            TUICD.BarsHub:Hide()
+    if TUICD.BuffBarsUI then
+        if TUICD.BuffBarsUI:IsShown() then
+            TUICD.BuffBarsUI:Hide()
         else
-            TUICD.BarsHub:Show()
+            TUICD.BuffBarsUI:Show()
         end
     else
-        -- Fallback: open BarsUI directly (BarsHub not loaded)
-        TUICD:PrintError("BarsHub not loaded - check TOC load order")
-        if TUICD.Bars and TUICD.Bars.TogglePanel then
-            TUICD.Bars:TogglePanel()
-        end
+        TUICD:PrintError("BuffBarsUI not loaded - check TOC load order")
     end
 end
 

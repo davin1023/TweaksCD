@@ -9,7 +9,7 @@ local addonName, TUICD = ...
 TUICD.CooldownHighlights = TUICD.CooldownHighlights or {}
 local CooldownHighlights = TUICD.CooldownHighlights
 
-local RadialSwipe = TUICD.RadialSwipe or {}
+-- RadialSwipe removed (Midnight API incompatible)
 
 
 -- ============================================================================
@@ -281,16 +281,8 @@ local function GetDB(trackerKey)
     -- Dock assignment (state-independent) - which dock (1-4) icon is assigned to
     if not db.dockAssignment then db.dockAssignment = {} end
     
-    -- Radial swipe settings (state-independent)
-    if not db.radialSwipe then db.radialSwipe = {} end
-    if not db.radialSwipe.enabled then db.radialSwipe.enabled = {} end
-    if not db.radialSwipe.displayState then db.radialSwipe.displayState = {} end
-    if not db.radialSwipe.texturePath then db.radialSwipe.texturePath = {} end
-    if not db.radialSwipe.color then db.radialSwipe.color = {} end
-    if not db.radialSwipe.scale then db.radialSwipe.scale = {} end
-    if not db.radialSwipe.offsetX then db.radialSwipe.offsetX = {} end
-    if not db.radialSwipe.offsetY then db.radialSwipe.offsetY = {} end
-    if not db.radialSwipe.rotation then db.radialSwipe.rotation = {} end
+    -- Radial swipe removed (Midnight API incompatible) - clean up old data
+    if db.radialSwipe then db.radialSwipe = nil end
     
     -- Custom icon texture overrides (spell ID-based, persists across reordering)
     if not db.customIconTexture then db.customIconTexture = {} end  -- [spellID] = texturePath
@@ -558,14 +550,6 @@ local PER_ICON_NESTED = {
     "inactive.customAspectW",
     "inactive.customAspectH",
     "inactive.show",
-    "radialSwipe.enabled",
-    "radialSwipe.displayState",
-    "radialSwipe.texturePath",
-    "radialSwipe.color",
-    "radialSwipe.scale",
-    "radialSwipe.offsetX",
-    "radialSwipe.offsetY",
-    "radialSwipe.rotation",
 }
 
 -- Check if a key looks like a slotIndex (small integer 1-50) vs spellID (large number)
@@ -1602,18 +1586,6 @@ local function CreateHighlightFrame(trackerKey, slotIndex)
     end
     
 
-    -- Create radial swipe for cooldown animation (matches DebugTest configuration)
-    RadialSwipe:InitializeRadialSwipe(frame, size)
-    
-    -- Apply custom texture from DB if set, otherwise use default
-    local radialTexture = CooldownHighlights:GetState(trackerKey, "radialSwipe.texturePath." .. slotIndex)
-    if radialTexture and radialTexture ~= "" then
-        frame.radialSwipe:SetTexture(radialTexture)
-    end
-    
-    
-    -- TODO: implement the cooldown swipe considering performance - frame:SetScript("OnUpdate", function(self) RadialSwipe:OnUpdate(self) end)
-
     -- Cooldown spiral (uses CooldownFrameTemplate which includes countdown text)
     frame.cooldown = CreateFrame("Cooldown", frameName .. "_Cooldown", frame, "CooldownFrameTemplate")
     frame.Cooldown = frame.cooldown  -- Masque expects .Cooldown
@@ -2206,37 +2178,9 @@ function CooldownHighlights:ApplyVisibilityConditions(trackerKey, slotIndex, isO
             end)
         end
         
-        -- Update radial swipe visibility when icon is shown
-        -- (without this, a previously-visible radial swipe stays visible
-        -- even when the user's display state is set to "never")
-        CooldownHighlights:UpdateRadialSwipeVisbility(trackerKey, slotIndex, isOnCooldown, frame)
     else
-        -- Only check radial swipe if user hasn't explicitly hidden this state
-        -- If user unchecked the visibility checkbox, don't show anything (including radial swipe)
-        local showRadialSwipe = false
-        if not userHiddenState then
-            showRadialSwipe = CooldownHighlights:UpdateRadialSwipeVisbility(trackerKey, slotIndex, isOnCooldown, frame)
-        else
-            -- User explicitly hid this state - also hide radial swipe
-            if frame.radialSwipe then
-                frame.radialSwipe:Hide()
-            end
-        end
-        
-        -- The conditions above have already determined if the radial should be visible or not        
-        if showRadialSwipe and not shouldHideEverything then -- if the main container is hidden, than the radial swipe should also be hidden
-            -- Hide icon and backdrop but keep frame visible for radial swipe
-            frame.icon:Hide()
-            -- Hide backdrop by making it fully transparent
-            if not frame._TUI_useMasque then
-                frame:SetBackdropColor(0, 0, 0, 0)
-                frame:SetBackdropBorderColor(0, 0, 0, 0)
-            end
-            frame:Show()
-        else
-            -- Hide entire frame
-            frame:Hide()
-        end
+        -- Hide entire frame
+        frame:Hide()
     end
     
     -- =========================================================================
@@ -2338,17 +2282,12 @@ function CooldownHighlights:UpdateHighlightFrame(trackerKey, slotIndex)
     
     -- State changed or first run - update frame
     frame._TUI_currentCooldownState = isOnCooldown
-    frame.isOnCooldown = isOnCooldown  -- Track for RadialSwipe exit condition
+    frame.isOnCooldown = isOnCooldown
     
-    -- Check if we're transitioning TO cooldown state (start radial swipe animation)
+    -- Check if we're transitioning TO cooldown state
     if stateChanged and isOnCooldown then
-        -- Reset cooldown complete flag and start recursive animation
-        -- (only if display state would actually show the swipe during cooldown)
+        -- Reset cooldown complete flag
         frame.cooldown._TUI_cooldownComplete = false
-        local radialDisplayState = CooldownHighlights:GetState(trackerKey, "radialSwipe.displayState." .. slotIndex) or "always"
-        if radialDisplayState == "always" or radialDisplayState == "cooldown" then
-            RadialSwipe:OnUpdate(frame)  -- Starts self-recursive animation loop
-        end
         
         -- Apply cooldown text settings if they've changed since last cooldown
         if frame._TUI_cooldownSettingsDirty and frame._TUI_cooldownTextSettings then
@@ -2960,91 +2899,20 @@ function CooldownHighlights:StopHideEnforcement(trackerKey)
     hideEnforcementHooks[trackerKey] = nil
 end
 
-function CooldownHighlights:UpdateRadialSwipeVisbility(trackerKey, slotIndex, isOnCooldown, frame)
-    -- Update radial swipe visibility based on enabled flag and display state setting
-    local showRadialSwipe = false
-    if frame.radialSwipe then
-        -- Master enable/disable check - if disabled, always hide
-        local radialEnabled = CooldownHighlights:GetState(trackerKey, "radialSwipe.enabled." .. slotIndex)
-        if radialEnabled == false then
-            frame.radialSwipe:Hide()
-            return false
-        end
-        
-        local radialDisplayState = CooldownHighlights:GetState(trackerKey, "radialSwipe.displayState." .. slotIndex) or "always"
-        
-        if radialDisplayState == "always" then
-            -- Always show (full texture when ready, animated swipe when on cooldown)
-            showRadialSwipe = true
-        elseif radialDisplayState == "cooldown" then
-            -- Only show during cooldown (animated swipe)
-            showRadialSwipe = isOnCooldown
-        elseif radialDisplayState == "available" then
-            -- Only show when ready/available (full texture)
-            showRadialSwipe = not isOnCooldown
-        elseif radialDisplayState == "never" then
-            -- Never show
-            showRadialSwipe = false
-        end
-        
-        
-        if showRadialSwipe then
-            frame.radialSwipe:Show()
-        else
-            frame.radialSwipe:Hide()
-        end
-    end
-    return showRadialSwipe
-end
-
 function CooldownHighlights:UpdateFrameConfigurationChanges(trackerKey, slotIndex, db)
     local isOnCooldown = CalculateFrameCooldown(trackerKey, slotIndex)
     local enabled = CooldownHighlights:GetState(trackerKey, "enabled." .. slotIndex)
     CooldownHighlights:EnableHighlight(trackerKey, slotIndex, enabled)
 
-    --===========================
-    -- Apply RadialSwipe settings
-    --===========================
-    --apply modified texture
     local frame = highlightFrames[trackerKey] and highlightFrames[trackerKey][slotIndex]
     if (not frame) then
         return
     end
-    if frame and frame.radialSwipe and frame.radialSwipe.SetTexture then
-        local path = db and db.radialSwipe.texturePath[slotIndex] or ""
-        if path and path ~= "" then
-            frame.radialSwipe:SetTexture(path)
-        else
-            -- Reset to default when cleared
-            frame.radialSwipe:SetTexture("Interface\\AddOns\\TweaksUI_Cooldowns\\Media\\Textures\\square_outline.tga")
-        end
-    end
-    --Apply Size
-    local radialScale = CooldownHighlights:GetState(trackerKey, "radialSwipe.scale." .. slotIndex) or 1.0
-    local width, height = frame:GetSize()
-    local swipeSize = math.max(width, height)  -- Use the larger dimension as base
-    if frame.radialSwipe.SetSize then
-        frame.radialSwipe:SetSize(swipeSize * radialScale, swipeSize * radialScale)
-    end
-    -- Apply color
-    local color = CooldownHighlights:GetState(trackerKey, "radialSwipe.color." .. slotIndex) or {1, 1, 1, 1}
-    if color and frame.radialSwipe.SetColor then
-        frame.radialSwipe:SetColor(color[1] or 1, color[2] or 1, color[3] or 1, color[4] or 1)
-    end
-    -- Apply position offset
-    local offsetX = CooldownHighlights:GetState(trackerKey, "radialSwipe.offsetX." .. slotIndex) or 0
-    local offsetY = CooldownHighlights:GetState(trackerKey, "radialSwipe.offsetY." .. slotIndex) or 0
-    if frame.radialSwipe.SetOffset then
-        frame.radialSwipe:SetOffset(offsetX, offsetY)
-    end
-    -- Apply rotation
-    local rotation = CooldownHighlights:GetState(trackerKey, "radialSwipe.rotation." .. slotIndex) or 0
-    if frame.radialSwipe.SetRotation then
-        frame.radialSwipe:SetRotation(rotation)
-    end
 
-
-    CooldownHighlights:UpdateRadialSwipeVisbility(trackerKey, slotIndex, isOnCooldown, frame)
+    -- Hide any leftover radial swipe textures from old profiles
+    if frame.radialSwipe and frame.radialSwipe.Hide then
+        pcall(function() frame.radialSwipe:Hide() end)
+    end
 
     --===========================
     -- Apply Spell Icon settings

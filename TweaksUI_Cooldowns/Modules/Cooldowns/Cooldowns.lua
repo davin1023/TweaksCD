@@ -2762,6 +2762,12 @@ local function SetCustomEntryEnabled(index, enabled)
     if index < 1 or index > #entries then return false end
     
     entries[index].enabled = enabled
+    
+    -- Rebuild icons so change takes effect immediately
+    if Cooldowns.RebuildCustomTrackerIcons then
+        Cooldowns.RebuildCustomTrackerIcons()
+    end
+    
     return true
 end
 
@@ -2774,6 +2780,11 @@ local function MoveCustomEntry(fromIndex, toIndex)
     
     local entry = table.remove(entries, fromIndex)
     table.insert(entries, toIndex, entry)
+    
+    -- Rebuild icons so reorder takes effect immediately
+    if Cooldowns.RebuildCustomTrackerIcons then
+        Cooldowns.RebuildCustomTrackerIcons()
+    end
     
     dprint(string.format("Moved entry from %d to %d", fromIndex, toIndex))
     return true
@@ -4253,6 +4264,8 @@ end
 Cooldowns.GetCurrentSpecEntries = GetCurrentSpecEntries
 Cooldowns.AddCustomEntry = AddCustomEntry
 Cooldowns.RemoveCustomEntry = RemoveCustomEntry
+Cooldowns.SetCustomEntryEnabled = SetCustomEntryEnabled
+Cooldowns.MoveCustomEntry = MoveCustomEntry
 Cooldowns.RebuildCustomTrackerIcons = RebuildCustomTrackerIcons
 Cooldowns.customTrackerIcons = customTrackerIcons
 
@@ -5534,11 +5547,8 @@ function Cooldowns:ToggleSettingsPanel(parent)
         if TUICD.MultiTrackerUI and TUICD.MultiTrackerUI.HideAllPanels then
             TUICD.MultiTrackerUI:HideAllPanels()
         end
-        if TUICD.Bars and TUICD.Bars.HideAllPanels then
-            TUICD.Bars:HideAllPanels()
-        end
-        if TUICD.BarsHub and TUICD.BarsHub:IsShown() then
-            TUICD.BarsHub:Hide()
+        if TUICD.BuffBarsUI and TUICD.BuffBarsUI:IsShown() then
+            TUICD.BuffBarsUI:Hide()
         end
         
         if parent then
@@ -5583,9 +5593,9 @@ function Cooldowns:TogglePanel(trackerKey)
     if TUICD.MultiTrackerUI and TUICD.MultiTrackerUI.HideAllPanels then
         TUICD.MultiTrackerUI:HideAllPanels()
     end
-    -- Also hide Bars panels
-    if TUICD.Bars and TUICD.Bars.HideAllPanels then
-        TUICD.Bars:HideAllPanels()
+    -- Also hide Buff Bars panel
+    if TUICD.BuffBarsUI and TUICD.BuffBarsUI:IsShown() then
+        TUICD.BuffBarsUI:Hide()
     end
     
     if settingsPanels[trackerKey] then
@@ -9286,14 +9296,6 @@ function Cooldowns:BuildPerIconTab(parent, trackerType)
     local currentState = "active"
     local slotRows = {}
     
-    -- Radial swipe display state options
-    local RADIAL_DISPLAY_OPTIONS = {
-        { label = "Show Always", value = "always" },
-        { label = "Show Only on Cooldown", value = "cooldown" },
-        { label = "Show Only when Available", value = "available" },
-        { label = "Show Never", value = "never" },
-    }
-    
     -- Header
     local header = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     header:SetPoint("TOPLEFT", 5, y)
@@ -9585,123 +9587,10 @@ function Cooldowns:BuildPerIconTab(parent, trackerType)
     controls.defaultSwipeLabel:Hide()
 
     -- =====================================================================
-    -- Radial Swipe Section SECTION
-    -- =====================================================================
-
-    controls.RadialHeader = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    controls.RadialHeader:SetPoint("TOPLEFT", controls.defaultSwipeCheck, "BOTTOMLEFT", 0, -20)
-    controls.RadialHeader:SetText("|cff00ccffRadial Swipe|r")
-    controls.RadialHeader:Hide()
-    
-    -- Display state dropdown
-    controls.radialDisplayLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    controls.radialDisplayLabel:SetPoint("TOPLEFT", controls.RadialHeader, "BOTTOMLEFT", 0, -10)
-    controls.radialDisplayLabel:SetText("Display State:")
-    controls.radialDisplayLabel:SetTextColor(0.8, 0.8, 0.8)
-    controls.radialDisplayLabel:Hide()
-    
-    controls.radialDisplayDropdown = CreateFrame("Frame", "TweaksCD_" .. trackerType .. "_RadialDisplayDropdown", controlsPanel, "UIDropDownMenuTemplate")
-    controls.radialDisplayDropdown:SetPoint("LEFT", controls.radialDisplayLabel, "RIGHT", -10, 0)
-    UIDropDownMenu_SetWidth(controls.radialDisplayDropdown, 140)
-    controls.radialDisplayDropdown:Hide()
-    
-    -- Custom texture path
-    controls.radialTextureLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    controls.radialTextureLabel:SetPoint("TOPLEFT", controls.radialDisplayLabel, "BOTTOMLEFT", 0, -10)
-    controls.radialTextureLabel:SetText("Custom Texture Path:")
-    controls.radialTextureLabel:SetTextColor(0.8, 0.8, 0.8)
-    controls.radialTextureLabel:Hide()
-    
-    controls.radialTextureBox = CreateFrame("EditBox", "TweaksCD_" .. trackerType .. "_RadialTextureBox", controlsPanel, "InputBoxTemplate")
-    controls.radialTextureBox:SetPoint("LEFT", controls.radialTextureLabel, "RIGHT", 10, 0)
-    controls.radialTextureBox:SetSize(200, 18)
-    controls.radialTextureBox:SetAutoFocus(false)
-    controls.radialTextureBox:SetMaxLetters(200)
-    controls.radialTextureBox:Hide()
-    
-    -- Color picker
-    controls.radialColorLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    controls.radialColorLabel:SetPoint("TOPLEFT", controls.radialTextureLabel, "BOTTOMLEFT", 0, -10)
-    controls.radialColorLabel:SetText("Color:")
-    controls.radialColorLabel:SetTextColor(0.8, 0.8, 0.8)
-    controls.radialColorLabel:Hide()
-    
-    controls.radialColorBtn = CreateFrame("Button", "TweaksCD_" .. trackerType .. "_RadialColorBtn", controlsPanel, "BackdropTemplate")
-    controls.radialColorBtn:SetPoint("LEFT", controls.radialColorLabel, "RIGHT", 10, 0)
-    controls.radialColorBtn:SetSize(24, 16)
-    controls.radialColorBtn:SetBackdrop({bgFile = "Interface\\Buttons\\WHITE8x8", edgeFile = "Interface\\Buttons\\WHITE8x8", edgeSize = 1})
-    controls.radialColorBtn:SetBackdropColor(1, 1, 1, 1)
-    controls.radialColorBtn:SetBackdropBorderColor(0.3, 0.3, 0.3, 1)
-    controls.radialColorBtn:Hide()
-    
-    -- Scale input
-    controls.radialScaleLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    controls.radialScaleLabel:SetPoint("TOPLEFT", controls.radialColorLabel, "BOTTOMLEFT", 0, -10)
-    controls.radialScaleLabel:SetText("Scale:")
-    controls.radialScaleLabel:SetTextColor(0.8, 0.8, 0.8)
-    controls.radialScaleLabel:Hide()
-    
-    controls.radialScaleBox = CreateFrame("EditBox", "TweaksCD_" .. trackerType .. "_RadialScaleBox", controlsPanel, "InputBoxTemplate")
-    controls.radialScaleBox:SetPoint("LEFT", controls.radialScaleLabel, "RIGHT", 10, 0)
-    controls.radialScaleBox:SetSize(50, 18)
-    controls.radialScaleBox:SetAutoFocus(false)
-    controls.radialScaleBox:SetMaxLetters(5)
-    controls.radialScaleBox:Hide()
-    
-    -- Position offset controls
-    controls.radialPositionLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    controls.radialPositionLabel:SetPoint("TOPLEFT", controls.radialScaleLabel, "BOTTOMLEFT", 0, -10)
-    controls.radialPositionLabel:SetText("Shift Position:")
-    controls.radialPositionLabel:SetTextColor(0.8, 0.8, 0.8)
-    controls.radialPositionLabel:Hide()
-    
-    -- Up arrow button
-    controls.radialUpBtn = CreateFrame("Button", "TweaksCD_" .. trackerType .. "_RadialUpBtn", controlsPanel, "UIPanelButtonTemplate")
-    controls.radialUpBtn:SetPoint("LEFT", controls.radialPositionLabel, "RIGHT", 30, 0)
-    controls.radialUpBtn:SetSize(20, 20)
-    controls.radialUpBtn:SetText("↑")
-    controls.radialUpBtn:Hide()
-    
-    -- Down arrow button
-    controls.radialDownBtn = CreateFrame("Button", "TweaksCD_" .. trackerType .. "_RadialDownBtn", controlsPanel, "UIPanelButtonTemplate")
-    controls.radialDownBtn:SetPoint("TOP", controls.radialUpBtn, "BOTTOM", 0, -2)
-    controls.radialDownBtn:SetSize(20, 20)
-    controls.radialDownBtn:SetText("↓")
-    controls.radialDownBtn:Hide()
-    
-    -- Left arrow button
-    controls.radialLeftBtn = CreateFrame("Button", "TweaksCD_" .. trackerType .. "_RadialLeftBtn", controlsPanel, "UIPanelButtonTemplate")
-    controls.radialLeftBtn:SetPoint("RIGHT", controls.radialUpBtn, "LEFT", -2, -11)
-    controls.radialLeftBtn:SetSize(20, 20)
-    controls.radialLeftBtn:SetText("←")
-    controls.radialLeftBtn:Hide()
-    
-    -- Right arrow button
-    controls.radialRightBtn = CreateFrame("Button", "TweaksCD_" .. trackerType .. "_RadialRightBtn", controlsPanel, "UIPanelButtonTemplate")
-    controls.radialRightBtn:SetPoint("LEFT", controls.radialUpBtn, "RIGHT", 2, -11)
-    controls.radialRightBtn:SetSize(20, 20)
-    controls.radialRightBtn:SetText("→")
-    controls.radialRightBtn:Hide()
-    
-    -- Rotation input
-    controls.radialRotationLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    controls.radialRotationLabel:SetPoint("TOPLEFT", controls.radialPositionLabel, "BOTTOMLEFT", 0, -32)
-    controls.radialRotationLabel:SetText("Rotate Texture (degrees):")
-    controls.radialRotationLabel:SetTextColor(1, 1, 1)
-    controls.radialRotationLabel:Hide()
-    
-    controls.radialRotationBox = CreateFrame("EditBox", "TweaksCD_" .. trackerType .. "_RadialRotationBox", controlsPanel, "InputBoxTemplate")
-    controls.radialRotationBox:SetPoint("LEFT", controls.radialRotationLabel, "RIGHT", 10, 0)
-    controls.radialRotationBox:SetSize(50, 18)
-    controls.radialRotationBox:SetAutoFocus(false)
-    controls.radialRotationBox:SetMaxLetters(4)
-    controls.radialRotationBox:Hide()
-    
-    -- =====================================================================
     -- CUSTOM ICON TEXTURE SECTION (spell ID-based)
     -- =====================================================================
     controls.iconTextureHeader = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    controls.iconTextureHeader:SetPoint("TOPLEFT", controls.radialRotationLabel, "BOTTOMLEFT", 0, -20)
+    controls.iconTextureHeader:SetPoint("TOPLEFT", controls.defaultSwipeCheck, "BOTTOMLEFT", 0, -20)
     controls.iconTextureHeader:SetText("|cffffcc00Custom Icon Texture|r")
     controls.iconTextureHeader:Hide()
     
@@ -10088,13 +9977,6 @@ function Cooldowns:BuildPerIconTab(parent, trackerType)
         controls.opacityLabel, controls.opacitySlider, controls.opacityValue,
         controls.desatCheck, controls.desatLabel,
         controls.defaultSwipeCheck, controls.defaultSwipeLabel,
-        controls.RadialHeader, controls.radialDisplayLabel, controls.radialDisplayDropdown,
-        controls.radialTextureLabel, controls.radialTextureBox,
-        controls.radialColorLabel, controls.radialColorBtn,
-        controls.radialScaleLabel, controls.radialScaleBox,
-        controls.radialPositionLabel, controls.radialUpBtn, controls.radialDownBtn,
-        controls.radialLeftBtn, controls.radialRightBtn,
-        controls.radialRotationLabel, controls.radialRotationBox,
         controls.iconTextureHeader, controls.iconTextureLabel, controls.iconTextureBox,
         controls.iconColorLabel, controls.iconColorBtn,
         controls.dockHeader, controls.dockLabel, controls.dockDropdown,
@@ -10714,15 +10596,6 @@ function Cooldowns:BuildPerIconTab(parent, trackerType)
             })
         end)
 
-        -- Initialize radial display dropdown
-        local radialDisplayState = CooldownHighlights:GetState(customTrackerKey, "radialSwipe.displayState." .. slotIndex) or "always"
-        InitDropdown(controls.radialDisplayDropdown, RADIAL_DISPLAY_OPTIONS, radialDisplayState, function(state)
-            CooldownHighlights:UpdateState(customTrackerKey, { slotIndex = slotIndex }, {
-                statePath = "radialSwipe.displayState." .. slotIndex,
-                value = state
-            })
-        end)
-        
         -- Initialize dock dropdown
         local currentDock = CooldownHighlights:GetState(customTrackerKey, "dockAssignment." .. slotIndex) or 0
         UIDropDownMenu_Initialize(controls.dockDropdown, function(self, level)
@@ -10773,34 +10646,6 @@ function Cooldowns:BuildPerIconTab(parent, trackerType)
             UIDropDownMenu_SetText(controls.dockDropdown, "None")
         end
         
-        
-        -- Radial swipe settings (state-independent)
-        local radialTexturePath = CooldownHighlights:GetState(customTrackerKey, "radialSwipe.texturePath." .. slotIndex)
-        local radialColor = CooldownHighlights:GetState(customTrackerKey, "radialSwipe.color." .. slotIndex) or {1, 1, 1, 1}
-        local radialScale = CooldownHighlights:GetState(customTrackerKey, "radialSwipe.scale." .. slotIndex) or 1.0
-        local radialOffsetX = CooldownHighlights:GetState(customTrackerKey, "radialSwipe.offsetX." .. slotIndex) or 0
-        local radialOffsetY = CooldownHighlights:GetState(customTrackerKey, "radialSwipe.offsetY." .. slotIndex) or 0
-        local radialRotation = CooldownHighlights:GetState(customTrackerKey, "radialSwipe.rotation." .. slotIndex) or 0
-        
-        -- Initialize radial display dropdown
-        InitDropdown(controls.radialDisplayDropdown, RADIAL_DISPLAY_OPTIONS, radialDisplayState, function(state)
-            CooldownHighlights:UpdateState(customTrackerKey, { slotIndex = slotIndex }, {
-                statePath = "radialSwipe.displayState." .. slotIndex,
-                value = state
-            })
-        end)
-        
-        -- Set radial texture path
-        controls.radialTextureBox:SetText(radialTexturePath or "")
-        
-        -- Set radial color
-        controls.radialColorBtn:SetBackdropColor(radialColor[1] or 1, radialColor[2] or 1, radialColor[3] or 1, 1)
-        
-        -- Set radial scale
-        controls.radialScaleBox:SetText(tostring(radialScale))
-        
-        -- Set radial rotation
-        controls.radialRotationBox:SetText(tostring(radialRotation))
         
         -- Custom icon texture (spell ID-based)
         local iconSpellID = nil
@@ -11131,120 +10976,6 @@ function Cooldowns:BuildPerIconTab(parent, trackerType)
                 value = value
             })
             Cooldowns:SaveSettings()
-        end)
-        
-        -- Radial swipe handlers
-        controls.radialTextureBox:SetScript("OnEnterPressed", function(self)
-            self:ClearFocus()
-            CooldownHighlights:UpdateState(customTrackerKey, {slotIndex = slotIndex}, {
-                statePath = "radialSwipe.texturePath." .. slotIndex,
-                value = self:GetText()
-            })
-        end)
-        controls.radialTextureBox:SetScript("OnEditFocusLost", function(self)
-            CooldownHighlights:UpdateState(customTrackerKey, {slotIndex = slotIndex}, {
-                statePath = "radialSwipe.texturePath." .. slotIndex,
-                value = self:GetText()
-            })
-        end)
-        
-        controls.radialColorBtn:SetScript("OnClick", function()
-            local r, g, b = controls.radialColorBtn:GetBackdropColor()
-            local info = {
-                swatchFunc = function()
-                    local r, g, b = ColorPickerFrame:GetColorRGB()
-                    controls.radialColorBtn:SetBackdropColor(r, g, b, 1)
-                    CooldownHighlights:UpdateState(customTrackerKey, {slotIndex = slotIndex}, {
-                        statePath = "radialSwipe.color." .. slotIndex,
-                        value = {r, g, b, 1}
-                    })
-                end,
-                cancelFunc = function(prev)
-                    controls.radialColorBtn:SetBackdropColor(prev.r, prev.g, prev.b, 1)
-                    CooldownHighlights:UpdateState(customTrackerKey, {slotIndex = slotIndex}, {
-                        statePath = "radialSwipe.color." .. slotIndex,
-                        value = {prev.r, prev.g, prev.b, 1}
-                    })
-                end,
-                r = r,
-                g = g,
-                b = b,
-            }
-            ColorPickerFrame:SetupColorPickerAndShow(info)
-        end)
-        
-        controls.radialScaleBox:SetScript("OnEnterPressed", function(self)
-            self:ClearFocus()
-            local scale = tonumber(self:GetText()) or 1.0
-            if scale < 0.1 then scale = 0.1 end
-            if scale > 5.0 then scale = 5.0 end
-            self:SetText(tostring(scale))
-            CooldownHighlights:UpdateState(customTrackerKey, {slotIndex = slotIndex}, {
-                statePath = "radialSwipe.scale." .. slotIndex,
-                value = scale
-            })
-        end)
-        controls.radialScaleBox:SetScript("OnEditFocusLost", function(self)
-            local scale = tonumber(self:GetText()) or 1.0
-            if scale < 0.1 then scale = 0.1 end
-            if scale > 5.0 then scale = 5.0 end
-            self:SetText(tostring(scale))
-            CooldownHighlights:UpdateState(customTrackerKey, {slotIndex = slotIndex}, {
-                statePath = "radialSwipe.scale." .. slotIndex,
-                value = scale
-            })
-        end)
-        
-        -- Position offset arrow button handlers
-        controls.radialUpBtn:SetScript("OnClick", function()
-            local currentY = CooldownHighlights:GetState(customTrackerKey, "radialSwipe.offsetY." .. slotIndex)
-            CooldownHighlights:UpdateState(customTrackerKey, {slotIndex = slotIndex}, {
-                statePath = "radialSwipe.offsetY." .. slotIndex,
-                value = currentY + 1
-            })
-        end)
-        
-        controls.radialDownBtn:SetScript("OnClick", function()
-            local currentY = CooldownHighlights:GetState(customTrackerKey, "radialSwipe.offsetY." .. slotIndex)
-            CooldownHighlights:UpdateState(customTrackerKey, {slotIndex = slotIndex}, {
-                statePath = "radialSwipe.offsetY." .. slotIndex,
-                value = currentY - 1
-            })
-        end)
-        
-        controls.radialLeftBtn:SetScript("OnClick", function()
-            local currentX = CooldownHighlights:GetState(customTrackerKey, "radialSwipe.offsetX." .. slotIndex)
-            CooldownHighlights:UpdateState(customTrackerKey, {slotIndex = slotIndex}, {
-                statePath = "radialSwipe.offsetX." .. slotIndex,
-                value = currentX - 1
-            })
-        end)
-        
-        controls.radialRightBtn:SetScript("OnClick", function()
-            local currentX = CooldownHighlights:GetState(customTrackerKey, "radialSwipe.offsetX." .. slotIndex)
-            CooldownHighlights:UpdateState(customTrackerKey, {slotIndex = slotIndex}, {
-                statePath = "radialSwipe.offsetX." .. slotIndex,
-                value = currentX + 1
-            })
-        end)
-        
-        -- Rotation input handlers
-        controls.radialRotationBox:SetScript("OnEnterPressed", function(self)
-            self:ClearFocus()
-            local rotation = tonumber(self:GetText()) or 0
-            self:SetText(tostring(rotation))
-            CooldownHighlights:UpdateState(customTrackerKey, {slotIndex = slotIndex}, {
-                statePath = "radialSwipe.rotation." .. slotIndex,
-                value = rotation
-            })
-        end)
-        controls.radialRotationBox:SetScript("OnEditFocusLost", function(self)
-            local rotation = tonumber(self:GetText()) or 0
-            self:SetText(tostring(rotation))
-            CooldownHighlights:UpdateState(customTrackerKey, {slotIndex = slotIndex}, {
-                statePath = "radialSwipe.rotation." .. slotIndex,
-                value = rotation
-            })
         end)
         
         -- Custom icon texture handlers (spell ID-based)

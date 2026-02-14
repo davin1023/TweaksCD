@@ -2,7 +2,7 @@
 ## Title: TweaksUI: Cooldowns
 ## Notes: Enhanced cooldown tracking with custom layouts, visibility controls, and proc alerts.|n|cff00ccffv3.1.0:|r Release prep and cleanup
 ## Author: Meltheran
-## Version: 3.1.5
+## Version: 3.3.0
 ## SavedVariables: TweaksUI_Cooldowns_DB
 ## SavedVariablesPerCharacter: TweaksUI_Cooldowns_CharDB
 ## OptionalDeps: Masque, LibSharedMedia-3.0, CMT, !TweaksUI
@@ -72,7 +72,6 @@ Modules\Layout\UIElements.lua
 # Note: CooldownClones must be loaded first as Cooldowns depends on CooldownContainers
 # ============================================================================
 Modules\Cooldowns\CooldownClones.lua
-Modules\Cooldowns\RadialSwipe.lua
 Modules\Cooldowns\SpellbookHelper.lua
 Modules\Cooldowns\Cooldowns.lua
 Modules\Cooldowns\Docks.lua
@@ -86,29 +85,12 @@ Modules\Cooldowns\MultiTrackerUI.lua
 Modules\Cooldowns\CDMScraper.lua
 
 # ============================================================================
-# Modules - Timer Bars
+# Modules - Buff Timer Bars
 # ============================================================================
-Modules\Bars\BarsHub.lua
-Modules\Bars\BarsData.lua
-Modules\Bars\BarsFrames.lua
-Modules\Bars\BarsDock.lua
-Modules\Bars\BarsUI.lua
 Modules\Bars\BuffBarsData.lua
 Modules\Bars\BuffBarsFrames.lua
 Modules\Bars\BuffBarsDock.lua
 Modules\Bars\BuffBarsUI.lua
-Modules\Bars\Bars.lua
-
-# ============================================================================
-# Modules - Timeline (DISABLED - secret anchors prevent combat positioning)
-# ============================================================================
-# Modules\Timeline\TimelineData.lua
-# Modules\Timeline\Timeline.lua
-# Modules\Timeline\TimelineFrames.lua
-# Modules\Timeline\TimelineUI.lua
-
-# Timeline Diagnostic (DISABLED - proper isOnGCD fix deployed)
-# TimelineDiag.lua
 
 # ============================================================================
 # Modules - Profiles UI

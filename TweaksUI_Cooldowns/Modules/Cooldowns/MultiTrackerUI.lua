@@ -1794,8 +1794,8 @@ function MultiTrackerUI:Show(hub)
     if TUICD.PersonalResources and TUICD.PersonalResources.HideAllPanels then
         TUICD.PersonalResources:HideAllPanels()
     end
-    if TUICD.Bars and TUICD.Bars.HideAllPanels then
-        TUICD.Bars:HideAllPanels()
+    if TUICD.BuffBarsUI and TUICD.BuffBarsUI:IsShown() then
+        TUICD.BuffBarsUI:Hide()
     end
     
     if not mainPanel then

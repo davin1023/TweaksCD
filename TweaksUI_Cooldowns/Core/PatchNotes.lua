@@ -14,59 +14,97 @@ local PatchNotes = TUICD.PatchNotes
 -- Update this when releasing new versions
 
 local PATCH_NOTES = [[
-|cffffcc00Version 3.1.5|r - On Ready Effects, Timeline & More
+|cffffcc00Version 3.3.0|r - Midnight Pre-Patch Survival Update
 
 
-|cffff8000NEW:|r |cff00ff00On Ready Effects|r
+|cffff0000A Note From the Developer|r
 
-Cooldown icons can now glow and pulse when they come
-off cooldown, giving you instant visual feedback that
-an ability is available again.
+We are two weeks from early access, and this past Tuesday
+Blizzard broke a lot of the addon. I've spent all week
+trying to get full functionality back, and it's not going
+to happen. I'd apologize for that, but honestly I'm just
+too tired of fighting the code.
 
-|cff87CEEBWhere to Find It:|r
-  Cooldown Trackers > Per-Icon tab > On Ready section
-  Timer Bars > Cooldowns/Buffs > On Ready tab
-  Timeline > On Ready tab
-
-|cff87CEEBFeatures:|r
-  - Glow effect when a spell becomes ready
-  - Three glow styles: Pixel Border, Shine Flash, Spell Glow
-  - Customizable glow color, speed, intensity, thickness
-  - Configurable glow duration and timing offset
-  - Pulse animation with adjustable scale and count
-  - Independent timing controls for glow and pulse
-  - Available across all tracker types and Timeline
+Here's where things stand:
 
 
-|cffff8000NEW:|r |cff00ff00Timeline Direction|r
+|cffff8000REMOVED:|r |cffff4444Cooldown Bars|r
 
-The Timeline module now supports right-to-left mode.
-Icons can slide from the right edge toward a ready zone
-on the left, or from the left edge toward a ready zone
-on the right.
-
-|cff87CEEBWhere to Find It:|r
-  Settings Hub > Timer Bars > Timeline > Layout tab
-
-|cff87CEEBFeatures:|r
-  - Right to Left: ready zone on left, icons slide left
-  - Left to Right: ready zone on right, icons slide right
-  - Tick marks and labels adjust to match direction
+Unfortunately gone. Blizzard has made all cooldown info
+completely secret during combat. I couldn't get bars
+working without them flickering on every GCD, which
+made them unusable.
 
 
-|cffff8000UPDATED:|r |cff00ff00Personal Resources - Extended Ranges|r
+|cffff8000REMOVED:|r |cffff4444Cooldown Timeline|r
 
-All Personal Resources sliders now support double the
-previous maximum values, making it easy to create larger
-health bars, power bars, and class power displays.
+Gone for the same reasons as Cooldown Bars. Secret
+values prevent the positioning and timing logic the
+timeline needs to function.
 
-|cff87CEEBDetails:|r
-  - Bar widths up to 800-1000 (was 400-500)
-  - Bar heights up to 60-100 (was 30-50)
-  - Font sizes up to 32-48 (was 16-24)
-  - Scales up to 4x (was 2x)
-  - All offset, spacing, and aura ranges doubled
-  - Manual entry allows any value beyond slider range
+
+|cffff8000REMOVED:|r |cffff4444Radial Sweep|r
+
+Also gone for the same secret value reasons.
+
+
+|cff00ff00WORKING:|r |cff87CEEBAlerts|r
+
+Alerts still work, but they're more limited now. I can't
+get offset timing to work, so no alerts 3 seconds before
+something comes off cooldown. You can still get alerts
+when things go on or come off cooldown. This includes
+buff alerts and custom sound alerts, as long as the buff
+is on the Cooldown Manager.
+
+
+|cff00ff00WORKING:|r |cff87CEEBCustom / Multi Trackers|r
+
+These work fine. All the info is secret, but I'm just
+passing it through to the icons without any comparisons,
+so they should continue to work. Fixed a bug where
+toggling individual icons didn't take effect until reload.
+
+
+|cff00ff00WORKING:|r |cff87CEEBOriginal Trackers|r
+
+Switched some things around under the hood and these
+should work better now.
+
+
+|cff00ff00IMPROVED:|r |cff87CEEBBuff Bars|r
+
+These actually work better than before. Got color-by-time-
+remaining working, and bars are now keyed by spell ID
+rather than slot index, which makes them more reliable.
+Buff Bars now open directly from the main settings hub.
+
+
+|cff00ff00WORKING:|r |cff87CEEBPer-Icon Settings|r
+
+Should work as before.
+
+
+|cffff8000Going Forward|r
+
+This week's changes were just one more time Blizzard
+moved the goal posts. The core of the addon still works
+and hopefully should continue to work, but if Blizzard
+decides to change even more this late, I probably won't
+be chasing it.
+
+After fighting with these changes all week, I'm pretty
+tired and pretty frustrated. I plan to keep the addon
+working in its current state, but unless I can find some
+joy in it again, new features are unlikely. Development
+is definitely going to slow down.
+
+I plan to spend some time with my family over the next
+couple of weeks, and then I plan on playing some Midnight.
+
+Thanks to everyone who has used the addon and to those
+who plan to keep using it. I'm not deleting it and I'm
+not abandoning it. Just taking a breather.
 
 
 |cff888888Type /tuicd patchnotes to see this again|r
